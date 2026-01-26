@@ -2,6 +2,11 @@
 
 Python connector for accessing SharePoint files via Microsoft Graph API.
 
+## Prerequisites
+
+- Azure AD App Registration with `Files.Read.All` application permission (admin consent required). If you need to upload files, you will also need to request `Files.ReadWrite.All` application permission.
+- Python 3.7+
+
 ## Setup
 
 ### 1. Install Dependencies
@@ -65,11 +70,6 @@ drives = connector.get_drives()
 files = connector.list_files(drive_id=drives[0]["id"])
 ```
 
-
-## Prerequisites
-
-- Azure AD App Registration with `Files.Read.All` application permission (admin consent required)
-- Python 3.7+
 
 ## File Object Structure
 
