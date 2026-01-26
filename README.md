@@ -1,51 +1,8 @@
 # SharePoint Connector
 
-Python connector for accessing SharePoint files via Microsoft Graph API, with Airbyte integration support.
+Python connector for accessing SharePoint files via Microsoft Graph API.
 
-## Airbyte Setup
-
-### Install Airbyte
-
-```bash
-./setup_airbyte.sh
-```
-
-The script installs `abctl` (Airbyte's CLI tool) and runs `abctl local install`. Installation may take up to 30 minutes.
-
-After installation, get your credentials:
-```bash
-abctl local credentials
-```
-
-Then access the dashboard at http://localhost:8000
-
-### Configure SharePoint Source
-
-1. **Sources** → **+ New source** → **Microsoft SharePoint**
-2. Switch to **Service Key Authentication**
-3. Enter credentials from your `.env` file:
-   - Tenant ID: `SHAREPOINT_TENANT_ID`
-   - Client ID: `SHAREPOINT_CLIENT_ID`
-   - Client secret: `SHAREPOINT_CLIENT_SECRET`
-   - User UPN: (enter your user principal name)
-4. Configure:
-   - Site URL: `SHAREPOINT_SITE_URL`
-   - Search Scope: `ALL`
-   - Start Date: `2024-01-01`
-5. Add streams (file types to sync)
-6. Click **Set up source**
-
-### Airbyte Commands
-
-```bash
-abctl local credentials              # Get login credentials
-abctl local credentials --password  # Set custom password
-abctl local status                  # Check status
-abctl local uninstall               # Stop (keeps data)
-abctl local uninstall --persisted  # Stop and delete data
-```
-
-## Python Connector Setup
+## Setup
 
 ### 1. Install Dependencies
 
@@ -112,7 +69,7 @@ files = connector.list_files(drive_id=drives[0]["id"])
 ## Prerequisites
 
 - Azure AD App Registration with `Files.Read.All` application permission (admin consent required)
-- Docker and Docker Compose (for Airbyte)
+- Python 3.7+
 
 ## File Object Structure
 
