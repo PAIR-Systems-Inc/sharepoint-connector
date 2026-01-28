@@ -34,6 +34,48 @@ class SharePointConnector:
         self.access_token: Optional[str] = None
         self.base_url = "https://graph.microsoft.com/v1.0"
         
+    def _log_request_exception(self, context: str, e: requests.exceptions.RequestException):
+        """Log raw HTTP request and response details for debugging."""
+        print(f"\n--- {context}: raw HTTP details ---")
+        # Request details
+        req = getattr(e, "request", None)
+        if req is not None:
+            print("Request:")
+            print(f"  Method: {req.method}")
+            print(f"  URL:    {req.url}")
+            if req.headers:
+                print("  Headers:")
+                for k, v in req.headers.items():
+                    print(f"    {k}: {v}")
+            body = req.body
+            if body:
+                # Avoid dumping extremely large or binary bodies
+                body_str = body if isinstance(body, str) else body.decode("utf-8", errors="replace")
+                print("  Body:")
+                print(f"    {body_str[:2000]}")
+        else:
+            print("No request information available on exception.")
+
+        # Response details
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            print("\nResponse:")
+            print(f"  Status: {resp.status_code}")
+            if resp.headers:
+                print("  Headers:")
+                for k, v in resp.headers.items():
+                    print(f"    {k}: {v}")
+            try:
+                text = resp.text
+            except Exception:
+                text = "<unable to read response text>"
+            if text:
+                print("  Body:")
+                print(f"    {text[:4000]}")
+        else:
+            print("No response information available on exception.")
+        print("--- End raw HTTP details ---\n")
+
     def authenticate(self) -> bool:
         """
         Authenticate with Microsoft Graph API using OAuth2 client credentials flow.
@@ -66,12 +108,13 @@ class SharePointConnector:
             
         except requests.exceptions.RequestException as e:
             print(f"✗ Authentication failed: {e}")
-            if hasattr(e, 'response') and e.response is not None:
+            if hasattr(e, "response") and e.response is not None:
                 try:
                     error_detail = e.response.json()
                     print(f"Error details: {json.dumps(error_detail, indent=2)}")
-                except:
+                except Exception:
                     print(f"Response: {e.response.text}")
+            self._log_request_exception("Authentication failure", e)
             return False
     
     def _get_headers(self) -> Dict[str, str]:
@@ -111,12 +154,13 @@ class SharePointConnector:
             
         except requests.exceptions.RequestException as e:
             print(f"✗ Failed to get site ID: {e}")
-            if hasattr(e, 'response') and e.response is not None:
+            if hasattr(e, "response") and e.response is not None:
                 try:
                     error_detail = e.response.json()
                     print(f"Error details: {json.dumps(error_detail, indent=2)}")
-                except:
+                except Exception:
                     print(f"Response: {e.response.text}")
+            self._log_request_exception("Get site ID failure", e)
             return None
     
     def get_drives(self, site_id: Optional[str] = None) -> List[Dict]:
@@ -147,12 +191,13 @@ class SharePointConnector:
             
         except requests.exceptions.RequestException as e:
             print(f"✗ Failed to get drives: {e}")
-            if hasattr(e, 'response') and e.response is not None:
+            if hasattr(e, "response") and e.response is not None:
                 try:
                     error_detail = e.response.json()
                     print(f"Error details: {json.dumps(error_detail, indent=2)}")
-                except:
+                except Exception:
                     print(f"Response: {e.response.text}")
+            self._log_request_exception("Get drives failure", e)
             return []
     
     def list_files(self, 
@@ -233,12 +278,13 @@ class SharePointConnector:
             
         except requests.exceptions.RequestException as e:
             print(f"✗ Failed to list files: {e}")
-            if hasattr(e, 'response') and e.response is not None:
+            if hasattr(e, "response") and e.response is not None:
                 try:
                     error_detail = e.response.json()
                     print(f"Error details: {json.dumps(error_detail, indent=2)}")
-                except:
+                except Exception:
                     print(f"Response: {e.response.text}")
+            self._log_request_exception("List files failure", e)
             return []
     
     def _get_files_from_folder(self, drive_id: str, folder_id: str) -> List[Dict]:
