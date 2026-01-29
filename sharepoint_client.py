@@ -1,6 +1,48 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "requests>=2.31.0",
+#     "python-dotenv>=1.0.0",
+# ]
+# ///
 """
 SharePoint Connector using Microsoft Graph API
 Connects to SharePoint and lists files from a specified site.
+
+Basic Usage
+----------
+::
+
+    from sharepoint_client import SharePointConnector
+    import os
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    connector = SharePointConnector(
+        client_id=os.getenv("SHAREPOINT_CLIENT_ID"),
+        tenant_id=os.getenv("SHAREPOINT_TENANT_ID"),
+        client_secret=os.getenv("SHAREPOINT_CLIENT_SECRET"),
+        site_url=os.getenv("SHAREPOINT_SITE_URL")
+    )
+
+    connector.authenticate()
+    files = connector.list_files()
+    connector.print_files(files)
+
+List Files from Specific Folder
+-------------------------------
+::
+
+    files = connector.list_files(folder_path="Documents/Reports")
+
+List Files from Specific Drive
+------------------------------
+::
+
+    drives = connector.get_drives()
+    files = connector.list_files(drive_id=drives[0]["id"])
 """
 
 import os
@@ -214,6 +256,16 @@ class SharePointConnector:
             
         Returns:
             List of file objects with metadata
+
+        Examples:
+            List from a specific folder::
+
+                files = connector.list_files(folder_path="Documents/Reports")
+
+            List from a specific drive::
+
+                drives = connector.get_drives()
+                files = connector.list_files(drive_id=drives[0]["id"])
         """
         site_id = self.get_site_id()
         if not site_id:
