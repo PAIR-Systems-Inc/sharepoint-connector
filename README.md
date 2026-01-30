@@ -42,6 +42,8 @@ See [Python and the uv Shebang](https://brojonat.com/posts/uv/) for details.
 
 For Python usage examples (basic usage, listing from a folder or drive), see the docstrings in `sharepoint_client.py`.
 
+For setting up the **Graph sync server** (`graph_listener.py`) — which uses **Microsoft Graph API webhooks** to receive SharePoint change notifications over HTTPS — see **[listern_setup.md](listern_setup.md)**.
+
 ## Technical details
 
 ### `sharepoint_client.py`

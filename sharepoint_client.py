@@ -381,6 +381,23 @@ class SharePointConnector:
         
         return files
     
+    def get_file_by_id(self, drive_id: str, item_id: str) -> Optional[Dict]:
+        """
+        Get a single drive item (file or folder) by drive ID and item ID.
+        Returns formatted file info if the item is a file; None if folder or not found.
+        """
+        endpoint = f"{self.base_url}/drives/{drive_id}/items/{item_id}"
+        try:
+            response = requests.get(endpoint, headers=self._get_headers())
+            response.raise_for_status()
+            item = response.json()
+            if "file" not in item:
+                return None  # folder or other non-file
+            return self._format_file_info(item)
+        except requests.exceptions.RequestException as e:
+            print(f"Warning: Failed to get item {item_id}: {e}")
+            return None
+
     def _format_file_info(self, item: Dict) -> Dict:
         """Format file information into a clean dictionary."""
         file_info = item.get("file", {})
