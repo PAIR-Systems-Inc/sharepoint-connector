@@ -1,0 +1,28 @@
+# fly.toml app configuration file generated for sharepoint on 2026-01-30T16:02:48-08:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'sharepoint'
+primary_region = 'sjc'
+
+[build]
+  # Uses Dockerfile in project root
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Listener must stay up to receive Graph webhooks; do not stop when idle
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024

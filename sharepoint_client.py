@@ -75,6 +75,7 @@ class SharePointConnector:
         self.site_url = site_url
         self.access_token: Optional[str] = None
         self.base_url = "https://graph.microsoft.com/v1.0"
+        self._last_site_data: Optional[Dict] = None
         
     def _log_request_exception(self, context: str, e: requests.exceptions.RequestException):
         """Log raw HTTP request and response details for debugging."""
@@ -144,10 +145,8 @@ class SharePointConnector:
             if not self.access_token:
                 print("Error: No access token received")
                 return False
-                
-            print("✓ Successfully authenticated with Microsoft Graph API")
             return True
-            
+
         except requests.exceptions.RequestException as e:
             print(f"✗ Authentication failed: {e}")
             if hasattr(e, "response") and e.response is not None:
@@ -190,10 +189,9 @@ class SharePointConnector:
             response.raise_for_status()
             
             site_data = response.json()
-            site_id = site_data.get("id")
-            print(f"✓ Found site ID: {site_id}")
-            return site_id
-            
+            self._last_site_data = site_data
+            return site_data.get("id")
+
         except requests.exceptions.RequestException as e:
             print(f"✗ Failed to get site ID: {e}")
             if hasattr(e, "response") and e.response is not None:
@@ -204,7 +202,24 @@ class SharePointConnector:
                     print(f"Response: {e.response.text}")
             self._log_request_exception("Get site ID failure", e)
             return None
-    
+
+    def print_site_info(self) -> None:
+        """
+        Print basic site info from the last get_site_id() call (webUrl and ID breakdown).
+        The Graph site ID is: hostname, siteCollectionId, siteId (comma-separated).
+        """
+        data = self._last_site_data
+        if not data:
+            return
+        web_url = data.get("webUrl") or self.site_url
+        site_id_raw = data.get("id") or ""
+        parts = [p.strip() for p in site_id_raw.split(",")] if site_id_raw else []
+        hostname = parts[0] if len(parts) > 0 else "(unknown)"
+        site_collection_id = parts[1] if len(parts) > 1 else "(unknown)"
+        site_id = parts[2] if len(parts) > 2 else "(unknown)"
+        print(f"  Site URL: {web_url}")
+        print(f"  Site ID: hostname={hostname}, siteCollectionId={site_collection_id}, siteId={site_id}")
+
     def get_drives(self, site_id: Optional[str] = None) -> List[Dict]:
         """
         Get all drives (document libraries) for the site.
@@ -228,9 +243,8 @@ class SharePointConnector:
             
             drives_data = response.json()
             drives = drives_data.get("value", [])
-            print(f"✓ Found {len(drives)} drive(s)")
             return drives
-            
+
         except requests.exceptions.RequestException as e:
             print(f"✗ Failed to get drives: {e}")
             if hasattr(e, "response") and e.response is not None:
@@ -242,18 +256,20 @@ class SharePointConnector:
             self._log_request_exception("Get drives failure", e)
             return []
     
-    def list_files(self, 
+    def list_files(self,
                    drive_id: Optional[str] = None,
                    folder_path: str = "",
-                   recursive: bool = True) -> List[Dict]:
+                   recursive: bool = True,
+                   site_id: Optional[str] = None) -> List[Dict]:
         """
         List files from a SharePoint drive.
-        
+
         Args:
             drive_id: Drive ID. If None, uses the first available drive.
             folder_path: Path to folder within the drive (e.g., "Documents/Subfolder")
             recursive: Whether to recursively list files in subfolders
-            
+            site_id: Site ID. If None, fetches via get_site_id().
+
         Returns:
             List of file objects with metadata
 
@@ -267,7 +283,8 @@ class SharePointConnector:
                 drives = connector.get_drives()
                 files = connector.list_files(drive_id=drives[0]["id"])
         """
-        site_id = self.get_site_id()
+        if site_id is None:
+            site_id = self.get_site_id()
         if not site_id:
             return []
         
@@ -278,7 +295,6 @@ class SharePointConnector:
                 print("✗ No drives found")
                 return []
             drive_id = drives[0].get("id")
-            print(f"Using drive: {drives[0].get('name', 'Unknown')} (ID: {drive_id})")
         
         # Build endpoint
         if folder_path:
@@ -325,9 +341,8 @@ class SharePointConnector:
                         folder_files = self._get_files_from_folder(drive_id, folder_id)
                         all_files.extend(folder_files)
             
-            print(f"✓ Found {len(all_files)} file(s)")
             return all_files
-            
+
         except requests.exceptions.RequestException as e:
             print(f"✗ Failed to list files: {e}")
             if hasattr(e, "response") and e.response is not None:
@@ -380,7 +395,73 @@ class SharePointConnector:
             print(f"Warning: Failed to get files from folder {folder_id}: {e}")
         
         return files
-    
+
+    def _get_item_children(self, drive_id: str, item_id: str) -> List[Dict]:
+        """Get direct children (files and folders) of a drive item. item_id 'root' = drive root."""
+        if item_id == "root":
+            endpoint = f"{self.base_url}/drives/{drive_id}/root/children"
+        else:
+            endpoint = f"{self.base_url}/drives/{drive_id}/items/{item_id}/children"
+        try:
+            response = requests.get(endpoint, headers=self._get_headers(), timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            items = data.get("value", [])
+            # Handle pagination: collect all pages
+            while "@odata.nextLink" in data:
+                next_url = data["@odata.nextLink"]
+                response = requests.get(next_url, headers=self._get_headers(), timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                items.extend(data.get("value", []))
+            return items
+        except requests.exceptions.RequestException as e:
+            print(f"Warning: Failed to get children for {item_id}: {e}")
+            return []
+
+    def get_drive_tree(
+        self,
+        drive_id: Optional[str] = None,
+        folder_id: str = "root",
+        max_depth: int = 2,
+        site_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """
+        Build a tree of drive items (folders and files) up to max_depth.
+        Returns list of nodes; each node is {"name": str, "type": "folder"|"file", "children": [...]}.
+        """
+        if site_id is None:
+            site_id = self.get_site_id()
+        if not site_id:
+            return []
+        if drive_id is None:
+            drives = self.get_drives(site_id)
+            if not drives:
+                return []
+            drive_id = drives[0].get("id")
+        return self._build_tree_level(drive_id, folder_id, current_depth=0, max_depth=max_depth)
+
+    def _build_tree_level(
+        self, drive_id: str, folder_id: str, current_depth: int, max_depth: int
+    ) -> List[Dict]:
+        if current_depth >= max_depth:
+            return []
+        items = self._get_item_children(drive_id, folder_id)
+        nodes = []
+        for item in items:
+            name = item.get("name") or "(unnamed)"
+            if "folder" in item:
+                child_id = item.get("id")
+                children = (
+                    self._build_tree_level(drive_id, child_id, current_depth + 1, max_depth)
+                    if current_depth + 1 < max_depth
+                    else []
+                )
+                nodes.append({"name": name, "type": "folder", "id": child_id, "children": children})
+            else:
+                nodes.append({"name": name, "type": "file", "id": item.get("id"), "children": []})
+        return nodes
+
     def get_file_by_id(self, drive_id: str, item_id: str) -> Optional[Dict]:
         """
         Get a single drive item (file or folder) by drive ID and item ID.
@@ -477,14 +558,16 @@ def main():
     )
     
     # Authenticate
-    print("Authenticating with Microsoft Graph API...")
+    print("Authenticating with Microsoft Graph API...", end=" ", flush=True)
     if not connector.authenticate():
-        print("Failed to authenticate. Exiting.")
+        print("✗ Failed. Exiting.")
         return
-    
+    print("✓ Success.")
+
     # List files
-    print("\nFetching files from SharePoint...")
+    print("Fetching files from SharePoint...", end=" ", flush=True)
     files = connector.list_files()
+    print(f"✓ Found {len(files)} file(s)." if files else "✗ No files found.")
     
     # Print results
     connector.print_files(files)
