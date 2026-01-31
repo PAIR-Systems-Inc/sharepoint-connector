@@ -160,6 +160,11 @@ def _drive_id_from_resource(resource: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _log_goodmem_unreachable(e: Exception) -> None:
+    """Log an activity event when Goodmem is unreachable (connection/timeout error)."""
+    _log_activity("error", "Goodmem unreachable", error=str(e))
+
+
 def _ensure_space_id() -> Optional[str]:
     """Resolve Goodmem space ID from site URL; create space if needed."""
     global _space_id, _goodmem, _site_url
@@ -168,16 +173,21 @@ def _ensure_space_id() -> Optional[str]:
     if not _goodmem or not _site_url:
         return None
     space_name = _space_name_from_site_url(_site_url)
-    _space_id = _goodmem.find_space_by_name(space_name)
-    if _space_id is None:
-        embedders = _goodmem.list_embedders()
-        embedder_id = (os.getenv("DEFAULT_EMBEDDER_ID") or
-                      (embedders[0].get("embedderId") if embedders else None))
-        if not embedder_id:
-            print("[listener] No embedder available; cannot create space.", file=sys.stderr)
-            return None
-        created = _goodmem.create_space(space_name=space_name, embedder_id=embedder_id)
-        _space_id = created.get("spaceId")
+    try:
+        _space_id = _goodmem.find_space_by_name(space_name)
+        if _space_id is None:
+            embedders = _goodmem.list_embedders()
+            embedder_id = (os.getenv("DEFAULT_EMBEDDER_ID") or
+                          (embedders[0].get("embedderId") if embedders else None))
+            if not embedder_id:
+                print("[listener] No embedder available; cannot create space.", file=sys.stderr)
+                return None
+            created = _goodmem.create_space(space_name=space_name, embedder_id=embedder_id)
+            _space_id = created.get("spaceId")
+    except requests.RequestException as e:
+        _log_goodmem_unreachable(e)
+        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+        return None
     return _space_id
 
 
@@ -196,7 +206,12 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
         return ("skipped", f"No download URL: {name}")
     # Skip if already in Goodmem with same modified time (avoids duplicate sync when Graph sends multiple root notifications)
     modified = file_info.get("modified_datetime")
-    memories = _goodmem.list_all_memories(_space_id)
+    try:
+        memories = _goodmem.list_all_memories(_space_id)
+    except requests.RequestException as e:
+        _log_goodmem_unreachable(e)
+        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+        return ("error", f"Goodmem unreachable: {name}")
     existing_memory_id: Optional[str] = None
     for mem in memories:
         meta = mem.get("metadata") or {}
@@ -207,8 +222,13 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
             return ("skipped", f"unchanged: {name}")
         break
     is_update = bool(existing_memory_id)
-    if existing_memory_id:
-        _goodmem.delete_memory(existing_memory_id)
+    try:
+        if existing_memory_id:
+            _goodmem.delete_memory(existing_memory_id)
+    except requests.RequestException as e:
+        _log_goodmem_unreachable(e)
+        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+        return ("error", f"Goodmem unreachable: {name}")
     try:
         content_bytes = _download_file(download_url)
     except Exception as e:
@@ -225,6 +245,11 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
         )
         _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name, file_name=name, file_id=file_id)
         return ("synced", name)
+    except requests.RequestException as e:
+        _log_goodmem_unreachable(e)
+        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
+        return ("error", f"Ingest failed: {name}")
     except Exception as e:
         print(f"[listener] Ingest failed for {file_info.get('name')}: {e}", file=sys.stderr)
         _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
@@ -236,12 +261,22 @@ def _remove_memory_for_file_id(file_id: str) -> Optional[str]:
     global _goodmem, _space_id
     if not _goodmem or not _space_id:
         return None
-    memories = _goodmem.list_all_memories(_space_id)
+    try:
+        memories = _goodmem.list_all_memories(_space_id)
+    except requests.RequestException as e:
+        _log_goodmem_unreachable(e)
+        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+        return None
     for mem in memories:
         meta = mem.get("metadata") or {}
         if meta.get("id") == file_id:
             name = meta.get("name") or file_id
-            _goodmem.delete_memory(mem.get("memoryId"))
+            try:
+                _goodmem.delete_memory(mem.get("memoryId"))
+            except requests.RequestException as e:
+                _log_goodmem_unreachable(e)
+                print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+                return None
             _log_activity("remove", "[Done] Remove: " + name, file_name=name, file_id=file_id)
             return name
     return None
@@ -320,6 +355,9 @@ def _compute_file_diff() -> Optional[dict]:
     try:
         root_files = _connector.list_files(drive_id=_drive_id, folder_path="", recursive=True)
         memories = _goodmem.list_all_memories(_space_id)
+    except requests.RequestException as e:
+        _log_goodmem_unreachable(e)
+        return None
     except Exception:
         return None
     sp_by_id = {f["id"]: {"id": f["id"], "name": f.get("name") or f["id"], "modified_datetime": f.get("modified_datetime")} for f in root_files}
@@ -464,7 +502,13 @@ def process_notification_value(value: list) -> None:
                     skipped_reasons.append("no Goodmem space")
                     continue
                 root_files = _connector.list_files(drive_id=drive_id, folder_path="", recursive=True)
-                memories = _goodmem.list_all_memories(_space_id) if (_goodmem and _space_id) else []
+                try:
+                    memories = _goodmem.list_all_memories(_space_id) if (_goodmem and _space_id) else []
+                except requests.RequestException as e:
+                    _log_goodmem_unreachable(e)
+                    print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+                    error_msgs.append("Goodmem unreachable")
+                    continue
                 to_add, to_update, to_remove = _compute_delta(root_files, memories)
                 # Log ASCII trees for delta (to add / to update / to remove)
                 tree_add = _format_tree("To Add (new in SharePoint, not in Goodmem)", [f.get("name") or f["id"] for f in to_add])
@@ -567,14 +611,13 @@ def build_app() -> Flask:
         if not isinstance(value, list):
             return "OK", 200
 
-        _log_activity("notification_received", f"Received {len(value)} change(s) from Graph", count=len(value))
-
         is_root_sync = _is_root_sync_notification(value)
         global _root_sync_pending
         with _root_sync_lock:
             if is_root_sync and _root_sync_pending:
                 _log_activity("coalesced", "Root sync already pending; skipping duplicate notification", count=len(value))
                 return "", 200
+            _log_activity("notification_received", f"Received {len(value)} change(s) from Graph", count=len(value))
             _sync_queue.put({"value": value, "is_root_sync": is_root_sync})
             if is_root_sync:
                 _root_sync_pending = True
