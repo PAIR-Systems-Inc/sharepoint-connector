@@ -114,17 +114,23 @@ def main() -> int:
                         ts = e.get("ts", "")[:19].replace("T", " ")
                         typ = e.get("type", "?")
                         msg = e.get("message", "")
-                        # Optional details
-                        name = e.get("file_name") or e.get("file_id") or ""
-                        if name:
-                            msg = f"{msg} ({name})" if name not in msg else msg
-                        err = e.get("error")
-                        if err:
-                            msg = f"{msg} — {err}"
-                        # Highlight "what happened" (listener summary after notification)
-                        if typ == "what_happened":
-                            print(f"  {ts}  → What the listener did: {msg}")
+                        # Delta: ASCII trees (multi-line), print each line indented
+                        if typ == "delta":
+                            for line in msg.split("\n"):
+                                print(f"  {ts}  {line}")
+                        # [Done] Add/Update/Remove: message already has path
+                        elif typ in ("done", "remove"):
+                            err = e.get("error")
+                            if err:
+                                msg = f"{msg} — {err}"
+                            print(f"  {ts}  {msg}")
                         else:
+                            name = e.get("file_name") or e.get("file_id") or ""
+                            if name and name not in msg:
+                                msg = f"{msg} ({name})"
+                            err = e.get("error")
+                            if err:
+                                msg = f"{msg} — {err}"
                             print(f"  {ts}  [{typ}]  {msg}")
                 else:
                     # No new events: print a brief idle line every 30s so you know we're still talking to the hook

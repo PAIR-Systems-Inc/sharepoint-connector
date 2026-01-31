@@ -27,6 +27,7 @@ See permission.md for Azure AD / SharePoint permissions.
 """
 
 import os
+import queue
 import re
 import sys
 import threading
@@ -108,6 +109,11 @@ _activity_lock = threading.Lock()
 _activity_max = 200
 _activity_id = 0
 
+# Queue for processing notifications in background (return 200 quickly; coalesce root sync)
+_sync_queue: "queue.Queue[dict]" = queue.Queue()
+_root_sync_pending = False
+_root_sync_lock = threading.Lock()
+
 
 def _log_activity(event_type: str, message: str, **details: object) -> None:
     """Append an event to the activity log (thread-safe)."""
@@ -184,24 +190,30 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
     name = file_info.get("name") or "(unknown)"
     mime_type = file_info.get("mime_type")
     if not _is_mime_type_supported(mime_type):
-        _log_activity("skipped", f"Unsupported MIME: {name}", file_name=name)
         return ("skipped", f"Unsupported MIME: {name}")
     download_url = file_info.get("download_url")
     if not download_url:
-        _log_activity("skipped", f"No download URL: {name}", file_name=name)
         return ("skipped", f"No download URL: {name}")
-    # For updates: remove existing memory keyed by SharePoint file id
+    # Skip if already in Goodmem with same modified time (avoids duplicate sync when Graph sends multiple root notifications)
+    modified = file_info.get("modified_datetime")
     memories = _goodmem.list_all_memories(_space_id)
+    existing_memory_id: Optional[str] = None
     for mem in memories:
         meta = mem.get("metadata") or {}
-        if meta.get("id") == file_id:
-            _goodmem.delete_memory(mem.get("memoryId"))
-            break
+        if meta.get("id") != file_id:
+            continue
+        existing_memory_id = mem.get("memoryId")
+        if modified and meta.get("modified_datetime") == modified:
+            return ("skipped", f"unchanged: {name}")
+        break
+    is_update = bool(existing_memory_id)
+    if existing_memory_id:
+        _goodmem.delete_memory(existing_memory_id)
     try:
         content_bytes = _download_file(download_url)
     except Exception as e:
         print(f"[listener] Download failed for {file_info.get('name')}: {e}", file=sys.stderr)
-        _log_activity("error", f"Download failed: {name}", error=str(e))
+        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
         return ("error", f"Download failed: {name}")
     metadata = {k: v for k, v in file_info.items() if v is not None}
     try:
@@ -211,11 +223,11 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
             content_type=mime_type or "application/octet-stream",
             metadata=metadata,
         )
-        _log_activity("synced", f"Synced to Goodmem: {name}", file_name=name, file_id=file_id)
+        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name, file_name=name, file_id=file_id)
         return ("synced", name)
     except Exception as e:
         print(f"[listener] Ingest failed for {file_info.get('name')}: {e}", file=sys.stderr)
-        _log_activity("error", f"Ingest failed: {name}", error=str(e), file_name=name)
+        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
         return ("error", f"Ingest failed: {name}")
 
 
@@ -230,9 +242,97 @@ def _remove_memory_for_file_id(file_id: str) -> Optional[str]:
         if meta.get("id") == file_id:
             name = meta.get("name") or file_id
             _goodmem.delete_memory(mem.get("memoryId"))
-            _log_activity("deleted", f"Removed from Goodmem: {name}", file_name=name, file_id=file_id)
+            _log_activity("remove", "[Done] Remove: " + name, file_name=name, file_id=file_id)
             return name
     return None
+
+
+def _is_root_sync_notification(value: list) -> bool:
+    """True if this notification would trigger a full root sync (so we can coalesce duplicate notifications)."""
+    global _connector, _drive_id
+    if not _connector or not _drive_id or not isinstance(value, list):
+        return False
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        if _client_state and entry.get("clientState") != _client_state:
+            continue
+        change_type = (entry.get("changeType") or "").strip().lower()
+        resource = entry.get("resource", "")
+        resource_data = entry.get("resourceData") or {}
+        item_id = resource_data.get("id")
+        parsed = _parse_drive_and_item_from_resource(resource)
+        if parsed:
+            drive_id, item_id = parsed
+        else:
+            drive_id = _drive_id_from_resource(resource) or _drive_id
+            if not item_id and resource and "/" not in resource:
+                item_id = resource
+        if change_type == "updated" and drive_id and (not item_id or _is_root_resource(resource)):
+            return True
+    return False
+
+
+def _format_tree(title: str, names: list[str]) -> str:
+    """Format a list of file names as an ASCII tree (e.g. To Add: / ├── a / └── b)."""
+    lines = [title + ":"]
+    if not names:
+        lines.append("  (none)")
+    else:
+        for i, n in enumerate(names):
+            prefix = "└── " if i == len(names) - 1 else "├── "
+            lines.append("  " + prefix + n)
+    return "\n".join(lines)
+
+
+def _compute_delta(
+    root_files: list[dict], memories: list[dict]
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Compare SharePoint root files vs Goodmem memories. Returns (to_add, to_update, to_remove).
+    to_add: file_info for files in SharePoint only (supported MIME).
+    to_update: file_info for files in both but different modified_datetime (supported MIME).
+    to_remove: items {id, name} for memories no longer in SharePoint.
+    """
+    sp_by_id = {f["id"]: f for f in root_files}
+    gm_by_id: dict[str, dict] = {}
+    for mem in memories:
+        meta = mem.get("metadata") or {}
+        sp_id = meta.get("id")
+        if sp_id:
+            gm_by_id[sp_id] = {"id": sp_id, "name": meta.get("name") or sp_id, "modified_datetime": meta.get("modified_datetime")}
+    to_add = [f for f in root_files if f["id"] not in gm_by_id and _is_mime_type_supported(f.get("mime_type"))]
+    to_update = [
+        f for f in root_files
+        if f["id"] in gm_by_id
+        and gm_by_id[f["id"]].get("modified_datetime") != f.get("modified_datetime")
+        and _is_mime_type_supported(f.get("mime_type"))
+    ]
+    to_remove = [{"id": i, "name": gm_by_id[i]["name"]} for i in gm_by_id if i not in sp_by_id]
+    return (to_add, to_update, to_remove)
+
+
+def _compute_file_diff() -> Optional[dict]:
+    """Compare SharePoint drive root files vs Goodmem space. Returns dict with only_in_sharepoint, only_in_goodmem, in_both, or None if not ready."""
+    global _connector, _goodmem, _drive_id, _space_id
+    if not _connector or not _drive_id or not _goodmem or not _space_id:
+        return None
+    try:
+        root_files = _connector.list_files(drive_id=_drive_id, folder_path="", recursive=True)
+        memories = _goodmem.list_all_memories(_space_id)
+    except Exception:
+        return None
+    sp_by_id = {f["id"]: {"id": f["id"], "name": f.get("name") or f["id"], "modified_datetime": f.get("modified_datetime")} for f in root_files}
+    gm_by_id: dict[str, dict] = {}
+    for mem in memories:
+        meta = mem.get("metadata") or {}
+        sp_id = meta.get("id")
+        if sp_id:
+            gm_by_id[sp_id] = {"id": sp_id, "name": meta.get("name") or sp_id, "modified_datetime": meta.get("modified_datetime")}
+    only_in_sharepoint = [sp_by_id[i] for i in sp_by_id if i not in gm_by_id]
+    only_in_goodmem = [gm_by_id[i] for i in gm_by_id if i not in sp_by_id]
+    in_both = [sp_by_id[i] for i in sp_by_id if i in gm_by_id]
+    return {"only_in_sharepoint": only_in_sharepoint, "only_in_goodmem": only_in_goodmem, "in_both": in_both}
 
 
 def _list_subscriptions(connector: SharePointConnector) -> list[dict]:
@@ -331,6 +431,112 @@ def create_subscription(
         return None
 
 
+def process_notification_value(value: list) -> None:
+    """Process a notification payload (value list). Runs in background worker. Always logs 'what_happened'."""
+    synced_names: list[str] = []
+    deleted_names: list[str] = []
+    skipped_reasons: list[str] = []
+    error_msgs: list[str] = []
+    processing_error: Optional[str] = None
+    try:
+        for entry in value:
+            if not isinstance(entry, dict):
+                continue
+            client_state = entry.get("clientState")
+            if _client_state and client_state != _client_state:
+                continue
+            change_type = (entry.get("changeType") or "").strip().lower()
+            resource = entry.get("resource", "")
+            resource_data = entry.get("resourceData") or {}
+            item_id = resource_data.get("id")
+            parsed = _parse_drive_and_item_from_resource(resource)
+            if parsed:
+                drive_id, item_id = parsed
+            else:
+                drive_id = _drive_id_from_resource(resource) or _drive_id
+                if not item_id and resource and "/" not in resource:
+                    item_id = resource
+            if not _connector:
+                continue
+            if change_type == "updated" and drive_id and (not item_id or _is_root_resource(resource)):
+                if not _ensure_space_id():
+                    _log_activity("skipped", "No Goodmem space (root updated)", item_id=None)
+                    skipped_reasons.append("no Goodmem space")
+                    continue
+                root_files = _connector.list_files(drive_id=drive_id, folder_path="", recursive=True)
+                memories = _goodmem.list_all_memories(_space_id) if (_goodmem and _space_id) else []
+                to_add, to_update, to_remove = _compute_delta(root_files, memories)
+                # Log ASCII trees for delta (to add / to update / to remove)
+                tree_add = _format_tree("To Add (new in SharePoint, not in Goodmem)", [f.get("name") or f["id"] for f in to_add])
+                tree_update = _format_tree("To Update (modified in SharePoint)", [f.get("name") or f["id"] for f in to_update])
+                tree_remove = _format_tree("To Remove (in Goodmem, no longer in SharePoint)", [r["name"] for r in to_remove])
+                delta_message = tree_add + "\n" + tree_update + "\n" + tree_remove
+                _log_activity("delta", delta_message, to_add=len(to_add), to_update=len(to_update), to_remove=len(to_remove))
+                # Remove from Goodmem first
+                for r in to_remove:
+                    _remove_memory_for_file_id(r["id"])
+                    deleted_names.append(r["name"])
+                # Then sync to_add and to_update
+                for file_info in to_add + to_update:
+                    result = _sync_one_file_to_goodmem(file_info)
+                    if result:
+                        outcome, detail = result
+                        if outcome == "synced":
+                            synced_names.append(detail)
+                        elif outcome == "skipped":
+                            skipped_reasons.append(detail)
+                        elif outcome == "error":
+                            error_msgs.append(detail)
+                continue
+            if not drive_id or not item_id:
+                continue
+            if change_type == "deleted":
+                name = _remove_memory_for_file_id(item_id)
+                if name:
+                    deleted_names.append(name)
+                continue
+            if change_type in ("created", "updated"):
+                file_info = _connector.get_file_by_id(drive_id, item_id)
+                if not file_info:
+                    _log_activity("skipped", "Item not found or not a file", item_id=item_id)
+                    skipped_reasons.append("item not found")
+                    continue
+                if not _ensure_space_id():
+                    _log_activity("skipped", "No Goodmem space", item_id=item_id)
+                    skipped_reasons.append("no Goodmem space")
+                    continue
+                result = _sync_one_file_to_goodmem(file_info)
+                if result:
+                    outcome, detail = result
+                    if outcome == "synced":
+                        synced_names.append(detail)
+                    elif outcome == "skipped":
+                        skipped_reasons.append(detail)
+                    elif outcome == "error":
+                        error_msgs.append(detail)
+    except Exception as e:
+        processing_error = str(e)
+        print(f"[listener] Error processing notification: {e}", file=sys.stderr)
+    finally:
+        pass  # Only log [Start]/[Done] Add/Remove per file; no summary message
+
+
+def _worker_loop() -> None:
+    """Background worker: process one notification job at a time; clear root_sync_pending when root sync job finishes."""
+    global _root_sync_pending
+    while True:
+        job = _sync_queue.get()
+        try:
+            process_notification_value(job["value"])
+        except Exception as e:
+            print(f"[listener] Worker error: {e}", file=sys.stderr)
+        finally:
+            if job.get("is_root_sync"):
+                with _root_sync_lock:
+                    _root_sync_pending = False
+        _sync_queue.task_done()
+
+
 def build_app() -> Flask:
     """Build Flask app that handles Microsoft Graph validation and change notifications."""
     app = Flask(__name__)
@@ -349,7 +555,7 @@ def build_app() -> Flask:
         if request.method != "POST":
             return "Method not allowed", 405
 
-        # Change notification from Microsoft Graph
+        # Change notification from Microsoft Graph — return 200 quickly, process in background
         try:
             data = request.get_json(force=True, silent=True)
         except Exception:
@@ -363,94 +569,15 @@ def build_app() -> Flask:
 
         _log_activity("notification_received", f"Received {len(value)} change(s) from Graph", count=len(value))
 
-        synced_names: list[str] = []
-        deleted_names: list[str] = []
-        skipped_reasons: list[str] = []
-        error_msgs: list[str] = []
-        processing_error: Optional[str] = None
-
-        try:
-            for entry in value:
-                if not isinstance(entry, dict):
-                    continue
-                client_state = entry.get("clientState")
-                if _client_state and client_state != _client_state:
-                    continue
-                change_type = (entry.get("changeType") or "").strip().lower()
-                resource = entry.get("resource", "")
-                resource_data = entry.get("resourceData") or {}
-                item_id = resource_data.get("id")
-                parsed = _parse_drive_and_item_from_resource(resource)
-                if parsed:
-                    drive_id, item_id = parsed
-                else:
-                    drive_id = _drive_id_from_resource(resource) or _drive_id
-                    if not item_id and resource and "/" not in resource:
-                        item_id = resource
-                if not _connector:
-                    continue
-                # Drive root subscription only sends "updated"; new files appear as root "updated".
-                # When resource is the root or we have no item id, sync all files under root.
-                if change_type == "updated" and drive_id and (not item_id or _is_root_resource(resource)):
-                    if not _ensure_space_id():
-                        _log_activity("skipped", "No Goodmem space (root updated)", item_id=None)
-                        skipped_reasons.append("no Goodmem space")
-                        continue
-                    root_files = _connector.list_files(drive_id=drive_id, folder_path="", recursive=True)
-                    for file_info in root_files:
-                        result = _sync_one_file_to_goodmem(file_info)
-                        if result:
-                            outcome, detail = result
-                            if outcome == "synced":
-                                synced_names.append(detail)
-                            elif outcome == "skipped":
-                                skipped_reasons.append(detail)
-                            elif outcome == "error":
-                                error_msgs.append(detail)
-                    continue
-                if not drive_id or not item_id:
-                    continue
-                if change_type == "deleted":
-                    name = _remove_memory_for_file_id(item_id)
-                    if name:
-                        deleted_names.append(name)
-                    continue
-                if change_type in ("created", "updated"):
-                    file_info = _connector.get_file_by_id(drive_id, item_id)
-                    if not file_info:
-                        _log_activity("skipped", "Item not found or not a file", item_id=item_id)
-                        skipped_reasons.append("item not found")
-                        continue
-                    if not _ensure_space_id():
-                        _log_activity("skipped", "No Goodmem space", item_id=item_id)
-                        skipped_reasons.append("no Goodmem space")
-                        continue
-                    result = _sync_one_file_to_goodmem(file_info)
-                    if result:
-                        outcome, detail = result
-                        if outcome == "synced":
-                            synced_names.append(detail)
-                        elif outcome == "skipped":
-                            skipped_reasons.append(detail)
-                        elif outcome == "error":
-                            error_msgs.append(detail)
-        except Exception as e:
-            processing_error = str(e)
-            print(f"[listener] Error processing notification: {e}", file=sys.stderr)
-        finally:
-            parts = []
-            if synced_names:
-                parts.append(f"{len(synced_names)} synced ({', '.join(synced_names)})")
-            if deleted_names:
-                parts.append(f"{len(deleted_names)} deleted ({', '.join(deleted_names)})")
-            if skipped_reasons:
-                parts.append(f"{len(skipped_reasons)} skipped ({'; '.join(skipped_reasons[:5])}{'...' if len(skipped_reasons) > 5 else ''})")
-            if error_msgs:
-                parts.append(f"{len(error_msgs)} errors ({'; '.join(error_msgs[:5])}{'...' if len(error_msgs) > 5 else ''})")
-            if processing_error:
-                parts.append(f"processing error: {processing_error}")
-            summary = "; ".join(parts) if parts else "no actions (filtered or ignored)"
-            _log_activity("what_happened", f"Processed {len(value)} change(s): {summary}", synced=len(synced_names), deleted=len(deleted_names), skipped=len(skipped_reasons), errors=len(error_msgs))
+        is_root_sync = _is_root_sync_notification(value)
+        global _root_sync_pending
+        with _root_sync_lock:
+            if is_root_sync and _root_sync_pending:
+                _log_activity("coalesced", "Root sync already pending; skipping duplicate notification", count=len(value))
+                return "", 200
+            _sync_queue.put({"value": value, "is_root_sync": is_root_sync})
+            if is_root_sync:
+                _root_sync_pending = True
 
         return "", 200
 
@@ -465,6 +592,22 @@ def build_app() -> Flask:
                 events = list(_activity_log)
             latest_id = _activity_id
         return {"events": events, "latest_id": latest_id}
+
+    @app.route("/diff", methods=["GET"])
+    def diff():
+        """Return file-level diff: SharePoint drive root vs Goodmem space (only_in_sharepoint, only_in_goodmem, in_both)."""
+        if not _ensure_space_id():
+            return {"error": "Goodmem space not available"}, 503
+        diff_result = _compute_file_diff()
+        if diff_result is None:
+            return {"error": "Diff not available (connector or drive not ready)"}, 503
+        # Log a summary so watchers see it
+        only_sp = diff_result["only_in_sharepoint"]
+        only_gm = diff_result["only_in_goodmem"]
+        both = diff_result["in_both"]
+        summary = f"Only in SharePoint: {len(only_sp)}; Only in Goodmem: {len(only_gm)}; In both: {len(both)}"
+        _log_activity("diff", summary, only_in_sharepoint=[x["name"] for x in only_sp], only_in_goodmem=[x["name"] for x in only_gm], in_both_count=len(both))
+        return diff_result
 
     return app
 
@@ -541,6 +684,8 @@ def main() -> None:
         _drive_id = drive_id
         _client_state = client_state
         app = build_app()
+        worker = threading.Thread(target=_worker_loop, daemon=True)
+        worker.start()
         print(f"Starting webhook server... ✓ Listening on port {sync_port}. Endpoint: /sync/webhook or /")
         app.run(host="0.0.0.0", port=sync_port)
         return

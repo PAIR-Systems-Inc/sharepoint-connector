@@ -136,6 +136,40 @@ Replace `sharepoint` with your Fly app name if different. Then run `fly apps lis
 - [subscription resource type](https://learn.microsoft.com/en-us/graph/api/resources/subscription) — `changeType` and drive root/list support only `updated`
 - [Set up change notifications (webhooks)](https://learn.microsoft.com/en-us/graph/change-notifications-overview)
 
+### Step 5 (optional): Watch what happens
+
+Now add/modify/delete a file in SharePoint and watch the file being added/modified/deleted in Goodmem.
+
+You can also use our watcher `watch_listener.py` to monitor the listener's activity.
+
+```bash
+python watch_listener.py
+```
+
+The listener shall print a log like this which contains a delta/diff tree of file changes: 
+
+```
+(baoml) forrest@pop-os:~/repos/PAIR/sharepoint$ python watch_listener.py -n 0.5
+Watching listener activity at https://sharepoint.fly.dev/activity (interval: 0.5s)
+(Ctrl+C to stop)
+
+Connected to listener. Waiting for activity...
+
+  2026-01-31 04:40:15  [notification_received]  Received 1 change(s) from Graph
+  2026-01-31 04:40:15  [notification_received]  Received 1 change(s) from Graph
+  — no new activity (listener reachable)
+  2026-01-31 04:48:39  [notification_received]  Received 1 change(s) from Graph
+  2026-01-31 04:48:40  [notification_received]  Received 1 change(s) from Graph
+  2026-01-31 04:48:41  To Add (new in SharePoint, not in Goodmem):
+  2026-01-31 04:48:41    (none)
+  2026-01-31 04:48:41  To Update (modified in SharePoint):
+  2026-01-31 04:48:41    (none)
+  2026-01-31 04:48:41  To Remove (in Goodmem, no longer in SharePoint):
+  2026-01-31 04:48:41    └── Accelerated Reinforcement Learning for Sentence Generation by Vocabulary Prediction.pdf
+  2026-01-31 04:48:41  [Done] Remove: Accelerated Reinforcement Learning for Sentence Generation by Vocabulary Prediction.pdf
+  — no new activity (listener reachable)
+```
+
 ---
 
 ## Technical details
@@ -185,10 +219,11 @@ Full sync from SharePoint to Goodmem: fetches all files from the default drive (
 
 Microsoft Graph webhook server. Run `listener.py server` (e.g. on Fly.io via Dockerfile); run `listener.py create-subscription` to create or renew the subscription (if one already exists for the same resource and client state, it is renewed via PATCH instead of creating a duplicate). Requires same SharePoint/Goodmem env as `sync_once.py` plus `SYNC_NOTIFICATION_URL` and `SYNC_CLIENT_STATE`.
 
-The server exposes **GET /activity** with an in-memory log of recent events (notifications received, files synced/deleted/skipped, errors). Use **`watch_listener.py`** on your local machine to poll and print this log:
+The server exposes **GET /activity** with an in-memory log of recent events (notifications received, Add/Remove per file, coalesced duplicates). Use **`watch_listener.py`** on your local machine to poll and print this log:
 
 ```bash
 python watch_listener.py https://your-listener-app.fly.dev
 # or set SYNC_NOTIFICATION_URL (or LISTENER_ACTIVITY_URL) in .env and run:
 python watch_listener.py
 ```
+

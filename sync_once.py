@@ -18,6 +18,10 @@ memories for files that no longer exist in SharePoint.
 List mode (no sync, SharePoint only):
   python sync_once.py list -depth 2 -width 5
   Shows file hierarchy tree in ASCII; -depth limits levels, -width limits siblings per level.
+
+Diff mode (SharePoint vs Goodmem, no sync):
+  python sync_once.py diff
+  Shows only_in_sharepoint, only_in_goodmem, in_both (by file id).
 """
 
 import argparse
@@ -213,18 +217,76 @@ def run_list(depth: int, width: int) -> None:
     _print_tree(tree, prefix="", depth=1, max_depth=depth, width=width)
 
 
+def run_diff() -> None:
+    """Print file-level diff: SharePoint drive root vs Goodmem space (only_in_sharepoint, only_in_goodmem, in_both)."""
+    load_dotenv()
+    client_id = os.getenv("SHAREPOINT_CLIENT_ID")
+    tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
+    client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
+    site_url = os.getenv("SHAREPOINT_SITE_URL")
+    if not all([client_id, tenant_id, client_secret, site_url]):
+        print("Error: Missing SharePoint env vars.")
+        return
+    goodmem_base_url = os.getenv("GOODMEM_BASE_URL")
+    goodmem_api_key = os.getenv("GOODMEM_API_KEY")
+    if not goodmem_base_url or not goodmem_api_key:
+        print("Error: Missing Goodmem env vars.")
+        return
+    connector = SharePointConnector(
+        client_id=client_id,
+        tenant_id=tenant_id,
+        client_secret=client_secret,
+        site_url=site_url,
+    )
+    goodmem = GoodmemClient(base_url=goodmem_base_url, api_key=goodmem_api_key)
+    if not connector.authenticate():
+        print("Error: Graph auth failed.")
+        return
+    site_id = connector.get_site_id()
+    if not site_id:
+        print("Error: Could not resolve site.")
+        return
+    files = connector.list_files(site_id=site_id)
+    space_name = _space_name_from_site_url(site_url)
+    space_id = goodmem.find_space_by_name(space_name)
+    if not space_id:
+        print(f"Error: Goodmem space '{space_name}' not found.")
+        return
+    memories = goodmem.list_all_memories(space_id)
+    sp_by_id = {f["id"]: {"id": f["id"], "name": f.get("name") or f["id"], "modified_datetime": f.get("modified_datetime")} for f in files}
+    gm_by_id: dict = {}
+    for mem in memories:
+        meta = mem.get("metadata") or {}
+        sp_id = meta.get("id")
+        if sp_id:
+            gm_by_id[sp_id] = {"id": sp_id, "name": meta.get("name") or sp_id, "modified_datetime": meta.get("modified_datetime")}
+    only_sp = [sp_by_id[i] for i in sp_by_id if i not in gm_by_id]
+    only_gm = [gm_by_id[i] for i in gm_by_id if i not in sp_by_id]
+    in_both = [sp_by_id[i] for i in sp_by_id if i in gm_by_id]
+    print("File-level diff (SharePoint drive root vs Goodmem space):")
+    print(f"  Only in SharePoint: {len(only_sp)}")
+    for x in only_sp:
+        print(f"    - {x['name']} (id={x['id'][:12]}...)")
+    print(f"  Only in Goodmem: {len(only_gm)}")
+    for x in only_gm:
+        print(f"    - {x['name']} (id={x['id'][:12]}...)")
+    print(f"  In both: {len(in_both)}")
+    for x in in_both:
+        print(f"    - {x['name']} (id={x['id'][:12]}...)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sync_once.py",
-        description="One-time full sync from SharePoint to Goodmem. Use 'list' to show file hierarchy only (no sync).",
-        epilog="Examples:\n  python sync_once.py                 Run full sync\n  python sync_once.py list -depth 2 -width 5   List file tree (no sync)",
+        description="One-time full sync from SharePoint to Goodmem. Use 'list' to show file hierarchy only; 'diff' to compare SharePoint vs Goodmem (no sync).",
+        epilog="Examples:\n  python sync_once.py                 Run full sync\n  python sync_once.py list -depth 2 -width 5   List file tree\n  python sync_once.py diff   SharePoint vs Goodmem diff",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "command",
         nargs="?",
         default="sync",
-        help="'sync' (default) or 'list'",
+        help="'sync' (default), 'list', or 'diff'",
     )
     parser.add_argument(
         "-depth",
@@ -244,6 +306,9 @@ def main() -> None:
 
     if args.command and args.command.lower() == "list":
         run_list(depth=args.depth, width=args.width)
+        return
+    if args.command and args.command.lower() == "diff":
+        run_diff()
         return
 
     load_dotenv()
