@@ -160,9 +160,31 @@ def _drive_id_from_resource(resource: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _log_goodmem_unreachable(e: Exception) -> None:
-    """Log an activity event when Goodmem is unreachable (connection/timeout error)."""
-    _log_activity("error", "Goodmem unreachable", error=str(e))
+def _goodmem_error_message(e: requests.RequestException) -> str:
+    """Build a user-friendly Goodmem error message for debugging (404, credentials, connection, etc.)."""
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        code = resp.status_code
+        if code == 401:
+            return "Goodmem: 401 Unauthorized — check GOODMEM_API_KEY"
+        if code == 403:
+            return "Goodmem: 403 Forbidden — check API key or permissions"
+        if code == 404:
+            return "Goodmem: 404 Not Found — check GOODMEM_BASE_URL or resource path"
+        if 500 <= code < 600:
+            return f"Goodmem: {code} Server Error — Goodmem service issue"
+        return f"Goodmem: HTTP {code} — {str(e)}"
+    if isinstance(e, requests.exceptions.ConnectionError):
+        return "Goodmem: Connection failed — check GOODMEM_BASE_URL or network (e.g. service down)"
+    if isinstance(e, requests.exceptions.Timeout):
+        return "Goodmem: Request timed out — service slow or unreachable"
+    return f"Goodmem error: {e}"
+
+
+def _log_goodmem_error(e: requests.RequestException) -> None:
+    """Log an activity event when a Goodmem API call fails, with a precise message for debugging."""
+    msg = _goodmem_error_message(e)
+    _log_activity("error", msg, error=str(e))
 
 
 def _ensure_space_id() -> Optional[str]:
@@ -185,7 +207,7 @@ def _ensure_space_id() -> Optional[str]:
             created = _goodmem.create_space(space_name=space_name, embedder_id=embedder_id)
             _space_id = created.get("spaceId")
     except requests.RequestException as e:
-        _log_goodmem_unreachable(e)
+        _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
         return None
     return _space_id
@@ -209,7 +231,7 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
     try:
         memories = _goodmem.list_all_memories(_space_id)
     except requests.RequestException as e:
-        _log_goodmem_unreachable(e)
+        _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
         return ("error", f"Goodmem unreachable: {name}")
     existing_memory_id: Optional[str] = None
@@ -226,7 +248,7 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
         if existing_memory_id:
             _goodmem.delete_memory(existing_memory_id)
     except requests.RequestException as e:
-        _log_goodmem_unreachable(e)
+        _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
         return ("error", f"Goodmem unreachable: {name}")
     try:
@@ -246,7 +268,7 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
         _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name, file_name=name, file_id=file_id)
         return ("synced", name)
     except requests.RequestException as e:
-        _log_goodmem_unreachable(e)
+        _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
         _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
         return ("error", f"Ingest failed: {name}")
@@ -264,7 +286,7 @@ def _remove_memory_for_file_id(file_id: str) -> Optional[str]:
     try:
         memories = _goodmem.list_all_memories(_space_id)
     except requests.RequestException as e:
-        _log_goodmem_unreachable(e)
+        _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
         return None
     for mem in memories:
@@ -274,7 +296,7 @@ def _remove_memory_for_file_id(file_id: str) -> Optional[str]:
             try:
                 _goodmem.delete_memory(mem.get("memoryId"))
             except requests.RequestException as e:
-                _log_goodmem_unreachable(e)
+                _log_goodmem_error(e)
                 print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
                 return None
             _log_activity("remove", "[Done] Remove: " + name, file_name=name, file_id=file_id)
@@ -308,15 +330,31 @@ def _is_root_sync_notification(value: list) -> bool:
     return False
 
 
-def _format_tree(title: str, names: list[str]) -> str:
-    """Format a list of file names as an ASCII tree (e.g. To Add: / ├── a / └── b)."""
+def _format_tree_by_folder(title: str, relative_paths: list[str]) -> str:
+    """Format relative paths as an ASCII tree grouped by folder (FolderA/ then indented files)."""
     lines = [title + ":"]
-    if not names:
+    if not relative_paths:
         lines.append("  (none)")
-    else:
-        for i, n in enumerate(names):
-            prefix = "└── " if i == len(names) - 1 else "├── "
-            lines.append("  " + prefix + n)
+        return "\n".join(lines)
+    # Group by first path component (folder); root-level (no "/") go under ""
+    groups: dict[str, list[str]] = {}
+    for p in relative_paths:
+        if "/" in p:
+            folder, rest = p.split("/", 1)
+            groups.setdefault(folder, []).append(rest)
+        else:
+            groups.setdefault("", []).append(p)
+    # Root-level first, then folders alphabetically
+    if "" in groups:
+        for i, name in enumerate(sorted(groups[""])):
+            prefix = "└── " if i == len(groups[""]) - 1 and len(groups) == 1 else "├── "
+            lines.append("  " + prefix + name)
+    for folder in sorted(k for k in groups if k):
+        items = groups[folder]
+        lines.append("  " + folder + "/")
+        for i, subpath in enumerate(sorted(items)):
+            prefix = "└── " if i == len(items) - 1 else "├── "
+            lines.append("    " + prefix + subpath)
     return "\n".join(lines)
 
 
@@ -335,7 +373,13 @@ def _compute_delta(
         meta = mem.get("metadata") or {}
         sp_id = meta.get("id")
         if sp_id:
-            gm_by_id[sp_id] = {"id": sp_id, "name": meta.get("name") or sp_id, "modified_datetime": meta.get("modified_datetime")}
+            name = meta.get("name") or sp_id
+            gm_by_id[sp_id] = {
+                "id": sp_id,
+                "name": name,
+                "modified_datetime": meta.get("modified_datetime"),
+                "relative_path": meta.get("relative_path") or name,
+            }
     to_add = [f for f in root_files if f["id"] not in gm_by_id and _is_mime_type_supported(f.get("mime_type"))]
     to_update = [
         f for f in root_files
@@ -343,7 +387,7 @@ def _compute_delta(
         and gm_by_id[f["id"]].get("modified_datetime") != f.get("modified_datetime")
         and _is_mime_type_supported(f.get("mime_type"))
     ]
-    to_remove = [{"id": i, "name": gm_by_id[i]["name"]} for i in gm_by_id if i not in sp_by_id]
+    to_remove = [{"id": i, "name": gm_by_id[i]["name"], "relative_path": gm_by_id[i]["relative_path"]} for i in gm_by_id if i not in sp_by_id]
     return (to_add, to_update, to_remove)
 
 
@@ -356,7 +400,7 @@ def _compute_file_diff() -> Optional[dict]:
         root_files = _connector.list_files(drive_id=_drive_id, folder_path="", recursive=True)
         memories = _goodmem.list_all_memories(_space_id)
     except requests.RequestException as e:
-        _log_goodmem_unreachable(e)
+        _log_goodmem_error(e)
         return None
     except Exception:
         return None
@@ -505,15 +549,15 @@ def process_notification_value(value: list) -> None:
                 try:
                     memories = _goodmem.list_all_memories(_space_id) if (_goodmem and _space_id) else []
                 except requests.RequestException as e:
-                    _log_goodmem_unreachable(e)
+                    _log_goodmem_error(e)
                     print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
                     error_msgs.append("Goodmem unreachable")
                     continue
                 to_add, to_update, to_remove = _compute_delta(root_files, memories)
                 # Log ASCII trees for delta (to add / to update / to remove)
-                tree_add = _format_tree("To Add (new in SharePoint, not in Goodmem)", [f.get("name") or f["id"] for f in to_add])
-                tree_update = _format_tree("To Update (modified in SharePoint)", [f.get("name") or f["id"] for f in to_update])
-                tree_remove = _format_tree("To Remove (in Goodmem, no longer in SharePoint)", [r["name"] for r in to_remove])
+                tree_add = _format_tree_by_folder("To Add (new in SharePoint, not in Goodmem)", [f.get("relative_path") or f.get("name") or f["id"] for f in to_add])
+                tree_update = _format_tree_by_folder("To Update (modified in SharePoint)", [f.get("relative_path") or f.get("name") or f["id"] for f in to_update])
+                tree_remove = _format_tree_by_folder("To Remove (in Goodmem, no longer in SharePoint)", [r.get("relative_path", r["name"]) for r in to_remove])
                 delta_message = tree_add + "\n" + tree_update + "\n" + tree_remove
                 _log_activity("delta", delta_message, to_add=len(to_add), to_update=len(to_update), to_remove=len(to_remove))
                 # Remove from Goodmem first

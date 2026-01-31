@@ -314,15 +314,16 @@ class SharePointConnector:
             data = response.json()
             items = data.get("value", [])
             
-            # Process items
+            # Process items (include relative_path: name at root, folder/name in subfolders)
             for item in items:
                 if "file" in item:
-                    # It's a file
-                    all_files.append(self._format_file_info(item))
+                    info = self._format_file_info(item)
+                    info["relative_path"] = item.get("name", "")
+                    all_files.append(info)
                 elif "folder" in item and recursive:
-                    # It's a folder, recursively get files
                     folder_id = item.get("id")
-                    folder_files = self._get_files_from_folder(drive_id, folder_id)
+                    folder_name = item.get("name", "")
+                    folder_files = self._get_files_from_folder(drive_id, folder_id, folder_name)
                     all_files.extend(folder_files)
             
             # Handle pagination
@@ -335,10 +336,13 @@ class SharePointConnector:
                 
                 for item in items:
                     if "file" in item:
-                        all_files.append(self._format_file_info(item))
+                        info = self._format_file_info(item)
+                        info["relative_path"] = item.get("name", "")
+                        all_files.append(info)
                     elif "folder" in item and recursive:
                         folder_id = item.get("id")
-                        folder_files = self._get_files_from_folder(drive_id, folder_id)
+                        folder_name = item.get("name", "")
+                        folder_files = self._get_files_from_folder(drive_id, folder_id, folder_name)
                         all_files.extend(folder_files)
             
             return all_files
@@ -354,8 +358,10 @@ class SharePointConnector:
             self._log_request_exception("List files failure", e)
             return []
     
-    def _get_files_from_folder(self, drive_id: str, folder_id: str) -> List[Dict]:
-        """Recursively get files from a folder."""
+    def _get_files_from_folder(
+        self, drive_id: str, folder_id: str, parent_path: str = ""
+    ) -> List[Dict]:
+        """Recursively get files from a folder. parent_path is the relative path to this folder (e.g. 'FolderA' or 'FolderA/Sub')."""
         endpoint = f"{self.base_url}/drives/{drive_id}/items/{folder_id}/children"
         files = []
         
@@ -367,12 +373,15 @@ class SharePointConnector:
             items = data.get("value", [])
             
             for item in items:
+                name = item.get("name", "")
                 if "file" in item:
-                    files.append(self._format_file_info(item))
+                    info = self._format_file_info(item)
+                    info["relative_path"] = f"{parent_path}/{name}".lstrip("/")
+                    files.append(info)
                 elif "folder" in item:
-                    # Recursively get files from subfolder
                     subfolder_id = item.get("id")
-                    subfolder_files = self._get_files_from_folder(drive_id, subfolder_id)
+                    sub_path = f"{parent_path}/{name}".lstrip("/")
+                    subfolder_files = self._get_files_from_folder(drive_id, subfolder_id, sub_path)
                     files.extend(subfolder_files)
             
             # Handle pagination
@@ -384,11 +393,15 @@ class SharePointConnector:
                 items = data.get("value", [])
                 
                 for item in items:
+                    name = item.get("name", "")
                     if "file" in item:
-                        files.append(self._format_file_info(item))
+                        info = self._format_file_info(item)
+                        info["relative_path"] = f"{parent_path}/{name}".lstrip("/")
+                        files.append(info)
                     elif "folder" in item:
                         subfolder_id = item.get("id")
-                        subfolder_files = self._get_files_from_folder(drive_id, subfolder_id)
+                        sub_path = f"{parent_path}/{name}".lstrip("/")
+                        subfolder_files = self._get_files_from_folder(drive_id, subfolder_id, sub_path)
                         files.extend(subfolder_files)
             
         except requests.exceptions.RequestException as e:
