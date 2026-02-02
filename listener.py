@@ -31,6 +31,7 @@ import queue
 import re
 import sys
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from urllib.parse import unquote
@@ -41,6 +42,24 @@ from flask import Flask, request
 
 from goodmem_client import GoodmemClient
 from sharepoint_client import SharePointConnector
+
+
+def load_env(env_file: Optional[str] = None) -> None:
+    """Load environment from a single file. When env_file is given, use only that file (no .env fallback).
+    Resolves relative paths against the script directory so the file is found regardless of cwd.
+    """
+    if not env_file:
+        load_dotenv()
+        return
+    # Resolve relative path against this script's directory so cwd (e.g. uv run) doesn't matter
+    if not os.path.isabs(env_file):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        env_file = os.path.join(script_dir, env_file)
+    if not os.path.isfile(env_file):
+        print(f"Error: env file not found: {env_file}", file=sys.stderr)
+        sys.exit(1)
+    load_dotenv(env_file, override=True)
+
 
 # --- Reused logic from sync_once.py (not importing to keep listener independent) ---
 
@@ -94,6 +113,10 @@ def _download_file(download_url: str) -> bytes:
 DRIVE_ITEM_SUBSCRIPTION_MAX_MINUTES = 42_300
 # Default: 3 days
 DEFAULT_SUBSCRIPTION_MINUTES = 3 * 24 * 60
+# Auto-renewal: renew when expiration is within this many hours
+RENEW_SUBSCRIPTION_THRESHOLD_HOURS = 24
+# Cap sleep so we re-check at least this often (e.g. if sub was deleted externally)
+RENEW_SUBSCRIPTION_MAX_SLEEP_SECONDS = 24 * 3600
 
 # App-global state for webhook handler (set by server entrypoint)
 _connector: Optional[SharePointConnector] = None
@@ -102,6 +125,7 @@ _site_url: Optional[str] = None
 _drive_id: Optional[str] = None
 _space_id: Optional[str] = None
 _client_state: Optional[str] = None
+_notification_url: Optional[str] = None
 
 # Activity log for watchers (last N events)
 _activity_log: list[dict] = []
@@ -188,11 +212,17 @@ def _log_goodmem_error(e: requests.RequestException) -> None:
 
 
 def _ensure_space_id() -> Optional[str]:
-    """Resolve Goodmem space ID from site URL; create space if needed."""
+    """Resolve Goodmem space ID: use DEFAULT_SPACE_ID from env if set; else lookup by site URL or create with DEFAULT_EMBEDDER_ID."""
     global _space_id, _goodmem, _site_url
     if _space_id:
         return _space_id
-    if not _goodmem or not _site_url:
+    if not _goodmem:
+        return None
+    default_space_id = os.getenv("DEFAULT_SPACE_ID")
+    if default_space_id:
+        _space_id = default_space_id.strip()
+        return _space_id
+    if not _site_url:
         return None
     space_name = _space_name_from_site_url(_site_url)
     try:
@@ -255,7 +285,7 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
         content_bytes = _download_file(download_url)
     except Exception as e:
         print(f"[listener] Download failed for {file_info.get('name')}: {e}", file=sys.stderr)
-        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
+        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name, file_name=name, error=str(e))
         return ("error", f"Download failed: {name}")
     metadata = {k: v for k, v in file_info.items() if v is not None}
     try:
@@ -299,7 +329,7 @@ def _remove_memory_for_file_id(file_id: str) -> Optional[str]:
                 _log_goodmem_error(e)
                 print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
                 return None
-            _log_activity("remove", "[Done] Remove: " + name, file_name=name, file_id=file_id)
+            _log_activity("remove", "[Synced] Remove: " + name, file_name=name, file_id=file_id)
             return name
     return None
 
@@ -513,6 +543,148 @@ def create_subscription(
         return None
 
 
+def _parse_expiration_datetime(expiration_str: str) -> Optional[datetime]:
+    """Parse Graph expirationDateTime (ISO 8601, e.g. 2025-02-02T12:00:00.000Z) to timezone-aware datetime."""
+    if not expiration_str:
+        return None
+    try:
+        # Graph uses Z suffix; fromisoformat needs +00:00
+        s = expiration_str.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _subscription_renewal_loop() -> None:
+    """
+    Background loop: treat expirationDateTime as source of truth. Sleep until (expiration - threshold)
+    or MAX_SLEEP, then renew (PATCH). Use new expirationDateTime from response to schedule next run.
+    If no subscription exists, create one (when _notification_url is set) then continue.
+    """
+    global _connector, _drive_id, _client_state, _notification_url
+    threshold = timedelta(hours=RENEW_SUBSCRIPTION_THRESHOLD_HOURS)
+    max_sleep = RENEW_SUBSCRIPTION_MAX_SLEEP_SECONDS
+
+    while True:
+        if not _connector or not _drive_id or not _client_state:
+            time.sleep(max_sleep)
+            continue
+        site_id = _connector.get_site_id()
+        if not site_id:
+            time.sleep(max_sleep)
+            continue
+        resource = f"sites/{site_id}/drives/{_drive_id}/root"
+
+        subs = _list_subscriptions(_connector)
+        sub = None
+        for s in subs:
+            if s.get("resource") == resource and s.get("clientState") == _client_state:
+                sub = s
+                break
+
+        if not sub:
+            # No matching subscription: create if we have notification URL
+            if _notification_url:
+                created = create_subscription(
+                    _connector, _notification_url, _client_state, _drive_id
+                )
+                if created:
+                    exp_str = created.get("expirationDateTime")
+                    exp_dt = _parse_expiration_datetime(exp_str)
+                    if exp_dt:
+                        renew_at = exp_dt - threshold
+                        now = datetime.now(timezone.utc)
+                        sleep_sec = min(
+                            max(0.0, (renew_at - now).total_seconds()),
+                            float(max_sleep),
+                        )
+                        time.sleep(sleep_sec)
+                        continue
+            time.sleep(max_sleep)
+            continue
+
+        exp_str = sub.get("expirationDateTime")
+        exp_dt = _parse_expiration_datetime(exp_str)
+        if not exp_dt:
+            time.sleep(max_sleep)
+            continue
+
+        now = datetime.now(timezone.utc)
+        renew_at = exp_dt - threshold
+
+        if renew_at <= now or exp_dt <= now:
+            # Renew now: expiration is near or already past
+            expiration_minutes = min(
+                DEFAULT_SUBSCRIPTION_MINUTES, DRIVE_ITEM_SUBSCRIPTION_MAX_MINUTES
+            )
+            new_exp = now + timedelta(minutes=expiration_minutes)
+            new_exp_str = new_exp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            renewed = _renew_subscription(_connector, sub["id"], new_exp_str)
+            if renewed:
+                print(
+                    f"[listener] Subscription renewed; next expires {renewed.get('expirationDateTime')}",
+                    file=sys.stderr,
+                )
+                exp_str = renewed.get("expirationDateTime")
+                exp_dt = _parse_expiration_datetime(exp_str)
+                if exp_dt:
+                    renew_at = exp_dt - threshold
+                    now = datetime.now(timezone.utc)
+                    sleep_sec = min(
+                        max(0.0, (renew_at - now).total_seconds()),
+                        float(max_sleep),
+                    )
+                    time.sleep(sleep_sec)
+                    continue
+            time.sleep(max_sleep)
+            continue
+
+        # Sleep until renew_at (capped)
+        sleep_sec = min(
+            max(0.0, (renew_at - now).total_seconds()),
+            float(max_sleep),
+        )
+        time.sleep(sleep_sec)
+
+
+def _run_full_sync(reason: str = "full sync") -> None:
+    """Perform full sync from SharePoint drive root to Goodmem (same logic as sync_once.py). Uses _connector, _goodmem, _drive_id; sets _space_id."""
+    global _connector, _goodmem, _drive_id, _space_id
+    if not _connector or not _drive_id:
+        return
+    _log_activity("info", f"[{reason}] Full sync (SharePoint → Goodmem) started", reason=reason)
+    if not _ensure_space_id():
+        _log_activity("skipped", f"No Goodmem space ({reason})", item_id=None)
+        return
+    try:
+        root_files = _connector.list_files(drive_id=_drive_id, folder_path="", recursive=True)
+        memories = _goodmem.list_all_memories(_space_id) if (_goodmem and _space_id) else []
+    except requests.RequestException as e:
+        _log_goodmem_error(e)
+        print(f"[listener] Goodmem unreachable during {reason}: {e}", file=sys.stderr)
+        return
+    to_add, to_update, to_remove = _compute_delta(root_files, memories)
+    tree_add = _format_tree_by_folder("To Add", [f.get("relative_path") or f.get("name") or f["id"] for f in to_add])
+    tree_update = _format_tree_by_folder("To Update", [f.get("relative_path") or f.get("name") or f["id"] for f in to_update])
+    tree_remove = _format_tree_by_folder("To Remove", [r.get("relative_path", r["name"]) for r in to_remove])
+    delta_message = tree_add + "\n" + tree_update + "\n" + tree_remove
+    _log_activity("delta", delta_message, to_add=len(to_add), to_update=len(to_update), to_remove=len(to_remove))
+    for r in to_remove:
+        rname = r.get("relative_path", r.get("name", r["id"]))
+        _log_activity("syncing", "[Syncing] Remove: " + rname, file_name=rname, file_id=r["id"])
+        _remove_memory_for_file_id(r["id"])
+    for file_info in to_add + to_update:
+        result = _sync_one_file_to_goodmem(file_info)
+        if result:
+            outcome, detail = result
+            if outcome == "synced":
+                pass  # already logged in _sync_one_file_to_goodmem
+            elif outcome == "skipped":
+                pass
+            elif outcome == "error":
+                pass
+
+
 def process_notification_value(value: list) -> None:
     """Process a notification payload (value list). Runs in background worker. Always logs 'what_happened'."""
     synced_names: list[str] = []
@@ -541,40 +713,7 @@ def process_notification_value(value: list) -> None:
             if not _connector:
                 continue
             if change_type == "updated" and drive_id and (not item_id or _is_root_resource(resource)):
-                if not _ensure_space_id():
-                    _log_activity("skipped", "No Goodmem space (root updated)", item_id=None)
-                    skipped_reasons.append("no Goodmem space")
-                    continue
-                root_files = _connector.list_files(drive_id=drive_id, folder_path="", recursive=True)
-                try:
-                    memories = _goodmem.list_all_memories(_space_id) if (_goodmem and _space_id) else []
-                except requests.RequestException as e:
-                    _log_goodmem_error(e)
-                    print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
-                    error_msgs.append("Goodmem unreachable")
-                    continue
-                to_add, to_update, to_remove = _compute_delta(root_files, memories)
-                # Log ASCII trees for delta (to add / to update / to remove)
-                tree_add = _format_tree_by_folder("To Add (new in SharePoint, not in Goodmem)", [f.get("relative_path") or f.get("name") or f["id"] for f in to_add])
-                tree_update = _format_tree_by_folder("To Update (modified in SharePoint)", [f.get("relative_path") or f.get("name") or f["id"] for f in to_update])
-                tree_remove = _format_tree_by_folder("To Remove (in Goodmem, no longer in SharePoint)", [r.get("relative_path", r["name"]) for r in to_remove])
-                delta_message = tree_add + "\n" + tree_update + "\n" + tree_remove
-                _log_activity("delta", delta_message, to_add=len(to_add), to_update=len(to_update), to_remove=len(to_remove))
-                # Remove from Goodmem first
-                for r in to_remove:
-                    _remove_memory_for_file_id(r["id"])
-                    deleted_names.append(r["name"])
-                # Then sync to_add and to_update
-                for file_info in to_add + to_update:
-                    result = _sync_one_file_to_goodmem(file_info)
-                    if result:
-                        outcome, detail = result
-                        if outcome == "synced":
-                            synced_names.append(detail)
-                        elif outcome == "skipped":
-                            skipped_reasons.append(detail)
-                        elif outcome == "error":
-                            error_msgs.append(detail)
+                _run_full_sync(reason="root notification")
                 continue
             if not drive_id or not item_id:
                 continue
@@ -700,8 +839,15 @@ def build_app() -> Flask:
 
 
 def main() -> None:
-    load_dotenv()
-    cmd = (sys.argv[1] if len(sys.argv) > 1 else "").lower()
+    # Parse optional --env-file before command
+    args = sys.argv[1:]
+    env_file = None
+    if args and args[0] == "--env-file" and len(args) >= 2:
+        env_file = args[1]
+        args = args[2:]
+    cmd = (args[0] if args else "").lower()
+
+    load_env(env_file)
 
     client_id = os.getenv("SHAREPOINT_CLIENT_ID")
     tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
@@ -726,6 +872,7 @@ def main() -> None:
         if not notification_url or not client_state:
             print("Error: SYNC_NOTIFICATION_URL and SYNC_CLIENT_STATE are required for create-subscription.", file=sys.stderr)
             sys.exit(1)
+        print(f"  Notification URL: {notification_url}")
         connector = SharePointConnector(
             client_id=client_id,
             tenant_id=tenant_id,
@@ -763,16 +910,27 @@ def main() -> None:
         drives = connector.get_drives()
         drive_id = drives[0].get("id") if drives else None
         goodmem = GoodmemClient(base_url=goodmem_base_url, api_key=goodmem_api_key)
-        # Set globals for webhook handler
-        global _connector, _goodmem, _site_url, _drive_id, _client_state
+        # Set globals for webhook handler and renewal thread
+        global _connector, _goodmem, _site_url, _drive_id, _client_state, _notification_url
         _connector = connector
         _goodmem = goodmem
         _site_url = site_url
         _drive_id = drive_id
         _client_state = client_state
+        _notification_url = (notification_url or "").strip().rstrip("/")
+        if _notification_url and "/sync/webhook" not in _notification_url and "/webhook" not in _notification_url:
+            _notification_url = f"{_notification_url}/sync/webhook"
         app = build_app()
         worker = threading.Thread(target=_worker_loop, daemon=True)
         worker.start()
+        renewal = threading.Thread(target=_subscription_renewal_loop, daemon=True)
+        renewal.start()
+        # Start HTTP server first so Fly/load balancer see the app; run startup sync in background
+        def run_startup_sync() -> None:
+            print("Running startup full sync (same as sync_once)...", flush=True)
+            _run_full_sync(reason="startup")
+            print("Startup full sync done.", flush=True)
+        threading.Thread(target=run_startup_sync, daemon=True).start()
         print(f"Starting webhook server... ✓ Listening on port {sync_port}. Endpoint: /sync/webhook or /")
         app.run(host="0.0.0.0", port=sync_port)
         return
@@ -782,6 +940,7 @@ def main() -> None:
     print("  server              Run Microsoft Graph webhook server (must be reachable over HTTPS).", file=sys.stderr)
     print("  create-subscription Create/recreate Graph API subscription for drive changes.", file=sys.stderr)
     print("", file=sys.stderr)
+    print("  --env-file PATH   Load this env file (e.g. .env.sharepoint-joint). Default: .env", file=sys.stderr)
     print("Env: SYNC_NOTIFICATION_URL, SYNC_CLIENT_STATE, SYNC_PORT (default 5000).", file=sys.stderr)
     print("See permission.md for Azure AD and SharePoint permissions.", file=sys.stderr)
     sys.exit(0)

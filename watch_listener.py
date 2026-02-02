@@ -16,7 +16,10 @@ Usage:
   python watch_listener.py -n 0.5 https://your-app.fly.dev
 
 If LISTENER_BASE_URL is omitted, uses LISTENER_ACTIVITY_URL or SYNC_NOTIFICATION_URL
-from .env (strip /sync/webhook or /webhook from SYNC_NOTIFICATION_URL if set).
+from the env file (strip /sync/webhook or /webhook from SYNC_NOTIFICATION_URL if set).
+
+Use --env-file to load a cluster-specific env (e.g. .env.sharepoint-joint) so the
+watcher uses that file's SYNC_NOTIFICATION_URL when you omit the URL.
 """
 
 import argparse
@@ -26,8 +29,6 @@ import time
 
 import requests
 from dotenv import load_dotenv
-
-load_dotenv()
 
 # Default poll interval (seconds)
 DEFAULT_POLL_INTERVAL = 2
@@ -61,12 +62,24 @@ def main() -> int:
         help=f"Poll interval in seconds (default: {DEFAULT_POLL_INTERVAL})",
     )
     parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        default=None,
+        help="Load this env file for SYNC_NOTIFICATION_URL (e.g. .env.sharepoint-joint). Default: .env",
+    )
+    parser.add_argument(
         "url",
         nargs="?",
         default=None,
-        help="Listener base URL (e.g. https://your-app.fly.dev)",
+        help="Listener base URL (e.g. https://your-app.fly.dev). Overrides URL from env file.",
     )
     args = parser.parse_args()
+
+    # Load .env or the given env file so SYNC_NOTIFICATION_URL / LISTENER_ACTIVITY_URL are set
+    if args.env_file and os.path.isfile(args.env_file):
+        load_dotenv(args.env_file, override=True)
+    else:
+        load_dotenv()
 
     if args.interval <= 0:
         print("Error: interval must be positive.", file=sys.stderr)
@@ -79,7 +92,7 @@ def main() -> int:
             file=sys.stderr,
         )
         print(
-            "  Or set LISTENER_ACTIVITY_URL or SYNC_NOTIFICATION_URL in .env",
+            "  Or set LISTENER_ACTIVITY_URL or SYNC_NOTIFICATION_URL in .env (or use --env-file .env.<cluster>)",
             file=sys.stderr,
         )
         return 1
@@ -88,7 +101,7 @@ def main() -> int:
     last_id: int | None = None
     interval = args.interval
     connected = False
-    last_idle_msg = 0.0  # time of last "no activity" message
+    idle_line_shown = False  # at most one "no new activity" line between activities
 
     print(f"Watching listener activity at {activity_url} (interval: {interval}s)")
     print("(Ctrl+C to stop)\n")
@@ -110,6 +123,9 @@ def main() -> int:
                     connected = True
 
                 if events:
+                    if idle_line_shown:
+                        print()  # end the idle line so events appear below
+                        idle_line_shown = False
                     for e in events:
                         ts = e.get("ts", "")[:19].replace("T", " ")
                         typ = e.get("type", "?")
@@ -118,8 +134,8 @@ def main() -> int:
                         if typ == "delta":
                             for line in msg.split("\n"):
                                 print(f"  {ts}  {line}")
-                        # [Done] Add/Update/Remove: message already has path
-                        elif typ in ("done", "remove"):
+                        # [Syncing] / [Synced] / [Failed] Add/Update/Remove: message already has path
+                        elif typ in ("syncing", "done", "remove"):
                             err = e.get("error")
                             if err:
                                 msg = f"{msg} — {err}"
@@ -132,15 +148,19 @@ def main() -> int:
                             if err:
                                 msg = f"{msg} — {err}"
                             print(f"  {ts}  [{typ}]  {msg}")
+                    idle_line_shown = False  # after activity, allow one idle line again
                 else:
-                    # No new events: print a brief idle line every 30s so you know we're still talking to the hook
-                    now = time.monotonic()
-                    if now - last_idle_msg >= 30:
-                        print("  — no new activity (listener reachable)")
-                        last_idle_msg = now
+                    # No new events: at most one idle line (with timestamp) until next activity
+                    if not idle_line_shown:
+                        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                        print(f"\r  {ts}  — no new activity (listener reachable)\033[K", end="", flush=True)
+                        idle_line_shown = True
 
             except requests.RequestException as e:
                 connected = False
+                if idle_line_shown:
+                    print()
+                    idle_line_shown = False
                 print(f"  (poll error: {e})", file=sys.stderr)
             except KeyboardInterrupt:
                 break
@@ -149,7 +169,9 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
 
-    print("\nStopped.")
+    if idle_line_shown:
+        print()
+    print("Stopped.")
     return 0
 
 

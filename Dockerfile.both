@@ -1,0 +1,15 @@
+# Dockerfile.both — image for one Fly app running Goodmem + Listener (used with fly.both.toml).
+# Listener-only deploys use Dockerfile.listener + fly.listener.toml.
+#
+# Currently runs the Listener only. To run Goodmem in the same container, add Postgres + Goodmem
+# server and a process manager (e.g. supervisord) or a start script that runs Goodmem in background
+# and the Listener in foreground; set GOODMEM_BASE_URL=http://127.0.0.1:<goodmem-port> in env.
+
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY listener.py sharepoint_client.py goodmem_client.py .
+EXPOSE 8080
+ENV PORT=8080
+CMD ["python", "listener.py", "server"]

@@ -176,8 +176,7 @@ def _print_tree(
 
 
 def run_list(depth: int, width: int) -> None:
-    """List SharePoint file hierarchy as ASCII tree. No Goodmem, no sync."""
-    load_dotenv()
+    """List SharePoint file hierarchy as ASCII tree. No Goodmem, no sync. Expects env already loaded by main()."""
     client_id = os.getenv("SHAREPOINT_CLIENT_ID")
     tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
     client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
@@ -302,7 +301,18 @@ def main() -> None:
         metavar="N",
         help="(list) max siblings per level (default: 5)",
     )
+    parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        default=None,
+        help="Load this env file (e.g. .env.mycluster). Default: .env from cwd.",
+    )
     args = parser.parse_args()
+
+    if args.env_file and os.path.isfile(args.env_file):
+        load_dotenv(args.env_file, override=True)
+    else:
+        load_dotenv()
 
     if args.command and args.command.lower() == "list":
         run_list(depth=args.depth, width=args.width)
@@ -310,8 +320,6 @@ def main() -> None:
     if args.command and args.command.lower() == "diff":
         run_diff()
         return
-
-    load_dotenv()
 
     # SharePoint
     client_id = os.getenv("SHAREPOINT_CLIENT_ID")
@@ -358,40 +366,45 @@ def main() -> None:
         return
     print(f"✓ Found {len(files)} file(s).")
 
-    space_name = _space_name_from_site_url(site_url)
-    print(f"Goodmem: Looking up space '{space_name}'...", end=" ", flush=True)
-    space_id = goodmem.find_space_by_name(space_name)
-    if space_id is None:
-        print("Does not exist. Need to create one.")
-        embedder_id = os.getenv("DEFAULT_EMBEDDER_ID")
-        embedder_name: str | None = None
-        if not embedder_id:
-            print("Goodmem: No embedder specified. Listing embedders...", end=" ", flush=True)
-            embedders = goodmem.list_embedders()
-            if not embedders:
-                print("Error: No embedders found and DEFAULT_EMBEDDER_ID not set.")
-                return
-            first = embedders[0]
-            embedder_id = first.get("embedderId")
-            embedder_name = first.get("name") or first.get("embedderName")
-            if not embedder_id:
-                print("Error: First embedder has no embedderId.")
-                return
-            count = len(embedders)
-            name_part = f' "{embedder_name}"' if embedder_name else ""
-            print(f"Found {count}. Using embedder{name_part} <{embedder_id}>.")
-        else:
-            print(f"Goodmem: Using embedder from DEFAULT_EMBEDDER_ID: <{embedder_id}>.")
-        name_part = f' "{embedder_name}"' if embedder_name else ""
-        print(f"Goodmem: Creating space '{space_name}' with embedder{name_part} <{embedder_id}>...", end=" ", flush=True)
-        created = goodmem.create_space(space_name=space_name, embedder_id=embedder_id)
-        space_id = created.get("spaceId")
-        if not space_id:
-            print("Error: create_space did not return spaceId.")
-            return
-        print(f"Created. spaceId={space_id}")
+    default_space_id = os.getenv("DEFAULT_SPACE_ID")
+    if default_space_id:
+        space_id = default_space_id.strip()
+        print(f"Goodmem: Using space from DEFAULT_SPACE_ID: {space_id}")
     else:
-        print("Found. Using existing space.")
+        space_name = _space_name_from_site_url(site_url)
+        print(f"Goodmem: Looking up space '{space_name}'...", end=" ", flush=True)
+        space_id = goodmem.find_space_by_name(space_name)
+        if space_id is None:
+            print("Does not exist. Need to create one.")
+            embedder_id = os.getenv("DEFAULT_EMBEDDER_ID")
+            embedder_name: str | None = None
+            if not embedder_id:
+                print("Goodmem: No embedder specified. Listing embedders...", end=" ", flush=True)
+                embedders = goodmem.list_embedders()
+                if not embedders:
+                    print("Error: No embedders found and DEFAULT_EMBEDDER_ID not set.")
+                    return
+                first = embedders[0]
+                embedder_id = first.get("embedderId")
+                embedder_name = first.get("name") or first.get("embedderName")
+                if not embedder_id:
+                    print("Error: First embedder has no embedderId.")
+                    return
+                count = len(embedders)
+                name_part = f' "{embedder_name}"' if embedder_name else ""
+                print(f"Found {count}. Using embedder{name_part} <{embedder_id}>.")
+            else:
+                print(f"Goodmem: Using embedder from DEFAULT_EMBEDDER_ID: <{embedder_id}>.")
+            name_part = f' "{embedder_name}"' if embedder_name else ""
+            print(f"Goodmem: Creating space '{space_name}' with embedder{name_part} <{embedder_id}>...", end=" ", flush=True)
+            created = goodmem.create_space(space_name=space_name, embedder_id=embedder_id)
+            space_id = created.get("spaceId")
+            if not space_id:
+                print("Error: create_space did not return spaceId.")
+                return
+            print(f"Created. spaceId={space_id}")
+        else:
+            print("Found. Using existing space.")
 
     print("Goodmem: Listing memories...", end=" ", flush=True)
     memories = goodmem.list_all_memories(space_id)

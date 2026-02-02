@@ -9,36 +9,26 @@ sharepoint/
 ├── sharepoint_client.py   # Fetches files from SharePoint (Graph API).
 ├── goodmem_client.py     # Goodmem API client: spaces, ingest, list/delete memories.
 ├── sync_once.py          # One-time full sync: copies all files from SharePoint to Goodmem.
+├── sync_once.sh          # Run manual full sync (Setup steps 1–3); prerequisite: correct .env.
 ├── listener.py           # Graph webhook server: receives change notifications, syncs add/update/delete to Goodmem.
+├── watch_listener.py     # Polls listener /activity; run locally to monitor sync.
+├── deploy_fly_io.sh      # Deploy Goodmem and/or listener to Fly.io (recommended).
 ├── requirements.txt      # Python dependencies. Needed for many deployment platforms despite uv.
-├── Dockerfile            # Used by Fly.io to run listener.py.
-├── fly.toml
+├── Dockerfile.listener   # Listener-only image (fly.listener.toml).
+├── Dockerfile.both       # Listener image when using deploy_fly_io.sh --both.
+├── fly.listener.toml     # Listener-only Fly config.
+├── fly.both.toml         # Listener Fly config for deploy_fly_io.sh --both.
 ├── .env.example
-└── .env                  # Your credentials (do not commit).
+└── .env                  # Your credentials (do not commit). deploy_fly_io.sh copies to .env.<cluster>.
 ```
 
 ---
 
 ## Setup
 
-**Full flow:** (1) Install GoodMem and write down credentials → (2) Obtain permissions and set `.env` (leave `SYNC_NOTIFICATION_URL` for later) → (3) Run initial sync once (`sync_once.py`) → (4) Deploy and run the listener for ongoing changes.
+We have two options: manual sync or continuous sync (webhook).
 
-Follow these four steps in order.
-
-### Step 1: Install GoodMem and write down credentials
-
-Follow instructions [here](https://goodmem.ai/quick-start), to install GoodMem and save the REST URL (`GOODMEM_BASE_URL`) and root API key (`GOODMEM_API_KEY`). You will need them for `.env` in Step 2. 
-
-When it finishes, the script prints:
-
-- **REST ENDPOINT URL** — e.g. `https://zesty-sprout.goodmem.ai` → use as `GOODMEM_BASE_URL`
-- **Root API key** - e.g. `gm_wwzolnjitflg6iz55vuvkma2ea` → use as `GOODMEM_API_KEY`
-
-Save both; you need them for Step 2.
-
----
-
-### Step 2: Obtain permissions and set .env (leave SYNC_NOTIFICATION_URL for later)
+### Prerequisite
 
 1. **Ask IT** to grant the Azure AD app permissions. Share [permission.md](permission.md) with them.
 
@@ -46,129 +36,102 @@ Save both; you need them for Step 2.
    ```bash
    cp .env.example .env
    ```
-   Fill in everything **except** `SYNC_NOTIFICATION_URL` (you set that in Step 4 when the listener app exists):
-
-3. **Install dependencies** (optional):
-   Only needed if you do not use [uv](https://docs.astral.sh/uv/) — uv installs on the fly when you run the scripts.
-
-   ```bash
-   pip install -r requirements.txt
-   ```
----
-
-### Step 3: Initial sync (one-time, or whenever needed, manually or periodically)
-
-Backfill existing SharePoint files into Goodmem. Run once when Goodmem is fresh and SharePoint already has files; after that, the listener (Step 4) handles ongoing changes. If you want to backfill again, run the script again.
-
-```bash
-python sync_once.py
-```
-
-Or with uv: `uv run sync_once.py` (or `chmod +x sync_once.py` and `./sync_once.py`).
+   Fill in at least **Azure** vars (see each part below). For Part 1 (sync once), Goodmem and dependencies can be handled by `sync_once.sh` automatically. For Part 2 (continuous sync) you also set `SYNC_CLIENT_STATE`; `SYNC_NOTIFICATION_URL` is written by `deploy_fly_io.sh` after the listener exists.
 
 ---
 
-### Step 4: Deploying the listener (ongoing sync via Graph webhooks)
+### Part 1: Sync once (manual)
 
-The listener app will keep the Sharepoint and Goodmem in sync whenever there are changes (add, modify, or delete) to the SharePoint files.
+One-time full sync from SharePoint to Goodmem. Use this to backfill existing files or re-run whenever you want a fresh copy.
 
-The instruction below is for deploying the listener app to Fly.io. Support for other platforms will come soon. 
+**Configure in `.env`:**
+- `SHAREPOINT_CLIENT_ID`, `SHAREPOINT_TENANT_ID`, `SHAREPOINT_CLIENT_SECRET`, `SHAREPOINT_SITE_URL`
+- `GOODMEM_BASE_URL`, `GOODMEM_API_KEY` — optional: if missing and Fly CLI is installed, `sync_once.sh` installs Goodmem (get.goodmem.ai/flyio) and writes these to `.env`.
 
-#### Using Fly.io 
-
-The **listener** is a web server that receives Microsoft Graph change notifications (HTTPS). Graph will only call **HTTPS** and **publicly reachable** URLs; subscription creation fails without HTTPS.
-
-**4.0 — First time only: create the listener app and set SYNC_NOTIFICATION_URL**
-
-If the listener Fly app does not exist yet, 
-pick a name for it (e.g., `your-listener-app` in the placeholder below). 
-Then run the commands below to create the app and set the `SYNC_NOTIFICATION_URL` in `.env`. 
-If someone else has already picked that name, it will fail so you know to pick another name. 
-After picking a new name, run the commands again.
-
+**Run:**
 ```bash
-APP_NAME=your-listener-app   
-fly launch --no-deploy --name "$APP_NAME" 
-sed -i "s|^SYNC_NOTIFICATION_URL=.*|SYNC_NOTIFICATION_URL=https://$APP_NAME.fly.dev/sync/webhook|" .env
+./sync_once.sh
+```
+Or with a cluster-specific env: `./sync_once.sh --env-file .env.mycluster`
+
+**What `sync_once.sh` does:** (1) Creates `.env` from `.env.example` if missing (then exits and asks you to fill at least SharePoint vars). (2) If `GOODMEM_BASE_URL` or `GOODMEM_API_KEY` is missing and the Fly CLI is installed, runs the Goodmem installer (Fly.io app name `sharepoint-sync-goodmem` by default; uses `FLY_ORG` / `FLY_REGION` from `.env` if set), writes `GOODMEM_BASE_URL` and `GOODMEM_API_KEY` to the env file, and scales the app to one machine. (3) Checks that all required vars (SharePoint + Goodmem) are set; exits with a clear message if any are missing. (4) Runs the sync: uses `uv run sync_once.py` if uv is available (deps installed on the fly), else `python sync_once.py` and, if that fails, runs `pip install -r requirements.txt` and retries once.
+
+**Under the hood (sync_once.py):** (1) Authenticates with Microsoft Graph, (2) connects to the SharePoint site and fetches the drive, (3) lists all files recursively from the drive root, (4) looks up the Goodmem space by name (derived from the site URL, e.g. `SharePoint_Org_Site`) or creates it if missing, (5) lists existing memories in that space, (6) computes the delta (to add, to update, to remove), (7) deletes from Goodmem any memories for files no longer in SharePoint, (8) for each new or updated file: download and ingest into Goodmem (skipping unsupported MIME types and files already in sync by `modified_datetime`).
+
+**Example output:**
+```
+Authenticating with Microsoft Graph API... ✓ Success.
+Connecting to site... ✓ Connected.
+Fetching files from SharePoint... ✓ Found 12 file(s).
+Goodmem: Looking up space 'SharePoint_MyTenant_MySite'... Found. Using existing space.
+Goodmem: Listing memories... Found 8.
+Goodmem: Deleting memory for removed file: old_doc.pdf
+Goodmem: Ingesting 4 file(s) (1.2 MB total)...
+[====================>                    ] 512.0 KB / 1.2 MB
+Sync complete.
 ```
 
-**4.1 — Import secrets from `.env`**
+---
 
+### Part 2: Continuous sync (listener + webhooks)
+
+The listener keeps SharePoint and Goodmem in sync whenever files change (add, update, delete). It must be reachable over **HTTPS** (e.g. on Fly.io). Run `deploy_fly_io.sh`; it deploys the listener and creates/renews the Graph subscription. The listener runs a startup full sync (same as sync_once) then receives webhooks.
+
+**Configure in `.env`:**
+- Same as Part 1, plus:
+- `SYNC_CLIENT_STATE` — a secret string you choose (used to validate Graph notifications).
+- Optionally `FLY_ORG`, `FLY_REGION`, `OPENAI_API_KEY` (see script help).  
+- `SYNC_NOTIFICATION_URL` — leave unset; the deploy script writes it to `.env.<cluster>` after the listener app exists.
+
+**Run:**
 ```bash
-fly secrets import < .env
+# Deploy both Goodmem and the listener (first time or full refresh)
+./deploy_fly_io.sh --both --org YOUR_ORG
+
+# Or only the listener (Goodmem already exists)
+./deploy_fly_io.sh --listener-only --org YOUR_ORG
+
+# Re-deploy the listener only using a specific .env file (app name derived from file: .env.incorta-sharepoint -> incorta-sharepoint-listener). Omit --org if FLY_ORG is in the env file.
+./deploy_fly_io.sh --listener-only --env-file .env.incorta-sharepoint
 ```
+Use `--org` / `--region` if not set in the env file; run `./deploy_fly_io.sh -h` for all options. The script uses a **cluster name** at the top (e.g. `sharepoint-joint`): Goodmem app = `<cluster>-goodmem`, Listener app = `<cluster>-listener`, env file = `.env.<cluster>`. If `.env.<cluster>` is missing it is created from `.env` and updated with `GOODMEM_BASE_URL`, `GOODMEM_API_KEY`, and `SYNC_NOTIFICATION_URL` after deploy.
 
-**4.2 — Deploy**
+**Under the hood:** (1) **Deploy Goodmem** (if `--both`): runs the [get.goodmem.ai/flyio](https://get.goodmem.ai/flyio) installer, scales to one machine, optionally creates an OpenAI embedder if `OPENAI_API_KEY` is set. (2) **Deploy listener**: creates the Fly app (or uses existing), imports secrets from `.env.<cluster>`, deploys with one machine (`--ha=false`). (3) **Create/renew subscription**: the script runs `listener.py create-subscription --env-file .env.<cluster>` so Microsoft Graph sends change notifications to your listener URL; renew periodically (e.g. every 2 days) or re-run the deploy script. (4) **Listener startup**: on boot it runs a full sync (same logic as sync_once), then handles POSTs to `/sync/webhook`; each notification is queued and processed (root sync or per-item add/update/delete).
 
+**Renew subscription manually** (e.g. before expiry, or if it failed during deploy): `python listener.py create-subscription --env-file .env.sharepoint-joint` (use your `.env.<cluster>`). The script will PATCH the existing subscription instead of creating a duplicate.
+
+**Restarting a suspended listener:** If Fly.io suspends the app when idle, start the machine (not `fly apps resume`):
 ```bash
-fly deploy
+fly machine start $(fly machine list -a sharepoint-joint-listener 2>/dev/null | awk '/^[0-9a-f]{14}/ {print $1; exit}') -a sharepoint-joint-listener
 ```
 
-The project’s `fly.toml` sets `auto_stop_machines = 'off'` and `min_machines_running = 1` so the listener stays running and can receive Graph webhooks even when there is no traffic. If you change these, the app may be stopped or suspended when idle and will miss notifications until you restart it.
-
-**4.3 — Create/Renew the Graph subscription** (from repo root; `.env` must be set, including `SYNC_NOTIFICATION_URL`)
-
-Create the Graph subscription if it does not exist, or renew it (extend expiration) if one already exists for the same drive and `SYNC_CLIENT_STATE`. 
-Keep the subscription renewed by running this script periodically (e.g. every 2 days). When the subscription eventually expires without renewal, syncing between SharePoint and Goodmem stops.
-
-**You can run this before the current subscription expires**; the script will find the existing subscription and PATCH its expiration instead of creating a duplicate. 
-
+**Watch what happens:** Use `watch_listener.py` to monitor the listener’s activity (run locally; use the same env file as your cluster):
 ```bash
-python listener.py create-subscription
+python watch_listener.py --env-file .env.sharepoint-joint -n 0.5
+# Or pass the listener URL:
+python watch_listener.py -n 0.5 https://sharepoint-joint-listener.fly.dev
 ```
+You’ll see notifications received, the root sync plan (To Add / To Update / To Remove), then `[Syncing]` per file and `[Synced]` or `[Failed]` when each finishes. When idle, at most one “no new activity (listener reachable)” line is shown.
 
-**4.4 — Restarting a suspended listener app**
-
-Fly.io may suspend the listener app when it is idle (no traffic). In `fly apps list` the app shows **suspended** and the webhook stops receiving Graph notifications until the app is running again.
-
-To bring the app back up, **start the suspended machine** (do not use `fly apps resume` or `fly scale count`; those do not start suspended machines). From the repo root, using your listener app name (e.g. `sharepoint`):
-
-```bash
-fly machine start $(fly machine list -a sharepoint 2>/dev/null | awk '/^[0-9a-f]{14}/ {print $1; exit}') -a sharepoint
+**Example watcher output:**
 ```
-
-Replace `sharepoint` with your Fly app name if different. Then run `fly apps list` or `fly status -a sharepoint` to confirm the app is **deployed** and the machine is **started**.
-
-**Note:** The script creates a Graph subscription with `changeType: updated` (the only allowed value for drive root), which effectively covers add/modify/delete. When Graph sends a notification, the listener inspects the payload and performs the corresponding Goodmem action (create, delete, or delete-then-recreate for updates).
-
-**References (Microsoft):**
-
-- [subscription resource type](https://learn.microsoft.com/en-us/graph/api/resources/subscription) — `changeType` and drive root/list support only `updated`
-- [Set up change notifications (webhooks)](https://learn.microsoft.com/en-us/graph/change-notifications-overview)
-
-### Step 5 (optional): Watch what happens
-
-Now add/modify/delete a file in SharePoint and watch the file being added/modified/deleted in Goodmem.
-
-You can also use our watcher `watch_listener.py` to monitor the listener's activity.
-
-```bash
-python watch_listener.py
-```
-
-The listener shall print a log like this which contains a delta/diff tree of file changes: 
-
-```
-(baoml) forrest@pop-os:~/repos/PAIR/sharepoint$ python watch_listener.py -n 0.5
-Watching listener activity at https://sharepoint.fly.dev/activity (interval: 0.5s)
-(Ctrl+C to stop)
-
+Watching listener activity at https://sharepoint-joint-listener.fly.dev/activity (interval: 0.5s)
 Connected to listener. Waiting for activity...
 
-  2026-01-31 04:40:15  [notification_received]  Received 1 change(s) from Graph
-  2026-01-31 04:40:15  [notification_received]  Received 1 change(s) from Graph
-  — no new activity (listener reachable)
-  2026-01-31 04:48:39  [notification_received]  Received 1 change(s) from Graph
-  2026-01-31 04:48:40  [notification_received]  Received 1 change(s) from Graph
-  2026-01-31 04:48:41  To Add (new in SharePoint, not in Goodmem):
-  2026-01-31 04:48:41    (none)
-  2026-01-31 04:48:41  To Update (modified in SharePoint):
-  2026-01-31 04:48:41    (none)
-  2026-01-31 04:48:41  To Remove (in Goodmem, no longer in SharePoint):
-  2026-01-31 04:48:41    └── Accelerated Reinforcement Learning for Sentence Generation by Vocabulary Prediction.pdf
-  2026-01-31 04:48:41  [Done] Remove: Accelerated Reinforcement Learning for Sentence Generation by Vocabulary Prediction.pdf
-  — no new activity (listener reachable)
+  2026-02-02 01:19:33  [notification_received]  Received 1 change(s) from Graph
+  2026-02-02 01:19:44  To Add
+  2026-02-02 01:19:44    (none)
+  2026-02-02 01:19:44  To Update
+  2026-02-02 01:19:44    └── Goomem_just_works.docx
+  2026-02-02 01:19:44  To Remove
+  2026-02-02 01:19:44    (none)
+  2026-02-02 01:19:45  [Syncing] Update: Goomem_just_works.docx
+  2026-02-02 01:19:46  [Synced] Update: Goomem_just_works.docx
 ```
+
+**Manual deployment (alternative):** Create the Fly app with `fly launch --no-deploy --name YOUR_LISTENER_APP --config fly.listener.toml`, set `SYNC_NOTIFICATION_URL=https://YOUR_LISTENER_APP.fly.dev/sync/webhook` in `.env`, run `fly secrets import < .env`, then `fly deploy`. The listener stays up for webhooks (`auto_stop_machines = 'off'`, `min_machines_running = 1`).
+
+**References (Microsoft):** [subscription resource type](https://learn.microsoft.com/en-us/graph/api/resources/subscription) · [Change notifications (webhooks)](https://learn.microsoft.com/en-us/graph/change-notifications-overview)
 
 ---
 
@@ -217,13 +180,19 @@ Full sync from SharePoint to Goodmem: fetches all files from the default drive (
 
 ### `listener.py`
 
-Microsoft Graph webhook server. Run `listener.py server` (e.g. on Fly.io via Dockerfile); run `listener.py create-subscription` to create or renew the subscription (if one already exists for the same resource and client state, it is renewed via PATCH instead of creating a duplicate). Requires same SharePoint/Goodmem env as `sync_once.py` plus `SYNC_NOTIFICATION_URL` and `SYNC_CLIENT_STATE`.
+Microsoft Graph webhook server. Run `listener.py server` (e.g. on Fly.io via Dockerfile.listener); run `listener.py create-subscription` to create or renew the subscription (if one already exists for the same resource and client state, it is renewed via PATCH instead of creating a duplicate). Requires same SharePoint/Goodmem env as `sync_once.py` plus `SYNC_NOTIFICATION_URL` and `SYNC_CLIENT_STATE`.
 
-The server exposes **GET /activity** with an in-memory log of recent events (notifications received, Add/Remove per file, coalesced duplicates). Use **`watch_listener.py`** on your local machine to poll and print this log:
+The server exposes **GET /activity** with an in-memory log of recent events. Use **`watch_listener.py`** locally to poll and print this log; pass **`--env-file .env.<cluster>`** to use that env's `SYNC_NOTIFICATION_URL`, or pass the listener base URL as an argument.
 
-```bash
-python watch_listener.py https://your-listener-app.fly.dev
-# or set SYNC_NOTIFICATION_URL (or LISTENER_ACTIVITY_URL) in .env and run:
-python watch_listener.py
+## Known limitations
+
+- It takes about 30 seconds for the update to reach our listener from Azure. 
+- Current implementation requires the listener to do delta every time a push is received. 
+
+
+
+```mermaid
+graph TD
+    A["SharePoint/Azure"] --> B["Listener (must be on public internet and HTTP)"]
+    B --> C[Goodmem]
 ```
-
