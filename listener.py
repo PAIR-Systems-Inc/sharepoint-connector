@@ -22,7 +22,7 @@ Run the webhook server (must be reachable over HTTPS, e.g. via ngrok):
 Create or renew the Graph subscription (run once, or before expiration):
   python listener.py create-subscription
 
-Requires: SYNC_NOTIFICATION_URL, SYNC_CLIENT_STATE, and same SharePoint/Goodmem env as sync_once.py.
+Requires: GRAPH_NOTIFICATION_URL (or SYNC_NOTIFICATION_URL), GRAPH_CLIENT_STATE (or SYNC_CLIENT_STATE), and same SharePoint/Goodmem env as sync_once.py.
 See permission.md for Azure AD / SharePoint permissions.
 """
 
@@ -212,13 +212,13 @@ def _log_goodmem_error(e: requests.RequestException) -> None:
 
 
 def _ensure_space_id() -> Optional[str]:
-    """Resolve Goodmem space ID: use DEFAULT_SPACE_ID from env if set; else lookup by site URL or create with DEFAULT_EMBEDDER_ID."""
+    """Resolve Goodmem space ID: use GOODMEM_SPACE_ID (or SPACE_ID/DEFAULT_SPACE_ID) from env if set; else lookup by site URL or create with GOODMEM_EMBEDDER_ID (or EMBEDDER_ID/DEFAULT_EMBEDDER_ID)."""
     global _space_id, _goodmem, _site_url
     if _space_id:
         return _space_id
     if not _goodmem:
         return None
-    default_space_id = os.getenv("DEFAULT_SPACE_ID")
+    default_space_id = os.getenv("GOODMEM_SPACE_ID") or os.getenv("SPACE_ID") or os.getenv("DEFAULT_SPACE_ID")
     if default_space_id:
         _space_id = default_space_id.strip()
         return _space_id
@@ -229,7 +229,7 @@ def _ensure_space_id() -> Optional[str]:
         _space_id = _goodmem.find_space_by_name(space_name)
         if _space_id is None:
             embedders = _goodmem.list_embedders()
-            embedder_id = (os.getenv("DEFAULT_EMBEDDER_ID") or
+            embedder_id = (os.getenv("GOODMEM_EMBEDDER_ID") or os.getenv("EMBEDDER_ID") or os.getenv("DEFAULT_EMBEDDER_ID") or
                           (embedders[0].get("embedderId") if embedders else None))
             if not embedder_id:
                 print("[listener] No embedder available; cannot create space.", file=sys.stderr)
@@ -863,14 +863,14 @@ def main() -> None:
         print("Error: Missing Goodmem env (GOODMEM_BASE_URL, GOODMEM_API_KEY).", file=sys.stderr)
         sys.exit(1)
 
-    notification_url = (os.getenv("SYNC_NOTIFICATION_URL") or "").strip().rstrip("/")
-    client_state = (os.getenv("SYNC_CLIENT_STATE") or "").strip()
+    notification_url = (os.getenv("GRAPH_NOTIFICATION_URL") or os.getenv("SYNC_NOTIFICATION_URL") or "").strip().rstrip("/")
+    client_state = (os.getenv("GRAPH_CLIENT_STATE") or os.getenv("SYNC_CLIENT_STATE") or "").strip()
     # Many PaaS (Railway, Render, Heroku) set PORT; fall back to SYNC_PORT or 5000
     sync_port = int(os.getenv("PORT") or os.getenv("SYNC_PORT", "5000"))
 
     if cmd == "create-subscription":
         if not notification_url or not client_state:
-            print("Error: SYNC_NOTIFICATION_URL and SYNC_CLIENT_STATE are required for create-subscription.", file=sys.stderr)
+            print("Error: GRAPH_NOTIFICATION_URL and GRAPH_CLIENT_STATE are required for create-subscription.", file=sys.stderr)
             sys.exit(1)
         print(f"  Notification URL: {notification_url}")
         connector = SharePointConnector(
@@ -894,7 +894,7 @@ def main() -> None:
 
     if cmd == "server":
         if not client_state:
-            print("Error: SYNC_CLIENT_STATE is required for server.", file=sys.stderr)
+            print("Error: GRAPH_CLIENT_STATE is required for server.", file=sys.stderr)
             sys.exit(1)
         connector = SharePointConnector(
             client_id=client_id,
@@ -940,8 +940,8 @@ def main() -> None:
     print("  server              Run Microsoft Graph webhook server (must be reachable over HTTPS).", file=sys.stderr)
     print("  create-subscription Create/recreate Graph API subscription for drive changes.", file=sys.stderr)
     print("", file=sys.stderr)
-    print("  --env-file PATH   Load this env file (e.g. .env.sharepoint-joint). Default: .env", file=sys.stderr)
-    print("Env: SYNC_NOTIFICATION_URL, SYNC_CLIENT_STATE, SYNC_PORT (default 5000).", file=sys.stderr)
+    print("  --env-file PATH   Load this env file. Default: .env", file=sys.stderr)
+    print("Env: GRAPH_NOTIFICATION_URL, GRAPH_CLIENT_STATE, SYNC_PORT (default 5000).", file=sys.stderr)
     print("See permission.md for Azure AD and SharePoint permissions.", file=sys.stderr)
     sys.exit(0)
 

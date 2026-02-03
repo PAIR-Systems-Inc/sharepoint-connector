@@ -3,6 +3,15 @@
 .env.*
 !.env.example
 
+# Generated Fly configs (from *.template by deploy_fly_io.sh)
+fly.toml
+fly_io.listener.toml
+fly_io.both.toml
+
+# Legacy Dockerfiles (consolidated into Dockerfile)
+Dockerfile.listener
+Dockerfile.both
+
 # Python
 __pycache__/
 *.py[cod]

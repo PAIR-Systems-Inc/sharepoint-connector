@@ -217,8 +217,7 @@ def run_list(depth: int, width: int) -> None:
 
 
 def run_diff() -> None:
-    """Print file-level diff: SharePoint drive root vs Goodmem space (only_in_sharepoint, only_in_goodmem, in_both)."""
-    load_dotenv()
+    """Print file-level diff: SharePoint drive root vs Goodmem space (only_in_sharepoint, only_in_goodmem, in_both). Expects env already loaded by main()."""
     client_id = os.getenv("SHAREPOINT_CLIENT_ID")
     tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
     client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
@@ -305,14 +304,18 @@ def main() -> None:
         "--env-file",
         metavar="PATH",
         default=None,
-        help="Load this env file (e.g. .env.mycluster). Default: .env from cwd.",
+        help="Load this env file. Default: .env if present, else .env.example.",
     )
     args = parser.parse_args()
 
-    if args.env_file and os.path.isfile(args.env_file):
-        load_dotenv(args.env_file, override=True)
-    else:
-        load_dotenv()
+    # Resolve env file: --env-file if given; else .env if exists, else .env.example
+    env_file = args.env_file
+    if env_file is None:
+        env_file = ".env" if os.path.isfile(".env") else ".env.example"
+    if not os.path.isfile(env_file):
+        print(f"Error: Env file not found: {env_file}", file=sys.stderr)
+        sys.exit(1)
+    load_dotenv(env_file, override=True)
 
     if args.command and args.command.lower() == "list":
         run_list(depth=args.depth, width=args.width)
@@ -321,21 +324,30 @@ def main() -> None:
         run_diff()
         return
 
-    # SharePoint
+    # Required vars for sync (SharePoint + Goodmem)
     client_id = os.getenv("SHAREPOINT_CLIENT_ID")
     tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
     client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
     site_url = os.getenv("SHAREPOINT_SITE_URL")
-    if not all([client_id, tenant_id, client_secret, site_url]):
-        print("Error: Missing SharePoint env vars (SHAREPOINT_CLIENT_ID, TENANT_ID, CLIENT_SECRET, SITE_URL).")
-        return
-
-    # Goodmem
     goodmem_base_url = os.getenv("GOODMEM_BASE_URL")
     goodmem_api_key = os.getenv("GOODMEM_API_KEY")
-    if not goodmem_base_url or not goodmem_api_key:
-        print("Error: Missing Goodmem env vars (GOODMEM_BASE_URL, GOODMEM_API_KEY).")
-        return
+    missing = []
+    if not client_id:
+        missing.append("SHAREPOINT_CLIENT_ID")
+    if not tenant_id:
+        missing.append("SHAREPOINT_TENANT_ID")
+    if not client_secret:
+        missing.append("SHAREPOINT_CLIENT_SECRET")
+    if not site_url:
+        missing.append("SHAREPOINT_SITE_URL")
+    if not goodmem_base_url:
+        missing.append("GOODMEM_BASE_URL")
+    if not goodmem_api_key:
+        missing.append("GOODMEM_API_KEY")
+    if missing:
+        print(f"Error: Missing in {env_file}: {', '.join(missing)}", file=sys.stderr)
+        print("Fill these in (see .env.example). Use --env-file to load a different file.", file=sys.stderr)
+        sys.exit(1)
 
     connector = SharePointConnector(
         client_id=client_id,
@@ -366,23 +378,23 @@ def main() -> None:
         return
     print(f"✓ Found {len(files)} file(s).")
 
-    default_space_id = os.getenv("DEFAULT_SPACE_ID")
+    default_space_id = os.getenv("GOODMEM_SPACE_ID") or os.getenv("SPACE_ID") or os.getenv("DEFAULT_SPACE_ID")
     if default_space_id:
         space_id = default_space_id.strip()
-        print(f"Goodmem: Using space from DEFAULT_SPACE_ID: {space_id}")
+        print(f"Goodmem: Using space from GOODMEM_SPACE_ID: {space_id}")
     else:
         space_name = _space_name_from_site_url(site_url)
         print(f"Goodmem: Looking up space '{space_name}'...", end=" ", flush=True)
         space_id = goodmem.find_space_by_name(space_name)
         if space_id is None:
             print("Does not exist. Need to create one.")
-            embedder_id = os.getenv("DEFAULT_EMBEDDER_ID")
+            embedder_id = os.getenv("GOODMEM_EMBEDDER_ID") or os.getenv("EMBEDDER_ID") or os.getenv("DEFAULT_EMBEDDER_ID")
             embedder_name: str | None = None
             if not embedder_id:
                 print("Goodmem: No embedder specified. Listing embedders...", end=" ", flush=True)
                 embedders = goodmem.list_embedders()
                 if not embedders:
-                    print("Error: No embedders found and DEFAULT_EMBEDDER_ID not set.")
+                    print("Error: No embedders found and GOODMEM_EMBEDDER_ID not set.")
                     return
                 first = embedders[0]
                 embedder_id = first.get("embedderId")
@@ -394,7 +406,7 @@ def main() -> None:
                 name_part = f' "{embedder_name}"' if embedder_name else ""
                 print(f"Found {count}. Using embedder{name_part} <{embedder_id}>.")
             else:
-                print(f"Goodmem: Using embedder from DEFAULT_EMBEDDER_ID: <{embedder_id}>.")
+                print(f"Goodmem: Using embedder from GOODMEM_EMBEDDER_ID: <{embedder_id}>.")
             name_part = f' "{embedder_name}"' if embedder_name else ""
             print(f"Goodmem: Creating space '{space_name}' with embedder{name_part} <{embedder_id}>...", end=" ", flush=True)
             created = goodmem.create_space(space_name=space_name, embedder_id=embedder_id)

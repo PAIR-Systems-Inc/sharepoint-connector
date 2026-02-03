@@ -15,11 +15,11 @@ Usage:
   python watch_listener.py [OPTIONS] [LISTENER_BASE_URL]
   python watch_listener.py -n 0.5 https://your-app.fly.dev
 
-If LISTENER_BASE_URL is omitted, uses LISTENER_ACTIVITY_URL or SYNC_NOTIFICATION_URL
-from the env file (strip /sync/webhook or /webhook from SYNC_NOTIFICATION_URL if set).
+If LISTENER_BASE_URL is omitted, uses LISTENER_ACTIVITY_URL or GRAPH_NOTIFICATION_URL
+from the env file (strip /sync/webhook or /webhook from GRAPH_NOTIFICATION_URL if set; legacy: SYNC_NOTIFICATION_URL).
 
-Use --env-file to load a cluster-specific env (e.g. .env.sharepoint-joint) so the
-watcher uses that file's SYNC_NOTIFICATION_URL when you omit the URL.
+Use --env-file to load a different env file (default: .env) so the
+watcher uses that file's GRAPH_NOTIFICATION_URL when you omit the URL.
 """
 
 import argparse
@@ -36,7 +36,7 @@ DEFAULT_POLL_INTERVAL = 2
 
 def get_listener_base_url(args: argparse.Namespace) -> str | None:
     """Get listener base URL from env or remaining positional arg."""
-    url = os.getenv("LISTENER_ACTIVITY_URL") or os.getenv("SYNC_NOTIFICATION_URL") or ""
+    url = os.getenv("LISTENER_ACTIVITY_URL") or os.getenv("GRAPH_NOTIFICATION_URL") or os.getenv("SYNC_NOTIFICATION_URL") or ""
     url = url.strip().rstrip("/")
     # Strip path so we have base only (e.g. https://app.fly.dev)
     for path in ["/sync/webhook", "/webhook", "/activity"]:
@@ -65,7 +65,7 @@ def main() -> int:
         "--env-file",
         metavar="PATH",
         default=None,
-        help="Load this env file for SYNC_NOTIFICATION_URL (e.g. .env.sharepoint-joint). Default: .env",
+        help="Load this env file for GRAPH_NOTIFICATION_URL (e.g. .env.sharepoint-joint). Default: .env",
     )
     parser.add_argument(
         "url",
@@ -75,7 +75,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Load .env or the given env file so SYNC_NOTIFICATION_URL / LISTENER_ACTIVITY_URL are set
+    # Load .env or the given env file so GRAPH_NOTIFICATION_URL / LISTENER_ACTIVITY_URL are set
     if args.env_file and os.path.isfile(args.env_file):
         load_dotenv(args.env_file, override=True)
     else:
@@ -92,7 +92,7 @@ def main() -> int:
             file=sys.stderr,
         )
         print(
-            "  Or set LISTENER_ACTIVITY_URL or SYNC_NOTIFICATION_URL in .env (or use --env-file .env.<cluster>)",
+            "  Or set LISTENER_ACTIVITY_URL or GRAPH_NOTIFICATION_URL in .env (or use --env-file PATH)",
             file=sys.stderr,
         )
         return 1

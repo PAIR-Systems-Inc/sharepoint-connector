@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 # Deploy to Fly.io: Goodmem and/or SharePoint listener (by mode).
-# Modes: --both (Goodmem then Listener; uses fly.both.toml), --listener-only (uses fly.listener.toml), --goodmem-only.
+# Modes: --both (Goodmem then Listener; uses fly_io.both.toml), --listener-only (uses fly_io.listener.toml), --goodmem-only.
 # If the app name is in use, a random suffix is added and creation is retried until no collision.
-# Set APP_CLUSTER_NAME below; app names are <cluster>-goodmem, <cluster>-listener. Env file is .env.<cluster>.
+# Uses a single .env file (create from .env.example). App names = <FLY_CLUSTER>-goodmem, <FLY_CLUSTER>-listener (FLY_CLUSTER required in .env).
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# --- Cluster name: Goodmem app = <cluster>-goodmem, Listener app = <cluster>-listener. Env file = .env.<cluster>. ---
-APP_CLUSTER_NAME="sharepoint-joint"
-GOODMEM_APP_NAME="${APP_CLUSTER_NAME}-goodmem"
-LISTENER_APP_NAME="${APP_CLUSTER_NAME}-listener"
-ENV_FILE=".env.${APP_CLUSTER_NAME}"
+ENV_FILE=".env"
+ENV_FILE_GIVEN=0
 
-# --- Fly region: default sjc. Override with --region or FLY_REGION in env file. ---
+# --- Fly region: default sjc. Override with --region or FLY_REGION in .env. ---
 FLY_REGION=""
 
 MODE=""
 FLY_ORG=""
-CUSTOM_ENV_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --env-file)
+      ENV_FILE="${2:?Error: --env-file requires a path}"
+      ENV_FILE_GIVEN=1
+      shift 2
+      ;;
     --both)
       MODE="both"
       shift
@@ -34,9 +35,9 @@ while [[ $# -gt 0 ]]; do
       MODE="goodmem_only"
       shift
       ;;
-    --env-file)
-      CUSTOM_ENV_FILE="${2:?Error: --env-file requires a path (e.g. .env.incorta-sharepoint)}"
-      shift 2
+    --generate-only)
+      MODE="generate_only"
+      shift
       ;;
     --org)
       FLY_ORG="${2:?Error: --org requires an organization slug (e.g. pair-systems)}"
@@ -47,24 +48,21 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      echo "Usage: $0 [OPTIONS] --both | --listener-only | --goodmem-only"
+      echo "Usage: $0 [OPTIONS] --both | --listener-only | --goodmem-only | --generate-only"
       echo ""
       echo "Options:"
-      echo "  --env-file F   Use F as the env file (secrets + SYNC_*). For listener-only, app name is derived from F (e.g. .env.incorta-sharepoint -> incorta-sharepoint-listener)."
+      echo "  --env-file F  Use F as env file (default: .env)."
       echo "  --org ORG     Fly.io organization slug (avoids TTY prompt when you have multiple orgs)."
       echo "  --region R    Fly.io region code (default: sjc). e.g. sjc, lax, ewr."
       echo ""
       echo "Modes:"
-      echo "  --both          Deploy Goodmem first, then the listener (uses fly.both.toml)."
-      echo "  --listener-only Deploy only the SharePoint listener (uses fly.listener.toml + Dockerfile.listener)."
+      echo "  --both          Deploy Goodmem first, then the listener (uses fly_io.both.toml)."
+      echo "  --listener-only Deploy only the SharePoint listener (uses fly_io.listener.toml + Dockerfile)."
       echo "  --goodmem-only  Deploy only Goodmem (runs get.goodmem.ai/flyio installer)."
+      echo "  --generate-only Generate fly_io.listener.toml and fly_io.both.toml from templates (no deploy)."
       echo ""
-      echo "Cluster and app names are set at the top of this script (or from --env-file for listener):"
-      echo "  APP_CLUSTER_NAME=$APP_CLUSTER_NAME"
-      echo "  GOODMEM_APP_NAME=$GOODMEM_APP_NAME"
-      echo "  LISTENER_APP_NAME=$LISTENER_APP_NAME"
-      echo "  ENV_FILE=$ENV_FILE  (copy .env.example to this file and set vars)"
-      echo "  FLY_REGION=${FLY_REGION:-sjc}  (default region; override with --region or FLY_REGION in env file)"
+      echo "Uses .env by default (or --env-file F). Copy from .env.example; set Azure, GRAPH_CLIENT_STATE, FLY_CLUSTER; optional FLY_ORG, FLY_REGION."
+      echo "App names: <FLY_CLUSTER>-goodmem, <FLY_CLUSTER>-listener (FLY_CLUSTER required in .env)."
       exit 0
       ;;
     *)
@@ -74,41 +72,63 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Override ENV_FILE and listener app name when --env-file is used (for listener-only or both)
-if [[ -n "$CUSTOM_ENV_FILE" ]]; then
-  ENV_FILE="$CUSTOM_ENV_FILE"
-  # Derive cluster name from env file: .env.incorta-sharepoint -> incorta-sharepoint
-  base="${CUSTOM_ENV_FILE##*/}"
-  if [[ "$base" == .env* ]]; then
-    APP_CLUSTER_NAME="${base#.env}"
-    APP_CLUSTER_NAME="${APP_CLUSTER_NAME#.}"
-  fi
-  LISTENER_APP_NAME="${APP_CLUSTER_NAME}-listener"
-  GOODMEM_APP_NAME="${APP_CLUSTER_NAME}-goodmem"
+# Resolve env file path if relative (so paths work from any cwd)
+if [[ "$ENV_FILE" != /* ]]; then
+  ENV_FILE="$SCRIPT_DIR/$ENV_FILE"
 fi
-
-# Create .env.<cluster> from .env if missing (.env has your real Azure creds; script will write Goodmem + SYNC_* into ENV_FILE)
+# Create .env from .env.example only when using default .env and it's missing; otherwise require file to exist
 if [[ ! -f "$ENV_FILE" ]]; then
-  if [[ ! -f .env ]]; then
-    echo "Error: $ENV_FILE not found and .env not found. Copy .env.example to .env, set Azure credentials and SYNC_CLIENT_STATE, then run this script again." >&2
+  if [[ $ENV_FILE_GIVEN -eq 1 ]]; then
+    echo "Error: env file not found: $ENV_FILE" >&2
     exit 1
   fi
-  cp .env "$ENV_FILE"
-  echo "Created $ENV_FILE from .env. Script will update GOODMEM_* and SYNC_NOTIFICATION_URL in it after deployment."
-  echo ""
+  if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
+    cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
+    echo "Created $ENV_FILE from .env.example. Fill in Azure credentials, GRAPH_CLIENT_STATE, and FLY_CLUSTER (and optionally FLY_ORG, FLY_REGION), then run this script again." >&2
+    exit 1
+  fi
+  echo "Error: $ENV_FILE not found. Copy .env.example to .env, set Azure credentials and GRAPH_CLIENT_STATE, then run this script again." >&2
+  exit 1
 fi
 
-# Use FLY_ORG and FLY_REGION from env file if not set by --org / --region
+# App names: <FLY_CLUSTER>-goodmem, <FLY_CLUSTER>-listener. FLY_CLUSTER is required in .env (legacy: APP_CLUSTER_NAME).
+FLY_CLUSTER=""
 if [[ -f "$ENV_FILE" ]]; then
-  [[ -z "$FLY_ORG" ]] && FLY_ORG="$(grep -E '^FLY_ORG=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')" || :
-  [[ -z "$FLY_REGION" ]] && FLY_REGION="$(grep -E '^FLY_REGION=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')" || :
+  FLY_CLUSTER="$(grep -E '^FLY_CLUSTER=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^FLY_CLUSTER=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n')"
+  [[ -z "$FLY_CLUSTER" ]] && FLY_CLUSTER="$(grep -E '^APP_CLUSTER_NAME=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^APP_CLUSTER_NAME=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n')"
+fi
+if [[ -z "$FLY_CLUSTER" ]]; then
+  echo "Error: FLY_CLUSTER is required in .env (set it in .env.example before copying, or in .env). It controls Fly app names and must be unique to avoid collision. Legacy: APP_CLUSTER_NAME." >&2
+  exit 1
+fi
+GOODMEM_APP_NAME="${FLY_CLUSTER}-goodmem"
+LISTENER_APP_NAME="${FLY_CLUSTER}-listener"
+
+# Use FLY_ORG and FLY_REGION from env file if not set by --org / --region (one var per line; value only)
+if [[ -f "$ENV_FILE" ]]; then
+  [[ -z "$FLY_ORG" ]] && FLY_ORG="$(grep -E '^FLY_ORG=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^FLY_ORG=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n')" || :
+  [[ -z "$FLY_REGION" ]] && FLY_REGION="$(grep -E '^FLY_REGION=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^FLY_REGION=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n')" || :
 fi
 [[ -z "$FLY_REGION" ]] && FLY_REGION="sjc"
 
 if [[ -z "$MODE" ]]; then
-  echo "Error: specify one of --both, --listener-only, or --goodmem-only. Use -h for help." >&2
+  echo "Error: specify one of --both, --listener-only, --goodmem-only, or --generate-only. Use -h for help." >&2
   exit 1
 fi
+
+# Generate fly_io.listener.toml and fly_io.both.toml from templates (app name and region from script/env).
+generate_fly_configs() {
+  local template_dir="$SCRIPT_DIR"
+  for t in fly_io.listener.toml.template fly_io.both.toml.template; do
+    local out="${t%.template}"
+    if [[ ! -f "$template_dir/$t" ]]; then
+      echo "Error: template $t not found." >&2
+      exit 1
+    fi
+    sed "s|{{APP_NAME}}|$LISTENER_APP_NAME|g; s|{{PRIMARY_REGION}}|$FLY_REGION|g" "$template_dir/$t" > "$SCRIPT_DIR/$out"
+    echo "Generated $out (app=$LISTENER_APP_NAME, region=$FLY_REGION)"
+  done
+}
 
 # Prefer flyctl; fall back to fly
 FLY_CMD=""
@@ -207,17 +227,19 @@ print(json.dumps({
 }
 
 # --- Listener (or both): create app (with retry on name collision), secrets, deploy ---
-# $1 = app name, $2 = optional config file (e.g. fly.both.toml for "both on one app"; default = fly.toml)
+# $1 = app name, $2 = optional config file (e.g. fly_io.both.toml for "both on one app"; default = fly_io.listener.toml)
 do_listener() {
   local name="$1"
   local config="${2:-}"
+  generate_fly_configs
+  echo ""
   echo "=== Deploying SharePoint listener ==="
   echo "App name: $name"
   echo "Env file: $ENV_FILE"
   if [[ -n "$config" ]]; then
     echo "Config: $config (both on one app)"
   else
-    echo "Config: fly.listener.toml (listener only)"
+    echo "Config: fly_io.listener.toml (listener only)"
   fi
   echo "Region: $FLY_REGION"
   [[ -n "$FLY_ORG" ]] && echo "Fly org: $FLY_ORG"
@@ -249,10 +271,11 @@ do_listener() {
   echo "Using Fly app name: $name"
   echo ""
 
-  # Remove any existing SYNC_NOTIFICATION_URL line (with or without spaces around =) so no stale value wins
+  # Remove any existing notification URL line so no stale value wins (new and legacy names)
+  sed -i.bak '/^[[:space:]]*GRAPH_NOTIFICATION_URL[[:space:]]*=/d' "$ENV_FILE" 2>/dev/null || true
   sed -i.bak '/^[[:space:]]*SYNC_NOTIFICATION_URL[[:space:]]*=/d' "$ENV_FILE" 2>/dev/null || true
-  echo "SYNC_NOTIFICATION_URL=https://$name.fly.dev/sync/webhook" >> "$ENV_FILE"
-  echo "Set SYNC_NOTIFICATION_URL=https://$name.fly.dev/sync/webhook in $ENV_FILE"
+  echo "GRAPH_NOTIFICATION_URL=https://$name.fly.dev/sync/webhook" >> "$ENV_FILE"
+  echo "Set GRAPH_NOTIFICATION_URL=https://$name.fly.dev/sync/webhook in $ENV_FILE"
   echo ""
 
   echo "Importing secrets from $ENV_FILE..."
@@ -273,23 +296,33 @@ do_listener() {
   echo ""
 
   echo "App is at: https://$name.fly.dev"
-  echo "Creating/renewing Graph subscription (on Fly app so it uses the deployed env)..."
-  $FLY_CMD ssh console -a "$name" -C "python listener.py create-subscription"
-  echo "Watch: python watch_listener.py https://$name.fly.dev"
+  echo "Listener creates the Graph subscription on startup if none exists. Watch: python watch_listener.py https://$name.fly.dev"
 }
 
 # --- Run by mode ---
 case "$MODE" in
   both)
+    # OPENAI_API_KEY required for hands-free: script creates text-embedding-3-small embedder in Goodmem
+    openai_key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r' | head -1)"
+    if [[ -z "${openai_key:-}" ]]; then
+      echo "Error: OPENAI_API_KEY is required in $ENV_FILE for --both (hands-free). Set it so the script can create a text-embedding-3-small embedder in Goodmem." >&2
+      exit 1
+    fi
     do_goodmem
     echo ""
-    do_listener "$LISTENER_APP_NAME" "fly.both.toml"
+    do_listener "$LISTENER_APP_NAME" "fly_io.both.toml"
     ;;
   listener_only)
-    do_listener "$LISTENER_APP_NAME" "fly.listener.toml"
+    do_listener "$LISTENER_APP_NAME" "fly_io.listener.toml"
     ;;
   goodmem_only)
     do_goodmem
+    ;;
+  generate_only)
+    generate_fly_configs
+    echo ""
+    echo "Done. Deploy with: fly deploy -a $LISTENER_APP_NAME --config fly_io.listener.toml (or fly_io.both.toml)."
+    exit 0
     ;;
   *)
     echo "Error: invalid mode $MODE" >&2

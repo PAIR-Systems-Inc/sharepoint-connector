@@ -1,16 +1,13 @@
-# fly.toml app configuration file generated for sharepoint on 2026-01-30T16:02:48-08:00
+# fly_io.both.toml — Fly config for listener when using deploy_fly_io.sh --both (generated from this template)
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'sharepoint'
-primary_region = 'sjc'
+app = '{{APP_NAME}}'
+primary_region = '{{PRIMARY_REGION}}'
 
 [build]
-  # Uses Dockerfile in project root
-
-[env]
-  PORT = "8080"
+  dockerfile = "Dockerfile"
 
 [http_service]
   internal_port = 8080

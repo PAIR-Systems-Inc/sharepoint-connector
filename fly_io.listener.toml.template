@@ -1,13 +1,13 @@
-# fly.listener.toml — listener-only Fly config
+# fly_io.listener.toml — listener-only Fly config (generated from this template by deploy_fly_io.sh)
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'sharepoint'
-primary_region = 'sjc'
+app = '{{APP_NAME}}'
+primary_region = '{{PRIMARY_REGION}}'
 
 [build]
-  dockerfile = "Dockerfile.listener"
+  dockerfile = "Dockerfile"
 
 [env]
   PORT = "8080"
