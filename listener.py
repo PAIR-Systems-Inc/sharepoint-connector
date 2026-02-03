@@ -171,6 +171,8 @@ _activity_log: list[dict] = []
 _activity_lock = threading.Lock()
 _activity_max = 200
 _activity_id = 0
+# Subscription IDs we've already logged "subscription_info" for (so watcher sees current sub once per id)
+_subscription_info_logged_ids: set[str] = set()
 
 # Queue for processing notifications in background (return 200 quickly; coalesce root sync)
 _sync_queue: "queue.Queue[dict]" = queue.Queue()
@@ -614,7 +616,7 @@ def _subscription_renewal_loop() -> None:
     or MAX_SLEEP, then renew (PATCH). Use new expirationDateTime from response to schedule next run.
     If no subscription exists, create one (when _notification_url is set) then continue.
     """
-    global _connector, _drive_id, _client_state, _notification_url
+    global _connector, _drive_id, _client_state, _notification_url, _subscription_info_logged_ids
     threshold = timedelta(hours=RENEW_SUBSCRIPTION_THRESHOLD_HOURS)
     max_sleep = RENEW_SUBSCRIPTION_MAX_SLEEP_SECONDS
 
@@ -646,6 +648,7 @@ def _subscription_renewal_loop() -> None:
                     expiration_minutes=_get_subscription_minutes(),
                 )
                 if created:
+                    _subscription_info_logged_ids.add(created.get("id") or "")
                     exp_str = created.get("expirationDateTime")
                     exp_dt = _parse_expiration_datetime(exp_str)
                     if exp_dt:
@@ -687,6 +690,7 @@ def _subscription_renewal_loop() -> None:
                     expirationDateTime=renewed.get("expirationDateTime"),
                     expiration_minutes=expiration_minutes,
                 )
+                _subscription_info_logged_ids.add(renewed.get("id") or "")
                 exp_str = renewed.get("expirationDateTime")
                 exp_dt = _parse_expiration_datetime(exp_str)
                 if exp_dt:
@@ -700,6 +704,18 @@ def _subscription_renewal_loop() -> None:
                     continue
             time.sleep(max_sleep)
             continue
+
+        # Existing subscription; next renewal at renew_at. Log current sub to listener log once per id so watcher sees it.
+        sub_id = sub.get("id") or ""
+        if sub_id and sub_id not in _subscription_info_logged_ids:
+            exp_str_sub = sub.get("expirationDateTime") or ""
+            _log_activity(
+                "subscription_info",
+                f"Current Graph subscription: id={sub_id}, expires={exp_str_sub}",
+                subscription_id=sub_id,
+                expirationDateTime=exp_str_sub,
+            )
+            _subscription_info_logged_ids.add(sub_id)
 
         # Sleep until renew_at (capped)
         sleep_sec = min(

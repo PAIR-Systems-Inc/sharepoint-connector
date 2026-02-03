@@ -53,17 +53,17 @@ from typing import Callable, List, Dict, Optional
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
-# Graph client_credentials tokens expire in ~1 hour; refresh this many minutes before expiry
-# (override via AZURE_AD_OAUTH_TOKEN_MINUTES in .env)
-DEFAULT_TOKEN_REFRESH_BUFFER_MINUTES = 10
-# Allowed range matches Microsoft access token lifetime: 10 min–24 hours (https://learn.microsoft.com/en-us/entra/identity-platform/configurable-token-lifetimes)
-MIN_TOKEN_REFRESH_BUFFER_MINUTES = 10
-MAX_TOKEN_REFRESH_BUFFER_MINUTES = 1440  # 24 hours
+# Max token validity: we refresh when this many minutes have passed since we got the token (capped by Azure's expires_in).
+# Override via AZURE_AD_OAUTH_TOKEN_MINUTES in .env.
+AZURE_AD_OAUTH_TOKEN_MINUTES_DEFAULT = 60
+AZURE_AD_OAUTH_TOKEN_MINUTES_MIN = 10   # per Microsoft configurable token lifetime
+AZURE_AD_OAUTH_TOKEN_MINUTES_MAX = 1440  # 24 hours
 
 
 def validate_token_refresh_buffer() -> None:
     """
     If AZURE_AD_OAUTH_TOKEN_MINUTES is set in env, ensure it is within [MIN, MAX].
+    It means: max token validity in minutes (how long we consider the token valid before refreshing).
     On invalid value: print error and exit with code 1. Call this at startup before using the connector.
     """
     s = (os.getenv("AZURE_AD_OAUTH_TOKEN_MINUTES") or "").strip()
@@ -77,30 +77,20 @@ def validate_token_refresh_buffer() -> None:
             file=sys.stderr,
         )
         print(
-            f"  Allowed range: {MIN_TOKEN_REFRESH_BUFFER_MINUTES}–{MAX_TOKEN_REFRESH_BUFFER_MINUTES} minutes.",
+            f"  Allowed range: {AZURE_AD_OAUTH_TOKEN_MINUTES_MIN}–{AZURE_AD_OAUTH_TOKEN_MINUTES_MAX} minutes (max token validity).",
             file=sys.stderr,
         )
         sys.exit(1)
-    if val < MIN_TOKEN_REFRESH_BUFFER_MINUTES or val > MAX_TOKEN_REFRESH_BUFFER_MINUTES:
+    if val < AZURE_AD_OAUTH_TOKEN_MINUTES_MIN or val > AZURE_AD_OAUTH_TOKEN_MINUTES_MAX:
         print(
             f"Error: AZURE_AD_OAUTH_TOKEN_MINUTES={val} is out of range.",
             file=sys.stderr,
         )
         print(
-            f"  Allowed range: {MIN_TOKEN_REFRESH_BUFFER_MINUTES}–{MAX_TOKEN_REFRESH_BUFFER_MINUTES} minutes (10 min–24 h, per Microsoft token lifetime).",
+            f"  Allowed range: {AZURE_AD_OAUTH_TOKEN_MINUTES_MIN}–{AZURE_AD_OAUTH_TOKEN_MINUTES_MAX} minutes (max token validity, 10 min–24 h).",
             file=sys.stderr,
         )
         sys.exit(1)
-
-
-def _token_refresh_buffer_seconds() -> int:
-    """Seconds before token expiry to refresh. From env AZURE_AD_OAUTH_TOKEN_MINUTES (minutes) or default."""
-    try:
-        s = (os.getenv("AZURE_AD_OAUTH_TOKEN_MINUTES") or "").strip()
-        minutes = int(s) if s else DEFAULT_TOKEN_REFRESH_BUFFER_MINUTES
-        return minutes * 60
-    except ValueError:
-        return DEFAULT_TOKEN_REFRESH_BUFFER_MINUTES * 60
 
 
 # Load environment variables from .env file
@@ -196,11 +186,13 @@ class SharePointConnector:
             token_response = response.json()
             self.access_token = token_response.get("access_token")
             expires_in = int(token_response.get("expires_in", 3599))
-            buffer = _token_refresh_buffer_seconds()
-            # Refresh before expiry so long-running processes (e.g. listener) don't get 401
-            self._token_expires_at = datetime.now(timezone.utc) + timedelta(
-                seconds=max(0, expires_in - buffer)
-            )
+            # Max validity: user's AZURE_AD_OAUTH_TOKEN_MINUTES (how long token can be valid), capped by Azure's expires_in
+            try:
+                max_valid_minutes = int((os.getenv("AZURE_AD_OAUTH_TOKEN_MINUTES") or "").strip() or AZURE_AD_OAUTH_TOKEN_MINUTES_DEFAULT)
+            except ValueError:
+                max_valid_minutes = AZURE_AD_OAUTH_TOKEN_MINUTES_DEFAULT
+            max_valid_seconds = min(expires_in, max(1, max_valid_minutes) * 60)
+            self._token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=max_valid_seconds)
 
             if not self.access_token:
                 print("Error: No access token received")
