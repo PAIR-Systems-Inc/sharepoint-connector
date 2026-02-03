@@ -113,8 +113,10 @@ def _download_file(download_url: str) -> bytes:
 GRAPH_SUBSCRIPTION_MINUTES_MIN = 45
 GRAPH_SUBSCRIPTION_MINUTES_MAX = 42_300
 GRAPH_SUBSCRIPTION_MINUTES_DEFAULT = 3 * 24 * 60  # 3 days; override with env GRAPH_SUBSCRIPTION_MINUTES
-# Auto-renewal: renew when expiration is within this many hours
-RENEW_SUBSCRIPTION_THRESHOLD_HOURS = 24
+# Auto-renewal: renew when expiration is this many minutes before expiry
+RENEW_SUBSCRIPTION_THRESHOLD_MINUTES = 30
+# Minimum sleep after creating a subscription so Graph list API can return it before we loop (avoids create loop)
+SUBSCRIPTION_CREATE_COOLDOWN_SECONDS = 10
 
 
 def _validate_subscription_minutes_env() -> None:
@@ -238,7 +240,9 @@ def _goodmem_error_message(e: requests.RequestException) -> str:
             return "Goodmem: 404 Not Found — check GOODMEM_BASE_URL or resource path"
         if 500 <= code < 600:
             return f"Goodmem: {code} Server Error — Goodmem service issue"
-        return f"Goodmem: HTTP {code} — {str(e)}"
+        if code == 400:
+            return "Goodmem: 400 Bad Request — check request body or content type (e.g. file type or size)"
+        return f"Goodmem: HTTP {code} — {resp.reason or str(e)}"
     if isinstance(e, requests.exceptions.ConnectionError):
         return "Goodmem: Connection failed — check GOODMEM_BASE_URL or network (e.g. service down)"
     if isinstance(e, requests.exceptions.Timeout):
@@ -315,6 +319,7 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
             return ("skipped", f"unchanged: {name}")
         break
     is_update = bool(existing_memory_id)
+    name_with_id = name + " (id=" + (file_id or "?") + ")"
     try:
         if existing_memory_id:
             _goodmem.delete_memory(existing_memory_id)
@@ -326,7 +331,7 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
         content_bytes = _download_file(download_url)
     except Exception as e:
         print(f"[listener] Download failed for {file_info.get('name')}: {e}", file=sys.stderr)
-        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name, file_name=name, error=str(e))
+        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id, error=str(e))
         return ("error", f"Download failed: {name}")
     metadata = {k: v for k, v in file_info.items() if v is not None}
     try:
@@ -336,16 +341,16 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
             content_type=mime_type or "application/octet-stream",
             metadata=metadata,
         )
-        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name, file_name=name, file_id=file_id)
+        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id)
         return ("synced", name)
     except requests.RequestException as e:
         _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
-        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
+        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id, error=str(e))
         return ("error", f"Ingest failed: {name}")
     except Exception as e:
         print(f"[listener] Ingest failed for {file_info.get('name')}: {e}", file=sys.stderr)
-        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name + " (failed)", file_name=name, error=str(e))
+        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id, error=str(e))
         return ("error", f"Ingest failed: {name}")
 
 
@@ -363,15 +368,15 @@ def _remove_memory_for_file_id(file_id: str) -> Optional[str]:
     for mem in memories:
         meta = mem.get("metadata") or {}
         if meta.get("id") == file_id:
-            name = meta.get("name") or file_id
+            path = meta.get("relative_path") or meta.get("name") or file_id
             try:
                 _goodmem.delete_memory(mem.get("memoryId"))
             except requests.RequestException as e:
                 _log_goodmem_error(e)
                 print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
                 return None
-            _log_activity("remove", "[Synced] Remove: " + name, file_name=name, file_id=file_id)
-            return name
+            _log_activity("remove", "[Synced] Remove: " + path + " (id=" + file_id + ")", file_name=path, file_id=file_id)
+            return path
     return None
 
 
@@ -553,6 +558,7 @@ def create_subscription(
     # If an existing subscription exists for this resource and clientState, renew it
     for sub in _list_subscriptions(connector):
         if sub.get("resource") == resource and sub.get("clientState") == client_state:
+            _log_activity("subscription_renewing", "Renewing Graph subscription", subscription_id=sub.get("id"))
             renewed = _renew_subscription(connector, sub["id"], expiration_str)
             if renewed:
                 print(f"✓ Renewed. id={renewed.get('id')}, expires={expiration_str}")
@@ -566,6 +572,7 @@ def create_subscription(
             return renewed  # return renewed sub or None on failure
 
     # No matching subscription: create new one. Drive root supports only "updated".
+    _log_activity("subscription_creating", "Creating Graph subscription")
     body = {
         "changeType": "updated",
         "notificationUrl": notification_url,
@@ -617,7 +624,7 @@ def _subscription_renewal_loop() -> None:
     If no subscription exists, create one (when _notification_url is set) then continue.
     """
     global _connector, _drive_id, _client_state, _notification_url, _subscription_info_logged_ids
-    threshold = timedelta(hours=RENEW_SUBSCRIPTION_THRESHOLD_HOURS)
+    threshold = timedelta(minutes=RENEW_SUBSCRIPTION_THRESHOLD_MINUTES)
     max_sleep = RENEW_SUBSCRIPTION_MAX_SLEEP_SECONDS
 
     while True:
@@ -658,6 +665,8 @@ def _subscription_renewal_loop() -> None:
                             max(0.0, (renew_at - now).total_seconds()),
                             float(max_sleep),
                         )
+                        # Enforce minimum sleep so Graph list API can return the new sub before we loop (avoids create loop)
+                        sleep_sec = max(sleep_sec, float(SUBSCRIPTION_CREATE_COOLDOWN_SECONDS))
                         time.sleep(sleep_sec)
                         continue
             time.sleep(max_sleep)
@@ -677,6 +686,7 @@ def _subscription_renewal_loop() -> None:
             expiration_minutes = _get_subscription_minutes()
             new_exp = now + timedelta(minutes=expiration_minutes)
             new_exp_str = new_exp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            _log_activity("subscription_renewing", "Renewing Graph subscription", subscription_id=sub.get("id"))
             renewed = _renew_subscription(_connector, sub["id"], new_exp_str)
             if renewed:
                 print(
@@ -758,8 +768,14 @@ def _run_full_sync(reason: str = "full sync") -> None:
     _log_activity("delta", delta_message, to_add=len(to_add), to_update=len(to_update), to_remove=len(to_remove))
     for r in to_remove:
         rname = r.get("relative_path", r.get("name", r["id"]))
-        _log_activity("syncing", "[Syncing] Remove: " + rname, file_name=rname, file_id=r["id"])
+        _log_activity("syncing", "[Syncing] Remove: " + rname + " (id=" + r["id"] + ")", file_name=rname, file_id=r["id"])
         _remove_memory_for_file_id(r["id"])
+    for file_info in to_add:
+        path = file_info.get("relative_path") or file_info.get("name") or file_info["id"]
+        _log_activity("syncing", "[Syncing] Add: " + path + " (id=" + file_info["id"] + ")", file_name=path, file_id=file_info["id"])
+    for file_info in to_update:
+        path = file_info.get("relative_path") or file_info.get("name") or file_info["id"]
+        _log_activity("syncing", "[Syncing] Update: " + path + " (id=" + file_info["id"] + ")", file_name=path, file_id=file_info["id"])
     for file_info in to_add + to_update:
         result = _sync_one_file_to_goodmem(file_info)
         if result:
@@ -770,6 +786,7 @@ def _run_full_sync(reason: str = "full sync") -> None:
                 pass
             elif outcome == "error":
                 pass
+    _log_activity("info", f"[{reason}] Full sync (SharePoint → Goodmem) finished", reason=reason)
 
 
 def process_notification_value(value: list) -> None:
@@ -819,6 +836,9 @@ def process_notification_value(value: list) -> None:
                     _log_activity("skipped", "No Goodmem space", item_id=item_id)
                     skipped_reasons.append("no Goodmem space")
                     continue
+                path = file_info.get("relative_path") or file_info.get("name") or file_info.get("id", item_id)
+                op = "Add" if change_type == "created" else "Update"
+                _log_activity("syncing", "[Syncing] " + op + ": " + path + " (id=" + item_id + ")", file_name=path, file_id=item_id)
                 result = _sync_one_file_to_goodmem(file_info)
                 if result:
                     outcome, detail = result
@@ -997,6 +1017,14 @@ def main() -> None:
             client_secret=client_secret,
             site_url=site_url,
         )
+
+        def _on_token_refresh(reason: str) -> None:
+            start_msg = "OAuth2 authenticating" if reason == "initial" else "OAuth2 re-authenticating"
+            _log_activity("oauth2_start", start_msg, reason=reason)
+            msg = "OAuth2 initial token obtained" if reason == "initial" else f"OAuth2 re-authenticated ({reason})"
+            _log_activity("oauth2_reauth", msg, reason=reason)
+
+        connector.on_token_refresh = _on_token_refresh
         print("Authenticating with Microsoft Graph...", end=" ", flush=True)
         if not connector.authenticate():
             print("✗ Failed.", file=sys.stderr)
@@ -1008,11 +1036,6 @@ def main() -> None:
         # Set globals for webhook handler and renewal thread
         global _connector, _goodmem, _site_url, _drive_id, _client_state, _notification_url
         _connector = connector
-        _connector.on_token_refresh = lambda reason: _log_activity(
-            "oauth2_reauth",
-            f"OAuth2 re-authenticated ({reason})",
-            reason=reason,
-        )
         _goodmem = goodmem
         _site_url = site_url
         _drive_id = drive_id

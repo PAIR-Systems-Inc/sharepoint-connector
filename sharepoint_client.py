@@ -170,6 +170,7 @@ class SharePointConnector:
         Returns:
             True if authentication successful, False otherwise
         """
+        first_auth = not self.access_token
         token_url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
         
         token_data = {
@@ -197,6 +198,8 @@ class SharePointConnector:
             if not self.access_token:
                 print("Error: No access token received")
                 return False
+            if self.on_token_refresh and first_auth:
+                self.on_token_refresh("initial")
             return True
 
         except requests.exceptions.RequestException as e:

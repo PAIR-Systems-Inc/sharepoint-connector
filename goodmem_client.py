@@ -14,6 +14,7 @@
 
 """Goodmem API client for interacting with Goodmem.ai."""
 
+import base64
 import json
 from typing import Any
 from typing import Dict
@@ -22,6 +23,53 @@ from typing import Optional
 from urllib.parse import quote
 
 import requests
+
+
+# ---------------------------------------------------------------------------
+# Commented-out: custom multipart boundary so boundary does NOT appear in file.
+# Some servers split the multipart body on the boundary string. If the file
+# content itself contains a substring that equals the boundary (e.g. random
+# hex in a PDF), the server can mis-parse and return 400 Bad Request or
+# "Invalid JSON". The code below picks a boundary with _choose_multipart_boundary
+# (random hex that is verified not to appear in content_bytes) and builds the
+# body manually with _build_multipart_body. Uncomment and use it if you see
+# 400s on certain files (and add: import secrets at top); otherwise the
+# standard requests data+files approach (used in insert_memory_binary below)
+# is simpler.
+# ---------------------------------------------------------------------------
+# def _choose_multipart_boundary(content_bytes: bytes, length: int = 64) -> str:
+#   """Return a boundary string that does not appear in content_bytes."""
+#   while True:
+#     boundary = secrets.token_hex(length // 2)  # length hex chars
+#     if boundary.encode("ascii") not in content_bytes:
+#       return boundary
+#     length += 16
+#
+# def _build_multipart_body(
+#     boundary: str,
+#     request_json: bytes,
+#     file_bytes: bytes,
+#     file_content_type: str,
+# ) -> bytes:
+#   """Build multipart/form-data body with part 'request' (JSON) then 'file' (binary)."""
+#   b = boundary.encode("ascii")
+#   crlf = b"\r\n"
+#   part1 = (
+#       b"--" + b + crlf
+#       + b'Content-Disposition: form-data; name="request"' + crlf
+#       + b"Content-Type: application/json" + crlf
+#       + crlf
+#       + request_json + crlf
+#   )
+#   part2 = (
+#       b"--" + b + crlf
+#       + b'Content-Disposition: form-data; name="file"; filename="upload"' + crlf
+#       + b"Content-Type: " + file_content_type.encode("ascii") + crlf
+#       + crlf
+#       + file_bytes + crlf
+#   )
+#   end = b"--" + b + b"--" + crlf
+#   return part1 + part2 + end
 
 
 class GoodmemClient:
@@ -131,6 +179,8 @@ class GoodmemClient:
       content_bytes: bytes,
       content_type: str,
       metadata: Optional[Dict[str, Any]] = None,
+      *,
+      use_base64_fallback: bool = True,
   ) -> Dict[str, Any]:
     """Inserts a binary memory into a Goodmem space using multipart upload.
 
@@ -167,11 +217,12 @@ class GoodmemClient:
     if self._debug:
       print(f"[DEBUG] request_data:\n{self._safe_json_dumps(request_data)}")
 
-    # Multipart form data: 'request' as form field, 'file' as file upload
+    # Standard multipart: requests chooses the boundary. If you see 400 on some
+    # files (e.g. "Invalid JSON") and the server splits on boundary, consider
+    # using the commented-out custom boundary logic above (_choose_multipart_boundary
+    # + _build_multipart_body) so the boundary is guaranteed not to appear in the file.
     data = {"request": json.dumps(request_data)}
     files = {"file": ("upload", content_bytes, content_type)}
-
-    # Use only API key header; requests will set Content-Type for multipart
     headers = {"x-api-key": self._api_key}
 
     if self._debug:
@@ -182,7 +233,50 @@ class GoodmemClient:
     if self._debug:
       print(f"[DEBUG] Response status: {response.status_code}")
 
-    response.raise_for_status()
+    if not response.ok:
+      try:
+        err_body = response.json()
+        err_msg = self._safe_json_dumps(err_body)
+        err_str = err_body.get("error", "") if isinstance(err_body, dict) else str(err_body)
+      except Exception:
+        err_msg = response.text or response.reason
+        err_str = response.text or ""
+      # Fallback: if server returned 400 and tried to parse non-JSON as JSON
+      # (e.g. multipart boundary or file bytes), retry with JSON + base64.
+      if (
+          use_base64_fallback
+          and response.status_code == 400
+          and "Invalid JSON" in err_str
+          and len(content_bytes) < 20 * 1024 * 1024
+      ):  # Skip fallback for very large files (>20MB)
+        if self._debug:
+          print("[DEBUG] Retrying with application/json + originalContentB64")
+        json_payload: Dict[str, Any] = {
+            "spaceId": space_id,
+            "contentType": content_type,
+            "originalContentB64": base64.standard_b64encode(content_bytes).decode("ascii"),
+        }
+        if metadata:
+          json_payload["metadata"] = metadata
+        response = requests.post(
+            url,
+            json=json_payload,
+            headers={**self._headers, "x-api-key": self._api_key},
+            timeout=120,
+        )
+        if response.ok:
+          result = response.json()
+          if self._debug:
+            print(f"[DEBUG] Response:\n{self._safe_json_dumps(result)}")
+          return result
+        try:
+          err_msg = self._safe_json_dumps(response.json())
+        except Exception:
+          err_msg = response.text or response.reason
+      raise requests.exceptions.HTTPError(
+          f"HTTP {response.status_code}: {response.reason}. Response: {err_msg}",
+          response=response,
+      )
     result = response.json()
     if self._debug:
       print(f"[DEBUG] Response:\n{self._safe_json_dumps(result)}")

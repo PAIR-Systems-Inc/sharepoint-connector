@@ -26,12 +26,100 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
 
 # Default poll interval (seconds)
 DEFAULT_POLL_INTERVAL = 2
+
+
+def _ts_to_local(ts_iso: str) -> str:
+    """Convert activity log UTC ISO timestamp to local YYYY-MM-DD HH:MM:SS."""
+    if not ts_iso:
+        return ""
+    try:
+        s = ts_iso.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return ts_iso[:19].replace("T", " ")  # fallback
+
+
+def _hierarchical_tag(typ: str, msg: str) -> tuple[str, str] | None:
+    """Map event type (and message) to [category] [action] for display. Returns (category, action) or None for passthrough."""
+    if typ == "oauth2_start":
+        return ("oauth2", "reauth")
+    if typ == "oauth2_reauth":
+        return ("oauth2", "reauth")
+    if typ == "subscription_creating":
+        return ("subscription", "created")
+    if typ == "subscription_created":
+        return ("subscription", "created")
+    if typ == "subscription_renewing":
+        return ("subscription", "renewed")
+    if typ == "subscription_renewed":
+        return ("subscription", "renewed")
+    if typ == "subscription_info":
+        return ("subscription", "info")
+    if typ == "notification_received":
+        return ("notification", "received")
+    if typ == "coalesced":
+        return ("notification", "coalesced")
+    if typ == "delta":
+        return ("sync", "delta")
+    if typ == "diff":
+        return ("sync", "diff")
+    if typ == "info":
+        if msg and "started" in msg.lower():
+            return ("info", "started")
+        if msg and "finished" in msg.lower():
+            return ("info", "finished")
+        if msg and ("subscription length" in msg.lower() or "GRAPH_SUBSCRIPTION" in msg):
+            return ("info", "config")
+        return ("info", "info")
+    if typ == "skipped":
+        return ("skipped", "skipped")
+    if typ == "error":
+        return ("error", "error")
+    if typ == "remove":
+        return None  # handled by _parse_sync_message
+    return None
+
+
+def _parse_sync_message(typ: str, msg: str) -> tuple[str, str] | tuple[str, str, str] | None:
+    """Parse listener sync messages. Returns ('start', op, path) or ('end', op, path, 'DONE'|'FAILED') or None."""
+    if not msg or not isinstance(msg, str):
+        return None
+    msg = msg.strip()
+    # [Syncing] Add: path / [Syncing] Update: path / [Syncing] Remove: path
+    if typ == "syncing" and msg.startswith("[Syncing] "):
+        rest = msg[len("[Syncing] ") :].strip()
+        if ": " in rest:
+            op, path = rest.split(": ", 1)
+            return ("start", op.strip(), path.strip())
+    # [Done] Add: path / [Failed] Add: path
+    if typ == "done":
+        if msg.startswith("[Done] "):
+            rest = msg[len("[Done] ") :].strip()
+            if ": " in rest:
+                op, path = rest.split(": ", 1)
+                return ("end", op.strip(), path.strip(), "DONE")
+        if msg.startswith("[Failed] "):
+            rest = msg[len("[Failed] ") :].strip()
+            if ": " in rest:
+                op, path = rest.split(": ", 1)
+                return ("end", op.strip(), path.strip(), "FAILED")
+    # [Synced] Remove: path (type is "remove")
+    if typ == "remove" and msg.startswith("[Synced] "):
+        rest = msg[len("[Synced] ") :].strip()
+        if ": " in rest:
+            op, path = rest.split(": ", 1)
+            return ("end", op.strip(), path.strip(), "DONE")
+    return None
 
 
 def get_listener_base_url(args: argparse.Namespace) -> str | None:
@@ -127,27 +215,59 @@ def main() -> int:
                         print()  # end the idle line so events appear below
                         idle_line_shown = False
                     for e in events:
-                        ts = e.get("ts", "")[:19].replace("T", " ")
+                        ts = _ts_to_local(e.get("ts", ""))
                         typ = e.get("type", "?")
                         msg = e.get("message", "")
-                        # Delta: ASCII trees (multi-line), print each line indented
+                        parsed = _parse_sync_message(typ, msg)
+                        # Sync lines: [Sync] [Op]: path  [Started] / — [Done] / [FAILED]
+                        if parsed is not None:
+                            if parsed[0] == "start":
+                                _, op, path = parsed
+                                print(f"  {ts}  [Sync] [{op}]: {path}  [Started]")
+                            else:
+                                _, op, path, status = parsed
+                                status_label = "Done" if status == "DONE" else "FAILED"
+                                print(f"  {ts}  [Sync] [{op}]: {path}  —  [{status_label}]")
+                            continue
+                        # OAuth2 / subscription: two lines — [Started] then — [Done]
+                        if typ in ("oauth2_start", "subscription_creating", "subscription_renewing"):
+                            tag = _hierarchical_tag(typ, msg)
+                            if tag:
+                                cat, act = tag
+                                print(f"  {ts}  [{cat}] [{act}]  [Started]")
+                            continue
+                        if typ in ("oauth2_reauth", "subscription_created", "subscription_renewed"):
+                            tag = _hierarchical_tag(typ, msg)
+                            if tag:
+                                cat, act = tag
+                                print(f"  {ts}  [{cat}] [{act}]  —  [Done]")
+                            continue
+                        # Delta: [sync] [delta] then multi-line tree
                         if typ == "delta":
+                            print(f"  {ts}  [sync] [delta]")
                             for line in msg.split("\n"):
                                 print(f"  {ts}  {line}")
-                        # [Syncing] / [Synced] / [Failed] Add/Update/Remove: message already has path
-                        elif typ in ("syncing", "done", "remove"):
+                            continue
+                        # Other: hierarchical [category] [action]  message
+                        tag = _hierarchical_tag(typ, msg)
+                        if tag is not None:
+                            cat, act = tag
                             err = e.get("error")
                             if err:
                                 msg = f"{msg} — {err}"
-                            print(f"  {ts}  {msg}")
-                        else:
                             name = e.get("file_name") or e.get("file_id") or ""
                             if name and name not in msg:
                                 msg = f"{msg} ({name})"
-                            err = e.get("error")
-                            if err:
-                                msg = f"{msg} — {err}"
-                            print(f"  {ts}  [{typ}]  {msg}")
+                            print(f"  {ts}  [{cat}] [{act}]  {msg}")
+                            continue
+                        # Fallback: raw type and message
+                        err = e.get("error")
+                        if err:
+                            msg = f"{msg} — {err}"
+                        name = e.get("file_name") or e.get("file_id") or ""
+                        if name and name not in msg:
+                            msg = f"{msg} ({name})"
+                        print(f"  {ts}  [{typ}]  {msg}")
                     idle_line_shown = False  # after activity, allow one idle line again
                 else:
                     # No new events: at most one idle line (with timestamp) until next activity
