@@ -21,9 +21,9 @@ Basic Usage
     load_dotenv()
 
     connector = SharePointConnector(
-        client_id=os.getenv("SHAREPOINT_CLIENT_ID"),
-        tenant_id=os.getenv("SHAREPOINT_TENANT_ID"),
-        client_secret=os.getenv("SHAREPOINT_CLIENT_SECRET"),
+        client_id=os.getenv("AZURE_AD_CLIENT_ID"),
+        tenant_id=os.getenv("AZURE_AD_TENANT_ID"),
+        client_secret=os.getenv("AZURE_AD_CLIENT_SECRET"),
         site_url=os.getenv("SHAREPOINT_SITE_URL")
     )
 
@@ -46,11 +46,62 @@ List Files from Specific Drive
 """
 
 import os
+import sys
 import requests
 import json
-from typing import List, Dict, Optional
-from datetime import datetime
+from typing import Callable, List, Dict, Optional
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+
+# Graph client_credentials tokens expire in ~1 hour; refresh this many minutes before expiry
+# (override via AZURE_AD_OAUTH_TOKEN_MINUTES in .env)
+DEFAULT_TOKEN_REFRESH_BUFFER_MINUTES = 10
+# Allowed range matches Microsoft access token lifetime: 10 min–24 hours (https://learn.microsoft.com/en-us/entra/identity-platform/configurable-token-lifetimes)
+MIN_TOKEN_REFRESH_BUFFER_MINUTES = 10
+MAX_TOKEN_REFRESH_BUFFER_MINUTES = 1440  # 24 hours
+
+
+def validate_token_refresh_buffer() -> None:
+    """
+    If AZURE_AD_OAUTH_TOKEN_MINUTES is set in env, ensure it is within [MIN, MAX].
+    On invalid value: print error and exit with code 1. Call this at startup before using the connector.
+    """
+    s = (os.getenv("AZURE_AD_OAUTH_TOKEN_MINUTES") or "").strip()
+    if not s:
+        return
+    try:
+        val = int(s)
+    except ValueError:
+        print(
+            f"Error: AZURE_AD_OAUTH_TOKEN_MINUTES must be an integer (got {s!r}).",
+            file=sys.stderr,
+        )
+        print(
+            f"  Allowed range: {MIN_TOKEN_REFRESH_BUFFER_MINUTES}–{MAX_TOKEN_REFRESH_BUFFER_MINUTES} minutes.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if val < MIN_TOKEN_REFRESH_BUFFER_MINUTES or val > MAX_TOKEN_REFRESH_BUFFER_MINUTES:
+        print(
+            f"Error: AZURE_AD_OAUTH_TOKEN_MINUTES={val} is out of range.",
+            file=sys.stderr,
+        )
+        print(
+            f"  Allowed range: {MIN_TOKEN_REFRESH_BUFFER_MINUTES}–{MAX_TOKEN_REFRESH_BUFFER_MINUTES} minutes (10 min–24 h, per Microsoft token lifetime).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _token_refresh_buffer_seconds() -> int:
+    """Seconds before token expiry to refresh. From env AZURE_AD_OAUTH_TOKEN_MINUTES (minutes) or default."""
+    try:
+        s = (os.getenv("AZURE_AD_OAUTH_TOKEN_MINUTES") or "").strip()
+        minutes = int(s) if s else DEFAULT_TOKEN_REFRESH_BUFFER_MINUTES
+        return minutes * 60
+    except ValueError:
+        return DEFAULT_TOKEN_REFRESH_BUFFER_MINUTES * 60
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -74,9 +125,12 @@ class SharePointConnector:
         self.client_secret = client_secret
         self.site_url = site_url
         self.access_token: Optional[str] = None
+        self._token_expires_at: Optional[datetime] = None
         self.base_url = "https://graph.microsoft.com/v1.0"
         self._last_site_data: Optional[Dict] = None
-        
+        # Optional callback(reason: str) when token is refreshed; reason is "expired" (proactive) or "401" (after Unauthorized)
+        self.on_token_refresh: Optional[Callable[[str], None]] = None
+
     def _log_request_exception(self, context: str, e: requests.exceptions.RequestException):
         """Log raw HTTP request and response details for debugging."""
         print(f"\n--- {context}: raw HTTP details ---")
@@ -141,7 +195,13 @@ class SharePointConnector:
             
             token_response = response.json()
             self.access_token = token_response.get("access_token")
-            
+            expires_in = int(token_response.get("expires_in", 3599))
+            buffer = _token_refresh_buffer_seconds()
+            # Refresh before expiry so long-running processes (e.g. listener) don't get 401
+            self._token_expires_at = datetime.now(timezone.utc) + timedelta(
+                seconds=max(0, expires_in - buffer)
+            )
+
             if not self.access_token:
                 print("Error: No access token received")
                 return False
@@ -159,14 +219,36 @@ class SharePointConnector:
             return False
     
     def _get_headers(self) -> Dict[str, str]:
-        """Get HTTP headers with authentication token."""
-        if not self.access_token:
-            raise ValueError("Not authenticated. Call authenticate() first.")
+        """Get HTTP headers with authentication token. Refreshes token if expired or about to expire."""
+        now = datetime.now(timezone.utc)
+        if (
+            not self.access_token
+            or (self._token_expires_at is not None and now >= self._token_expires_at)
+        ):
+            had_token = self._token_expires_at is not None
+            if not self.authenticate():
+                raise ValueError("Not authenticated. Call authenticate() first.")
+            if self.on_token_refresh and had_token:
+                self.on_token_refresh("expired")
         return {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
-    
+
+    def _request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Send a request to Microsoft Graph. On 401, re-authenticate once and retry."""
+        headers = kwargs.pop("headers", None) or {}
+        headers = {**self._get_headers(), **headers}
+        resp = requests.request(method, url, headers=headers, **kwargs)
+        if resp.status_code == 401:
+            if self.authenticate():
+                if self.on_token_refresh:
+                    self.on_token_refresh("401")
+                resp = requests.request(
+                    method, url, headers=self._get_headers(), **kwargs
+                )
+        return resp
+
     def get_site_id(self) -> Optional[str]:
         """
         Get the site ID from the SharePoint site URL.
@@ -185,7 +267,7 @@ class SharePointConnector:
         endpoint = f"{self.base_url}/sites/{hostname}:{site_path}"
         
         try:
-            response = requests.get(endpoint, headers=self._get_headers())
+            response = self._request("GET", endpoint)
             response.raise_for_status()
             
             site_data = response.json()
@@ -238,7 +320,7 @@ class SharePointConnector:
         endpoint = f"{self.base_url}/sites/{site_id}/drives"
         
         try:
-            response = requests.get(endpoint, headers=self._get_headers())
+            response = self._request("GET", endpoint)
             response.raise_for_status()
             
             drives_data = response.json()
@@ -308,7 +390,7 @@ class SharePointConnector:
         
         try:
             # Get initial page
-            response = requests.get(endpoint, headers=self._get_headers())
+            response = self._request("GET", endpoint)
             response.raise_for_status()
             
             data = response.json()
@@ -329,7 +411,7 @@ class SharePointConnector:
             # Handle pagination
             while "@odata.nextLink" in data:
                 next_url = data["@odata.nextLink"]
-                response = requests.get(next_url, headers=self._get_headers())
+                response = self._request("GET", next_url)
                 response.raise_for_status()
                 data = response.json()
                 items = data.get("value", [])
@@ -366,7 +448,7 @@ class SharePointConnector:
         files = []
         
         try:
-            response = requests.get(endpoint, headers=self._get_headers())
+            response = self._request("GET", endpoint)
             response.raise_for_status()
             
             data = response.json()
@@ -387,7 +469,7 @@ class SharePointConnector:
             # Handle pagination
             while "@odata.nextLink" in data:
                 next_url = data["@odata.nextLink"]
-                response = requests.get(next_url, headers=self._get_headers())
+                response = self._request("GET", next_url)
                 response.raise_for_status()
                 data = response.json()
                 items = data.get("value", [])
@@ -416,14 +498,14 @@ class SharePointConnector:
         else:
             endpoint = f"{self.base_url}/drives/{drive_id}/items/{item_id}/children"
         try:
-            response = requests.get(endpoint, headers=self._get_headers(), timeout=30)
+            response = self._request("GET", endpoint, timeout=30)
             response.raise_for_status()
             data = response.json()
             items = data.get("value", [])
             # Handle pagination: collect all pages
             while "@odata.nextLink" in data:
                 next_url = data["@odata.nextLink"]
-                response = requests.get(next_url, headers=self._get_headers(), timeout=30)
+                response = self._request("GET", next_url, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 items.extend(data.get("value", []))
@@ -482,7 +564,7 @@ class SharePointConnector:
         """
         endpoint = f"{self.base_url}/drives/{drive_id}/items/{item_id}"
         try:
-            response = requests.get(endpoint, headers=self._get_headers())
+            response = self._request("GET", endpoint)
             response.raise_for_status()
             item = response.json()
             if "file" not in item:
@@ -546,18 +628,18 @@ class SharePointConnector:
 def main():
     """Main function to demonstrate the connector."""
     # Load credentials from environment variables
-    CLIENT_ID = os.getenv("SHAREPOINT_CLIENT_ID")
-    TENANT_ID = os.getenv("SHAREPOINT_TENANT_ID")
-    CLIENT_SECRET = os.getenv("SHAREPOINT_CLIENT_SECRET")
+    CLIENT_ID = os.getenv("AZURE_AD_CLIENT_ID")
+    TENANT_ID = os.getenv("AZURE_AD_TENANT_ID")
+    CLIENT_SECRET = os.getenv("AZURE_AD_CLIENT_SECRET")
     SITE_URL = os.getenv("SHAREPOINT_SITE_URL")
     
     # Validate that all required credentials are present
     if not all([CLIENT_ID, TENANT_ID, CLIENT_SECRET, SITE_URL]):
         print("Error: Missing required environment variables.")
         print("Please ensure .env file exists with the following variables:")
-        print("  - SHAREPOINT_CLIENT_ID")
-        print("  - SHAREPOINT_TENANT_ID")
-        print("  - SHAREPOINT_CLIENT_SECRET")
+        print("  - AZURE_AD_CLIENT_ID")
+        print("  - AZURE_AD_TENANT_ID")
+        print("  - AZURE_AD_CLIENT_SECRET")
         print("  - SHAREPOINT_SITE_URL")
         print("\nYou can copy .env.example to .env and fill in your credentials.")
         return

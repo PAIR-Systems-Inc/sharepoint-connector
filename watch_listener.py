@@ -16,7 +16,7 @@ Usage:
   python watch_listener.py -n 0.5 https://your-app.fly.dev
 
 If LISTENER_BASE_URL is omitted, uses LISTENER_ACTIVITY_URL or GRAPH_NOTIFICATION_URL
-from the env file (strip /sync/webhook or /webhook from GRAPH_NOTIFICATION_URL if set; legacy: SYNC_NOTIFICATION_URL).
+from the env file (strip /sync/webhook or /webhook from GRAPH_NOTIFICATION_URL if set).
 
 Use --env-file to load a different env file (default: .env) so the
 watcher uses that file's GRAPH_NOTIFICATION_URL when you omit the URL.
@@ -36,7 +36,7 @@ DEFAULT_POLL_INTERVAL = 2
 
 def get_listener_base_url(args: argparse.Namespace) -> str | None:
     """Get listener base URL from env or remaining positional arg."""
-    url = os.getenv("LISTENER_ACTIVITY_URL") or os.getenv("GRAPH_NOTIFICATION_URL") or os.getenv("SYNC_NOTIFICATION_URL") or ""
+    url = os.getenv("LISTENER_ACTIVITY_URL") or os.getenv("GRAPH_NOTIFICATION_URL") or ""
     url = url.strip().rstrip("/")
     # Strip path so we have base only (e.g. https://app.fly.dev)
     for path in ["/sync/webhook", "/webhook", "/activity"]:

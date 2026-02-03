@@ -1,6 +1,6 @@
 # Request for IT: Azure AD app for SharePoint → Goodmem sync
 
-**Request:** Please create an Azure AD app registration with **Application permissions** and provide us with **client_id**, **client_secret**, and **tenant_id** (for our project's `.env` as SHAREPOINT_CLIENT_ID, SHAREPOINT_CLIENT_SECRET, SHAREPOINT_TENANT_ID).
+**Request:** Please create an Azure AD (Microsoft Entra ID) app registration with **Application permissions** and provide us with **client_id**, **client_secret**, and **tenant_id** (for our project's `.env` as AZURE_AD_CLIENT_ID, AZURE_AD_CLIENT_SECRET, AZURE_AD_TENANT_ID).
 
 **Permissions to grant:** **Files.Read.All** and **Sites.Read.All** (Microsoft Graph, Application permissions). Both are required for our sync and webhook listener.
 
@@ -24,7 +24,7 @@ Instructions below follow [Airbyte: Microsoft SharePoint – Set up SharePoint a
    - **Supported account types:** Accounts in this organizational directory only  
    - **Register** (button)
 
-6. Record the **client_id** (Application (client) ID) and **tenant_id** (Directory (tenant) ID). **Provide these to us** (SHAREPOINT_CLIENT_ID and SHAREPOINT_TENANT_ID).
+6. Record the **client_id** (Application (client) ID) and **tenant_id** (Directory (tenant) ID). **Provide these to us** (AZURE_AD_CLIENT_ID and AZURE_AD_TENANT_ID).
 
 7. Select **Certificates & secrets**.
 
@@ -33,7 +33,7 @@ Instructions below follow [Airbyte: Microsoft SharePoint – Set up SharePoint a
    - **Expires:** 1-year (or your policy)  
    - **Add**
 
-9. Copy the **client secret value**; this will be the **client_secret**. **Provide this to us** (SHAREPOINT_CLIENT_SECRET). The value is shown only once.
+9. Copy the **client secret value**; this will be the **client_secret**. **Provide this to us** (AZURE_AD_CLIENT_SECRET). The value is shown only once.
 
 10. Select **API permissions**  
     - Click **Add a permission**

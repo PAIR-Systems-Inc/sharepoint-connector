@@ -27,13 +27,13 @@ from sharepoint_client import SharePointConnector
 def main() -> int:
     load_dotenv()
 
-    client_id = os.getenv("SHAREPOINT_CLIENT_ID")
-    tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
-    client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
+    client_id = os.getenv("AZURE_AD_CLIENT_ID")
+    tenant_id = os.getenv("AZURE_AD_TENANT_ID")
+    client_secret = os.getenv("AZURE_AD_CLIENT_SECRET")
     site_url = os.getenv("SHAREPOINT_SITE_URL")
 
     if not all([client_id, tenant_id, client_secret, site_url]):
-        print("Missing .env: need SHAREPOINT_CLIENT_ID, TENANT_ID, CLIENT_SECRET, SITE_URL", file=sys.stderr)
+        print("Missing .env: need AZURE_AD_CLIENT_ID, AZURE_AD_TENANT_ID, AZURE_AD_CLIENT_SECRET, SHAREPOINT_SITE_URL", file=sys.stderr)
         return 1
 
     connector = SharePointConnector(
@@ -72,7 +72,7 @@ def main() -> int:
     drive_id = drives[0].get("id")
     try:
         endpoint = f"{connector.base_url}/drives/{drive_id}/root/children"
-        resp = requests.get(endpoint, headers=connector._get_headers(), timeout=30)
+        resp = connector._request("GET", endpoint, timeout=30)
         resp.raise_for_status()
     except Exception as e:
         print(f"✗ FAIL. {e} Grant Files.Read.All (application) and admin consent.", file=sys.stderr)

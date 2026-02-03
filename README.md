@@ -54,9 +54,9 @@ python sync_once.py
 
  Use `--env-file` to load a specific env file; otherwise `.env` is used if present, else `.env.example`. You need to set the following environment variables in your `.env` file:
 * Azure crednetials: 
-  * `SHAREPOINT_CLIENT_ID` (ask your IT)
-  * `SHAREPOINT_TENANT_ID` (ask your IT)
-  * `SHAREPOINT_CLIENT_SECRET` (ask your IT)
+  * `AZURE_AD_CLIENT_ID` (ask your IT)
+  * `AZURE_AD_TENANT_ID` (ask your IT)
+  * `AZURE_AD_CLIENT_SECRET` (ask your IT)
   * `SHAREPOINT_SITE_URL` (ask your IT)
 * Goodmem:
   * `GOODMEM_BASE_URL` (ask your IT)
@@ -92,9 +92,9 @@ If Goodmem is already setup (e.g. elsewhere or you deployed it earlier), you onl
 
 Set the following environment variables in your `.env` file:
 * Azure crednetials: 
-  * `SHAREPOINT_CLIENT_ID` (ask your IT)
-  * `SHAREPOINT_TENANT_ID` (ask your IT)
-  * `SHAREPOINT_CLIENT_SECRET` (ask your IT)
+  * `AZURE_AD_CLIENT_ID` (ask your IT)
+  * `AZURE_AD_TENANT_ID` (ask your IT)
+  * `AZURE_AD_CLIENT_SECRET` (ask your IT)
   * `SHAREPOINT_SITE_URL` (ask your IT)
 * Goodmem:
   * `GOODMEM_BASE_URL` (ask your IT)
@@ -142,9 +142,9 @@ You can deploy both Goodmem and Listener to Fly.io in one go. This approach crea
 Set the following environment variables in your `.env` file -- leaving others untouched because they will not be used:
 
 * Azure crednetials: 
-  * `SHAREPOINT_CLIENT_ID` (ask your IT)
-  * `SHAREPOINT_TENANT_ID` (ask your IT)
-  * `SHAREPOINT_CLIENT_SECRET` (ask your IT)
+  * `AZURE_AD_CLIENT_ID` (ask your IT)
+  * `AZURE_AD_TENANT_ID` (ask your IT)
+  * `AZURE_AD_CLIENT_SECRET` (ask your IT)
   * `SHAREPOINT_SITE_URL` (ask your IT)
 * Graph sync:
   * `GRAPH_CLIENT_STATE` (You pick this secret string; Graph subscription clientState)
@@ -293,3 +293,7 @@ The server exposes **GET /activity** with an in-memory log of recent events. Use
 
 - It takes about 30 seconds for the update to reach our listener from Azure. This is a limitation of the Microsoft Graph API.
 - Current implementation requires the listener to do delta every time a push is received. 
+
+##  Roadmap
+
+* Use TOML-based environment file than .env.

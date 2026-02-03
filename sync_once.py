@@ -33,7 +33,7 @@ import requests
 from dotenv import load_dotenv
 
 from goodmem_client import GoodmemClient
-from sharepoint_client import SharePointConnector
+from sharepoint_client import SharePointConnector, validate_token_refresh_buffer
 
 
 def _format_bytes(n: int) -> str:
@@ -177,12 +177,14 @@ def _print_tree(
 
 def run_list(depth: int, width: int) -> None:
     """List SharePoint file hierarchy as ASCII tree. No Goodmem, no sync. Expects env already loaded by main()."""
-    client_id = os.getenv("SHAREPOINT_CLIENT_ID")
-    tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
-    client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
+    client_id = os.getenv("AZURE_AD_CLIENT_ID")
+    tenant_id = os.getenv("AZURE_AD_TENANT_ID")
+    client_secret = os.getenv("AZURE_AD_CLIENT_SECRET")
     site_url = os.getenv("SHAREPOINT_SITE_URL")
     if not all([client_id, tenant_id, client_secret, site_url]):
-        print("Error: Missing SharePoint env vars (SHAREPOINT_CLIENT_ID, TENANT_ID, CLIENT_SECRET, SITE_URL).")
+        print(
+            "Error: Missing env vars (AZURE_AD_CLIENT_ID/AZURE_AD_TENANT_ID/AZURE_AD_CLIENT_SECRET and SHAREPOINT_SITE_URL)."
+        )
         return
     connector = SharePointConnector(
         client_id=client_id,
@@ -218,12 +220,14 @@ def run_list(depth: int, width: int) -> None:
 
 def run_diff() -> None:
     """Print file-level diff: SharePoint drive root vs Goodmem space (only_in_sharepoint, only_in_goodmem, in_both). Expects env already loaded by main()."""
-    client_id = os.getenv("SHAREPOINT_CLIENT_ID")
-    tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
-    client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
+    client_id = os.getenv("AZURE_AD_CLIENT_ID")
+    tenant_id = os.getenv("AZURE_AD_TENANT_ID")
+    client_secret = os.getenv("AZURE_AD_CLIENT_SECRET")
     site_url = os.getenv("SHAREPOINT_SITE_URL")
     if not all([client_id, tenant_id, client_secret, site_url]):
-        print("Error: Missing SharePoint env vars.")
+        print(
+            "Error: Missing env vars (AZURE_AD_CLIENT_ID/AZURE_AD_TENANT_ID/AZURE_AD_CLIENT_SECRET and SHAREPOINT_SITE_URL)."
+        )
         return
     goodmem_base_url = os.getenv("GOODMEM_BASE_URL")
     goodmem_api_key = os.getenv("GOODMEM_API_KEY")
@@ -316,6 +320,7 @@ def main() -> None:
         print(f"Error: Env file not found: {env_file}", file=sys.stderr)
         sys.exit(1)
     load_dotenv(env_file, override=True)
+    validate_token_refresh_buffer()
 
     if args.command and args.command.lower() == "list":
         run_list(depth=args.depth, width=args.width)
@@ -325,19 +330,19 @@ def main() -> None:
         return
 
     # Required vars for sync (SharePoint + Goodmem)
-    client_id = os.getenv("SHAREPOINT_CLIENT_ID")
-    tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
-    client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
+    client_id = os.getenv("AZURE_AD_CLIENT_ID")
+    tenant_id = os.getenv("AZURE_AD_TENANT_ID")
+    client_secret = os.getenv("AZURE_AD_CLIENT_SECRET")
     site_url = os.getenv("SHAREPOINT_SITE_URL")
     goodmem_base_url = os.getenv("GOODMEM_BASE_URL")
     goodmem_api_key = os.getenv("GOODMEM_API_KEY")
     missing = []
     if not client_id:
-        missing.append("SHAREPOINT_CLIENT_ID")
+        missing.append("AZURE_AD_CLIENT_ID")
     if not tenant_id:
-        missing.append("SHAREPOINT_TENANT_ID")
+        missing.append("AZURE_AD_TENANT_ID")
     if not client_secret:
-        missing.append("SHAREPOINT_CLIENT_SECRET")
+        missing.append("AZURE_AD_CLIENT_SECRET")
     if not site_url:
         missing.append("SHAREPOINT_SITE_URL")
     if not goodmem_base_url:

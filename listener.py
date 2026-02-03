@@ -22,7 +22,7 @@ Run the webhook server (must be reachable over HTTPS, e.g. via ngrok):
 Create or renew the Graph subscription (run once, or before expiration):
   python listener.py create-subscription
 
-Requires: GRAPH_NOTIFICATION_URL (or SYNC_NOTIFICATION_URL), GRAPH_CLIENT_STATE (or SYNC_CLIENT_STATE), and same SharePoint/Goodmem env as sync_once.py.
+Requires: GRAPH_NOTIFICATION_URL, GRAPH_CLIENT_STATE, and same SharePoint/Goodmem env as sync_once.py.
 See permission.md for Azure AD / SharePoint permissions.
 """
 
@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 from flask import Flask, request
 
 from goodmem_client import GoodmemClient
-from sharepoint_client import SharePointConnector
+from sharepoint_client import SharePointConnector, validate_token_refresh_buffer
 
 
 def load_env(env_file: Optional[str] = None) -> None:
@@ -109,12 +109,51 @@ def _download_file(download_url: str) -> bytes:
 
 # --- Subscription and webhook ---
 
-# driveItem max expiration per Microsoft docs (under 30 days)
-DRIVE_ITEM_SUBSCRIPTION_MAX_MINUTES = 42_300
-# Default: 3 days
-DEFAULT_SUBSCRIPTION_MINUTES = 3 * 24 * 60
+# driveItem limits per Microsoft docs (min 45 min, max under 30 days)
+GRAPH_SUBSCRIPTION_MINUTES_MIN = 45
+GRAPH_SUBSCRIPTION_MINUTES_MAX = 42_300
+GRAPH_SUBSCRIPTION_MINUTES_DEFAULT = 3 * 24 * 60  # 3 days; override with env GRAPH_SUBSCRIPTION_MINUTES
 # Auto-renewal: renew when expiration is within this many hours
 RENEW_SUBSCRIPTION_THRESHOLD_HOURS = 24
+
+
+def _validate_subscription_minutes_env() -> None:
+    """If GRAPH_SUBSCRIPTION_MINUTES is set, must be an integer in [45, 42300]. Exits with message otherwise."""
+    val = os.getenv("GRAPH_SUBSCRIPTION_MINUTES")
+    if not val or not val.strip():
+        return
+    try:
+        n = int(val.strip())
+    except ValueError:
+        print(
+            "Error: GRAPH_SUBSCRIPTION_MINUTES must be a number.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if n < GRAPH_SUBSCRIPTION_MINUTES_MIN:
+        print(
+            f"Error: GRAPH_SUBSCRIPTION_MINUTES is {n}; Microsoft Graph requires at least 45 minutes for driveItem subscriptions.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if n > GRAPH_SUBSCRIPTION_MINUTES_MAX:
+        print(
+            f"Error: GRAPH_SUBSCRIPTION_MINUTES is {n}; Microsoft Graph allows at most 42,300 minutes (~30 days) for driveItem subscriptions.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def _get_subscription_minutes() -> int:
+    """Subscription length in minutes from env (GRAPH_SUBSCRIPTION_MINUTES), clamped to [45, 42300]. Use short values (e.g. 45) to test re-subscribe. Call _validate_subscription_minutes_env() first so invalid values exit early."""
+    val = os.getenv("GRAPH_SUBSCRIPTION_MINUTES")
+    if val is not None:
+        try:
+            n = int(val.strip())
+            return min(max(GRAPH_SUBSCRIPTION_MINUTES_MIN, n), GRAPH_SUBSCRIPTION_MINUTES_MAX)
+        except ValueError:
+            pass
+    return min(GRAPH_SUBSCRIPTION_MINUTES_DEFAULT, GRAPH_SUBSCRIPTION_MINUTES_MAX)
 # Cap sleep so we re-check at least this often (e.g. if sub was deleted externally)
 RENEW_SUBSCRIPTION_MAX_SLEEP_SECONDS = 24 * 3600
 
@@ -451,7 +490,7 @@ def _list_subscriptions(connector: SharePointConnector) -> list[dict]:
     """Return list of change-notification subscriptions for the app."""
     url = f"{connector.base_url}/subscriptions"
     try:
-        resp = requests.get(url, headers=connector._get_headers(), timeout=30)
+        resp = connector._request("GET", url, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         return data.get("value") or []
@@ -467,10 +506,10 @@ def _renew_subscription(
     """Extend a subscription's expiration via PATCH. Returns updated sub JSON or None."""
     url = f"{connector.base_url}/subscriptions/{subscription_id}"
     try:
-        resp = requests.patch(
+        resp = connector._request(
+            "PATCH",
             url,
             json={"expirationDateTime": expiration_str},
-            headers=connector._get_headers(),
             timeout=30,
         )
         resp.raise_for_status()
@@ -485,7 +524,7 @@ def create_subscription(
     notification_url: str,
     client_state: str,
     drive_id: Optional[str] = None,
-    expiration_minutes: int = DEFAULT_SUBSCRIPTION_MINUTES,
+    expiration_minutes: int = GRAPH_SUBSCRIPTION_MINUTES_DEFAULT,
 ) -> Optional[dict]:
     """
     Create or renew the Microsoft Graph subscription for driveItem changes on the given drive.
@@ -503,7 +542,7 @@ def create_subscription(
             return None
         drive_id = drives[0].get("id")
     connector.print_site_info()
-    expiration_minutes = min(expiration_minutes, DRIVE_ITEM_SUBSCRIPTION_MAX_MINUTES)
+    expiration_minutes = min(expiration_minutes, GRAPH_SUBSCRIPTION_MINUTES_MAX)
     expiration = datetime.now(timezone.utc) + timedelta(minutes=expiration_minutes)
     expiration_str = expiration.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     resource = f"sites/{site_id}/drives/{drive_id}/root"
@@ -515,6 +554,13 @@ def create_subscription(
             renewed = _renew_subscription(connector, sub["id"], expiration_str)
             if renewed:
                 print(f"✓ Renewed. id={renewed.get('id')}, expires={expiration_str}")
+                _log_activity(
+                    "subscription_renewed",
+                    f"Graph subscription renewed (expires {expiration_str})",
+                    subscription_id=renewed.get("id"),
+                    expirationDateTime=expiration_str,
+                    expiration_minutes=expiration_minutes,
+                )
             return renewed  # return renewed sub or None on failure
 
     # No matching subscription: create new one. Drive root supports only "updated".
@@ -528,10 +574,17 @@ def create_subscription(
     }
     url = f"{connector.base_url}/subscriptions"
     try:
-        resp = requests.post(url, json=body, headers=connector._get_headers(), timeout=30)
+        resp = connector._request("POST", url, json=body, timeout=30)
         resp.raise_for_status()
         sub = resp.json()
         print(f"✓ Created. id={sub.get('id')}, expires={expiration_str}")
+        _log_activity(
+            "subscription_created",
+            f"Graph subscription created (expires {expiration_str})",
+            subscription_id=sub.get("id"),
+            expirationDateTime=expiration_str,
+            expiration_minutes=expiration_minutes,
+        )
         return sub
     except requests.RequestException as e:
         print(f"✗ Failed. {e}", file=sys.stderr)
@@ -586,7 +639,11 @@ def _subscription_renewal_loop() -> None:
             # No matching subscription: create if we have notification URL
             if _notification_url:
                 created = create_subscription(
-                    _connector, _notification_url, _client_state, _drive_id
+                    _connector,
+                    _notification_url,
+                    _client_state,
+                    _drive_id,
+                    expiration_minutes=_get_subscription_minutes(),
                 )
                 if created:
                     exp_str = created.get("expirationDateTime")
@@ -614,9 +671,7 @@ def _subscription_renewal_loop() -> None:
 
         if renew_at <= now or exp_dt <= now:
             # Renew now: expiration is near or already past
-            expiration_minutes = min(
-                DEFAULT_SUBSCRIPTION_MINUTES, DRIVE_ITEM_SUBSCRIPTION_MAX_MINUTES
-            )
+            expiration_minutes = _get_subscription_minutes()
             new_exp = now + timedelta(minutes=expiration_minutes)
             new_exp_str = new_exp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             renewed = _renew_subscription(_connector, sub["id"], new_exp_str)
@@ -624,6 +679,13 @@ def _subscription_renewal_loop() -> None:
                 print(
                     f"[listener] Subscription renewed; next expires {renewed.get('expirationDateTime')}",
                     file=sys.stderr,
+                )
+                _log_activity(
+                    "subscription_renewed",
+                    f"Graph subscription renewed (expires {renewed.get('expirationDateTime')})",
+                    subscription_id=renewed.get("id"),
+                    expirationDateTime=renewed.get("expirationDateTime"),
+                    expiration_minutes=expiration_minutes,
                 )
                 exp_str = renewed.get("expirationDateTime")
                 exp_dt = _parse_expiration_datetime(exp_str)
@@ -662,6 +724,15 @@ def _run_full_sync(reason: str = "full sync") -> None:
     except requests.RequestException as e:
         _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable during {reason}: {e}", file=sys.stderr)
+        return
+    # Guard: if SharePoint returned no files but we have memories, do not run delta — likely API/auth failure (e.g. expired token). Avoid deleting everything.
+    if not root_files and memories:
+        _log_activity(
+            "error",
+            "SharePoint list_files returned no files but Goodmem has memories; skipping full sync to avoid deleting everything (possible API/auth failure).",
+            memory_count=len(memories),
+        )
+        print("[listener] Skipping full sync: SharePoint returned 0 files but Goodmem has memories (possible auth/API failure).", file=sys.stderr)
         return
     to_add, to_update, to_remove = _compute_delta(root_files, memories)
     tree_add = _format_tree_by_folder("To Add", [f.get("relative_path") or f.get("name") or f["id"] for f in to_add])
@@ -848,13 +919,19 @@ def main() -> None:
     cmd = (args[0] if args else "").lower()
 
     load_env(env_file)
+    validate_token_refresh_buffer()
+    _validate_subscription_minutes_env()
 
-    client_id = os.getenv("SHAREPOINT_CLIENT_ID")
-    tenant_id = os.getenv("SHAREPOINT_TENANT_ID")
-    client_secret = os.getenv("SHAREPOINT_CLIENT_SECRET")
+    # Azure AD (Entra ID) app credentials
+    client_id = os.getenv("AZURE_AD_CLIENT_ID")
+    tenant_id = os.getenv("AZURE_AD_TENANT_ID")
+    client_secret = os.getenv("AZURE_AD_CLIENT_SECRET")
     site_url = os.getenv("SHAREPOINT_SITE_URL")
     if not all([client_id, tenant_id, client_secret, site_url]):
-        print("Error: Missing SharePoint env (SHAREPOINT_CLIENT_ID, TENANT_ID, CLIENT_SECRET, SITE_URL).", file=sys.stderr)
+        print(
+            "Error: Missing env for Azure AD/SharePoint (AZURE_AD_CLIENT_ID, AZURE_AD_TENANT_ID, AZURE_AD_CLIENT_SECRET, SHAREPOINT_SITE_URL).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     goodmem_base_url = os.getenv("GOODMEM_BASE_URL")
@@ -863,10 +940,10 @@ def main() -> None:
         print("Error: Missing Goodmem env (GOODMEM_BASE_URL, GOODMEM_API_KEY).", file=sys.stderr)
         sys.exit(1)
 
-    notification_url = (os.getenv("GRAPH_NOTIFICATION_URL") or os.getenv("SYNC_NOTIFICATION_URL") or "").strip().rstrip("/")
-    client_state = (os.getenv("GRAPH_CLIENT_STATE") or os.getenv("SYNC_CLIENT_STATE") or "").strip()
-    # Many PaaS (Railway, Render, Heroku) set PORT; fall back to SYNC_PORT or 5000
-    sync_port = int(os.getenv("PORT") or os.getenv("SYNC_PORT", "5000"))
+    notification_url = (os.getenv("GRAPH_NOTIFICATION_URL") or "").strip().rstrip("/")
+    client_state = (os.getenv("GRAPH_CLIENT_STATE") or "").strip()
+    # Many PaaS (Railway, Render, Heroku) set PORT; fall back to GRAPH_PORT or 5000
+    sync_port = int(os.getenv("PORT") or os.getenv("GRAPH_PORT", "5000"))
 
     if cmd == "create-subscription":
         if not notification_url or not client_state:
@@ -887,7 +964,9 @@ def main() -> None:
         # Ensure URL has the path Microsoft Graph will POST to (e.g. /sync/webhook)
         if "/sync/webhook" not in notification_url and "/webhook" not in notification_url:
             notification_url = f"{notification_url}/sync/webhook"
-        sub = create_subscription(connector, notification_url, client_state)
+        sub = create_subscription(
+            connector, notification_url, client_state, expiration_minutes=_get_subscription_minutes()
+        )
         if not sub:
             sys.exit(1)
         return
@@ -913,6 +992,11 @@ def main() -> None:
         # Set globals for webhook handler and renewal thread
         global _connector, _goodmem, _site_url, _drive_id, _client_state, _notification_url
         _connector = connector
+        _connector.on_token_refresh = lambda reason: _log_activity(
+            "oauth2_reauth",
+            f"OAuth2 re-authenticated ({reason})",
+            reason=reason,
+        )
         _goodmem = goodmem
         _site_url = site_url
         _drive_id = drive_id
@@ -920,6 +1004,12 @@ def main() -> None:
         _notification_url = (notification_url or "").strip().rstrip("/")
         if _notification_url and "/sync/webhook" not in _notification_url and "/webhook" not in _notification_url:
             _notification_url = f"{_notification_url}/sync/webhook"
+        sub_mins = _get_subscription_minutes()
+        _log_activity(
+            "info",
+            f"Graph subscription length: {sub_mins} minutes (set GRAPH_SUBSCRIPTION_MINUTES to test re-subscribe)",
+            subscription_minutes=sub_mins,
+        )
         app = build_app()
         worker = threading.Thread(target=_worker_loop, daemon=True)
         worker.start()
@@ -941,7 +1031,7 @@ def main() -> None:
     print("  create-subscription Create/recreate Graph API subscription for drive changes.", file=sys.stderr)
     print("", file=sys.stderr)
     print("  --env-file PATH   Load this env file. Default: .env", file=sys.stderr)
-    print("Env: GRAPH_NOTIFICATION_URL, GRAPH_CLIENT_STATE, SYNC_PORT (default 5000).", file=sys.stderr)
+    print("Env: GRAPH_NOTIFICATION_URL, GRAPH_CLIENT_STATE, GRAPH_PORT (default 5000).", file=sys.stderr)
     print("See permission.md for Azure AD and SharePoint permissions.", file=sys.stderr)
     sys.exit(0)
 
