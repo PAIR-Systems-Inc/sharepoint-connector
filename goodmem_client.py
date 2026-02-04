@@ -193,6 +193,7 @@ class GoodmemClient:
       *,
       memory_id: Optional[str] = None,
       use_base64_fallback: bool = True,
+      filename: str = "upload",
   ) -> Dict[str, Any]:
     """Inserts a binary memory into a Goodmem space using multipart upload.
 
@@ -202,6 +203,7 @@ class GoodmemClient:
       content_type: The MIME type (e.g., application/pdf, image/png).
       metadata: Optional metadata dict (e.g., session_id, user_id, filename).
       memory_id: Optional deterministic memory ID (e.g. uuid_from_file_id(file_id)).
+      filename: Filename for the multipart file part (default "upload"). Stored as metadata.filename by the backend.
 
     Returns:
       The response JSON containing memoryId and processingStatus.
@@ -216,6 +218,7 @@ class GoodmemClient:
       print(f"  - space_id: {space_id}")
       print(f"  - content_type: {content_type}")
       print(f"  - content_bytes length: {len(content_bytes)} bytes")
+      print(f"  - filename: {filename}")
       if metadata:
         print(f"  - metadata:\n{self._safe_json_dumps(metadata)}")
 
@@ -237,7 +240,7 @@ class GoodmemClient:
     # using the commented-out custom boundary logic above (_choose_multipart_boundary
     # + _build_multipart_body) so the boundary is guaranteed not to appear in the file.
     data = {"request": json.dumps(request_data)}
-    files = {"file": ("upload", content_bytes, content_type)}
+    files = {"file": (filename, content_bytes, content_type)}
     headers = {"x-api-key": self._api_key}
 
     if self._debug:

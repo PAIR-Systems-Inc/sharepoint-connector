@@ -354,6 +354,7 @@ def _add_one_file_to_goodmem(file_info: dict, *, is_update: bool = False) -> Opt
             content_type=mime_type or "application/octet-stream",
             metadata=metadata,
             memory_id=memory_uuid,
+            filename=file_info.get("name") or "upload",
         )
         _log_activity("done", f"[Done] {op_label}: " + name_with_id, file_name=name, file_id=file_id)
         if is_update:
@@ -595,9 +596,10 @@ def _compute_delta(
     for u in to_delete_uuids:
         mem = mem_by_id.get(u) or {}
         meta = mem.get("metadata") or {}
-        # Prefer file name from metadata (we store "name", "relative_path" at ingest); try common API shapes
+        # Prefer file name from metadata (we store "name", "relative_path", "filename" at ingest); try common API shapes
         file_name = (
             meta.get("name")
+            or meta.get("filename")
             or meta.get("fileName")
             or meta.get("displayName")
             or mem.get("name")
@@ -623,6 +625,7 @@ def _compute_delta(
                 meta = mem.get("metadata") or {}
                 file_name = (
                     meta.get("name")
+                    or meta.get("filename")
                     or meta.get("fileName")
                     or meta.get("displayName")
                     or mem.get("name")

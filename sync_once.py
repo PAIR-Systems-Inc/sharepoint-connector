@@ -519,6 +519,7 @@ def main() -> None:
                 content_type=mime_type,
                 metadata=metadata,
                 memory_id=memory_uuid,
+                filename=file_info.get("name") or "upload",
             )
         except Exception as e:
             print(f"  Failed to ingest {file_info.get('name')}: {e}")
