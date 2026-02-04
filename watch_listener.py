@@ -366,7 +366,11 @@ def main() -> int:
                         name = e.get("file_name") or e.get("file_id") or ""
                         if name and name not in msg:
                             msg = f"{msg} ({name})"
-                        print(f"  {ts}  [{typ}]  {msg}")
+                        # If type is "done" but message already starts with [Update]/[Add]/[Failed], show message only (no [done] prefix)
+                        if typ == "done" and msg.strip().startswith("["):
+                            print(f"  {ts}  {msg}")
+                        else:
+                            print(f"  {ts}  [{typ}]  {msg}")
                     idle_line_shown = False  # after activity, allow one idle line again
                 else:
                     # No new events: refresh idle line with current timestamp

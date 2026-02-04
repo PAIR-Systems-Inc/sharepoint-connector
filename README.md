@@ -336,6 +336,8 @@ Each UUID set is projected into one of three action lists the sync loop iterates
 
 When a sync operation fails, its `file_id` is stored in one of three pending sets: `_pending_add_file_ids`, `_pending_update_file_ids`, or `_pending_remove_file_ids`. On the next sync we build **two action lists**: (1) the current diff (`to_add` / `to_update` / `to_remove`) and (2) a pending-retry list rebuilt by re-fetching SharePoint `file_info` by `file_id`. We then merge the pending-retry items into the current diff lists before conflict resolution and apply.
 
+**Add/ingest and Goodmem processingStatus.** A successful add is only when Goodmem returns **200** and **processingStatus: COMPLETED**. Non-200 (request never accepted) → `file_id` stays in **pending_add** (retry as add). 200 with **processingStatus: FAILED** (request accepted but ingest failed, e.g. file corruption or backend error) → `file_id` goes to **pending_update** so we retry as delete-then-add. The insert response usually returns **PENDING** because ingestion is async; we then poll [Get memory by ID](https://docs.goodmem.ai/docs/reference/api-reference/rest/memories/getMemory/) until processingStatus is COMPLETED or FAILED (or timeout). While PENDING we log "Received by Goodmem. Pending processing." Only COMPLETED is treated as success; timeout still PENDING → pending_add for next sync.
+
 ### Conflict resolution (one action per file_id)
 
 After merging, the same file_id can appear in more than one list (e.g. in `to_add` and `to_remove`). Applying both would leave Goodmem out of sync (e.g. add then remove for a file deleted on SharePoint). Before applying, a **conflict-resolution** step runs:

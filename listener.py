@@ -26,6 +26,7 @@ Requires: GRAPH_NOTIFICATION_URL, GRAPH_CLIENT_STATE, and same SharePoint/Goodme
 See permission.md for Azure AD / SharePoint permissions.
 """
 
+import json
 import os
 import queue
 import re
@@ -158,6 +159,10 @@ def _get_subscription_minutes() -> int:
     return min(GRAPH_SUBSCRIPTION_MINUTES_DEFAULT, GRAPH_SUBSCRIPTION_MINUTES_MAX)
 # Cap sleep so we re-check at least this often (e.g. if sub was deleted externally)
 RENEW_SUBSCRIPTION_MAX_SLEEP_SECONDS = 24 * 3600
+
+# Goodmem processingStatus: after insert (200) we poll Get memory by ID until COMPLETED or FAILED
+GOODMEM_POLL_INTERVAL_SECONDS = 10
+GOODMEM_POLL_MAX_ATTEMPTS = 30  # ~5 min
 
 # App-global state for webhook handler (set by server entrypoint)
 _connector: Optional[SharePointConnector] = None
@@ -306,8 +311,36 @@ def _ensure_space_id() -> Optional[str]:
     return _space_id
 
 
+def _poll_memory_processing_status(
+    memory_id: str,
+    name_with_id: str,
+    op_label: str,
+) -> str:
+    """Poll Goodmem Get memory by ID until processingStatus is COMPLETED or FAILED, or timeout.
+    Logs 'Received by Goodmem. Pending processing.' while PENDING.
+    Returns 'COMPLETED', 'FAILED', or 'PENDING' (timeout). Uses _goodmem."""
+    global _goodmem
+    if not _goodmem:
+        return "PENDING"
+    for attempt in range(GOODMEM_POLL_MAX_ATTEMPTS):
+        try:
+            mem = _goodmem.get_memory_by_id(memory_id)
+        except requests.RequestException:
+            time.sleep(GOODMEM_POLL_INTERVAL_SECONDS)
+            continue
+        status = (mem.get("processingStatus") or "").upper()
+        if status == "COMPLETED":
+            return "COMPLETED"
+        if status == "FAILED":
+            return "FAILED"
+        _log_activity("done", f"[{op_label}] " + name_with_id + " : Received by Goodmem. Pending processing.")
+        time.sleep(GOODMEM_POLL_INTERVAL_SECONDS)
+    return "PENDING"
+
+
 def _add_one_file_to_goodmem(file_info: dict, *, is_update: bool = False) -> Optional[tuple[str, str]]:
-    """Download file and insert into Goodmem with memoryId=uuid_from_file_id(file_id). Returns ('synced', name), ('skipped', reason), ('error', msg), or None. When is_update=True, logs [Done]/[Failed] Update instead of Add."""
+    """Download file and insert into Goodmem with memoryId=uuid_from_file_id(file_id). Returns ('synced', name), ('skipped', reason), ('error', msg), or None. When is_update=True, logs [Done]/[Failed] Update instead of Add.
+    Non-200 from insert → file_id stays in pending_add (retry as add). 200 with processingStatus COMPLETED → success. 200 with FAILED → pending_update (retry as delete-then-add). 200 with PENDING → poll Get memory by ID until COMPLETED/FAILED or timeout; timeout → pending_add."""
     global _goodmem, _space_id
     if not _goodmem or not _space_id:
         return None
@@ -348,7 +381,7 @@ def _add_one_file_to_goodmem(file_info: dict, *, is_update: bool = False) -> Opt
         return ("error", f"Download failed: {name}")
     metadata = {k: v for k, v in file_info.items() if v is not None}
     try:
-        _goodmem.insert_memory_binary(
+        result = _goodmem.insert_memory_binary(
             space_id=_space_id,
             content_bytes=content_bytes,
             content_type=mime_type or "application/octet-stream",
@@ -356,12 +389,40 @@ def _add_one_file_to_goodmem(file_info: dict, *, is_update: bool = False) -> Opt
             memory_id=memory_uuid,
             filename=file_info.get("name") or "upload",
         )
-        _log_activity("done", f"[Done] {op_label}: " + name_with_id, file_name=name, file_id=file_id)
+        # 200 response: check processingStatus. COMPLETED = success; FAILED = retry as delete-then-add; PENDING = poll Get memory by ID
+        mem_id = result.get("memoryId") or memory_uuid
+        status = (result.get("processingStatus") or "").upper()
+        if status == "COMPLETED":
+            _log_activity("done", f"[Done] {op_label}: " + name_with_id, file_name=name, file_id=file_id)
+            if is_update:
+                _pending_update_discard(file_id)
+            else:
+                _pending_add_discard(file_id)
+            return ("synced", name)
+        if status == "FAILED":
+            _log_activity("done", f"[Failed] {op_label}: " + name_with_id, file_name=name, file_id=file_id, error="Goodmem processingStatus FAILED")
+            _pending_update_add(file_id)
+            return ("error", f"Goodmem ingest failed: {name}")
+        # PENDING or missing: poll until COMPLETED, FAILED, or timeout
+        final = _poll_memory_processing_status(mem_id, name_with_id, op_label)
+        if final == "COMPLETED":
+            _log_activity("done", f"[Done] {op_label}: " + name_with_id, file_name=name, file_id=file_id)
+            if is_update:
+                _pending_update_discard(file_id)
+            else:
+                _pending_add_discard(file_id)
+            return ("synced", name)
+        if final == "FAILED":
+            _log_activity("done", f"[Failed] {op_label}: " + name_with_id, file_name=name, file_id=file_id, error="Goodmem processingStatus FAILED")
+            _pending_update_add(file_id)
+            return ("error", f"Goodmem ingest failed: {name}")
+        # timeout still PENDING: retry add next sync
+        _log_activity("done", f"[Failed] {op_label}: " + name_with_id, file_name=name, file_id=file_id, error="Goodmem processing still PENDING (timeout)")
         if is_update:
-            _pending_update_discard(file_id)
+            _pending_update_add(file_id)
         else:
-            _pending_add_discard(file_id)
-        return ("synced", name)
+            _pending_add_add(file_id)
+        return ("error", f"Ingest pending (timeout): {name}")
     except requests.RequestException as e:
         _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
@@ -448,6 +509,38 @@ def _is_root_sync_notification(value: list) -> bool:
         if change_type == "updated" and drive_id and (not item_id or _is_root_resource(resource)):
             return True
     return False
+
+
+def _meta_dict(m: dict) -> dict:
+    """Normalize memory metadata to a dict (API may return metadata as JSON string or object)."""
+    raw = m.get("metadata")
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def _name_and_relative_path_from_memory(mem: dict, default_id: str = "") -> tuple[str, str]:
+    """Extract display name and relative_path from a Goodmem memory dict (list or batch-get). Returns (name, relative_path)."""
+    meta = _meta_dict(mem)
+    file_name = (
+        meta.get("name")
+        or meta.get("filename")
+        or meta.get("fileName")
+        or meta.get("displayName")
+        or mem.get("name")
+        or mem.get("fileName")
+    )
+    relative_path = meta.get("relative_path") or file_name
+    name = file_name or default_id
+    path = relative_path or name
+    return (name, path)
 
 
 def _display_name_for_remove(r: dict) -> str:
@@ -592,29 +685,42 @@ def _compute_delta(
     ]
 
     # Build to_remove from list data (memories) so we get metadata.name/relative_path the list returned
+    debug_remove_meta = os.getenv("DEBUG_REMOVE_METADATA", "").strip().lower() in ("1", "true", "yes")
+    debug_remove_meta_logged = 0
+    debug_remove_meta_limit = 5
+
+    def _meta_debug_summary(mem: dict) -> str:
+        raw = mem.get("metadata")
+        if isinstance(raw, str):
+            return f"metadata=str len={len(raw)}"
+        if isinstance(raw, dict):
+            return f"metadata=dict keys={list(raw.keys())}"
+        if raw is None:
+            return "metadata=None"
+        return f"metadata={type(raw).__name__}"
+
     to_remove: list[dict] = []
     for u in to_delete_uuids:
         mem = mem_by_id.get(u) or {}
-        meta = mem.get("metadata") or {}
-        # Prefer file name from metadata (we store "name", "relative_path", "filename" at ingest); try common API shapes
-        file_name = (
-            meta.get("name")
-            or meta.get("filename")
-            or meta.get("fileName")
-            or meta.get("displayName")
-            or mem.get("name")
-            or mem.get("fileName")
-        )
-        relative_path = meta.get("relative_path") or file_name
+        meta = _meta_dict(mem)
+        file_name, relative_path = _name_and_relative_path_from_memory(mem, default_id=u)
         rid = meta.get("id") or u
+        if debug_remove_meta and debug_remove_meta_logged < debug_remove_meta_limit:
+            if not (meta.get("relative_path") or meta.get("name") or file_name):
+                print(
+                    "[listener][debug] list memory missing path/name: "
+                    f"memoryId={u} keys={list(mem.keys())} {_meta_debug_summary(mem)}",
+                    file=sys.stderr,
+                )
+                debug_remove_meta_logged += 1
         to_remove.append({
             "id": rid,
             "name": file_name or rid,
             "relative_path": relative_path or rid,
             "_uuid": u,
         })
-    # If list didn't return metadata with name, batch-get so we can show file names in logs
-    need_names = [r["_uuid"] for r in to_remove if r.get("name") == r.get("id")]
+    # If list didn't return metadata with name/relative_path, batch-get so we can show paths in diff tree and logs
+    need_names = [r["_uuid"] for r in to_remove if (r.get("name") or r.get("relative_path") or "").strip() in ("", r.get("id"))]
     if need_names:
         try:
             extra = _goodmem.batch_get_memories(need_names)
@@ -622,20 +728,19 @@ def _compute_delta(
                 if r["_uuid"] not in extra:
                     continue
                 mem = extra[r["_uuid"]] or {}
-                meta = mem.get("metadata") or {}
-                file_name = (
-                    meta.get("name")
-                    or meta.get("filename")
-                    or meta.get("fileName")
-                    or meta.get("displayName")
-                    or mem.get("name")
-                    or mem.get("fileName")
-                )
-                relative_path = meta.get("relative_path") or file_name
+                file_name, relative_path = _name_and_relative_path_from_memory(mem, default_id=r.get("id", ""))
                 if file_name:
                     r["name"] = file_name
                 if relative_path:
                     r["relative_path"] = relative_path
+                if debug_remove_meta and debug_remove_meta_logged < debug_remove_meta_limit:
+                    if not (r.get("relative_path") and r.get("relative_path") != r.get("id")):
+                        print(
+                            "[listener][debug] batch-get memory missing path/name: "
+                            f"memoryId={r['_uuid']} keys={list(mem.keys())} {_meta_debug_summary(mem)}",
+                            file=sys.stderr,
+                        )
+                        debug_remove_meta_logged += 1
         except requests.RequestException:
             pass
     for r in to_remove:
@@ -964,7 +1069,8 @@ def _run_delta_sync(reason: str = "delta sync") -> None:
         if not item_id:
             continue
         if item.get("deleted"):
-            to_remove.append({"id": item_id, "name": item.get("name") or item_id})
+            display = item.get("name") or item_id
+            to_remove.append({"id": item_id, "name": display, "relative_path": display})
             continue
         if "file" not in item:
             continue
@@ -1011,6 +1117,23 @@ def _run_delta_sync(reason: str = "delta sync") -> None:
         if r["id"] not in to_remove_ids:
             to_remove.append(r)
             to_remove_ids.add(r["id"])
+    # Batch-get to_remove memories so we can show relative_path in diff tree and logs (delta items often lack name for deleted)
+    if to_remove and _goodmem:
+        remove_uuids = [uuid_from_file_id(r["id"]) for r in to_remove if r.get("id")]
+        try:
+            remove_batch = _goodmem.batch_get_memories(remove_uuids) if remove_uuids else {}
+            for r in to_remove:
+                uid = uuid_from_file_id(r["id"]) if r.get("id") else None
+                if not uid or uid not in remove_batch:
+                    continue
+                mem = remove_batch.get(uid) or {}
+                name, rel_path = _name_and_relative_path_from_memory(mem, default_id=r["id"])
+                if name and name != r["id"]:
+                    r["name"] = name
+                if rel_path and rel_path != r["id"]:
+                    r["relative_path"] = rel_path
+        except requests.RequestException:
+            pass
     # Merge pending add (failed Goodmem add): fetch file_info from SharePoint, add to to_add
     to_add_ids = {f["id"] for f in to_add}
     for fid in _load_pending_add():
