@@ -53,6 +53,9 @@ ENV/
 *.swo
 *~
 
+# Local debug / private (not for public repo)
+multipart_debug/
+
 # OS
 .DS_Store
 Thumbs.db
