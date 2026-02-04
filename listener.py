@@ -185,8 +185,9 @@ _root_sync_lock = threading.Lock()
 _delta_link_path: Optional[str] = None
 _delta_link_lock = threading.Lock()
 
-# Pending removes: file_ids we failed to delete from Goodmem; retried on next full/delta sync
+# Pending removes: file_ids we failed to delete from Goodmem; retried on next full/delta sync. display_names stored for log readability.
 _pending_remove_file_ids: set[str] = set()
+_pending_remove_display_names: dict[str, str] = {}  # file_id -> display name (for real name in logs)
 _pending_remove_path: Optional[str] = None
 _pending_remove_lock = threading.Lock()
 
@@ -416,7 +417,7 @@ def _delete_memory_for_file_id(file_id: str, log_name: Optional[str] = None) -> 
             _pending_remove_discard(file_id)
             _log_activity("remove", "[Synced] Remove (already gone): " + display + " (id=" + file_id + ")", file_name=display, file_id=file_id)
         else:
-            _pending_remove_add(file_id)
+            _pending_remove_add(file_id, display_name=display)
             _log_goodmem_error(e)
             print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
             _log_activity("error", f"Remove failed (will retry next sync): {display} (id={file_id})", file_id=file_id)
@@ -489,6 +490,52 @@ def _format_tree_by_folder(title: str, relative_paths: list[str]) -> str:
             prefix = "└── " if i == len(items) - 1 else "├── "
             lines.append("    " + prefix + subpath)
     return "\n".join(lines)
+
+
+def _resolve_sync_conflicts(
+    to_add: list[dict],
+    to_update: list[dict],
+    to_remove: list[dict],
+) -> None:
+    """
+    Resolve conflicts so each file_id has at most one action (add, update, or remove).
+    For any file_id that appears in more than one of to_add, to_update, to_remove,
+    re-check SharePoint and keep only the action that matches current state.
+    Mutates the three lists in place. Uses _connector, _drive_id; may call
+    _pending_add_discard, _pending_update_discard, _pending_remove_discard.
+    """
+    global _connector, _drive_id
+    if not _connector or not _drive_id:
+        return
+    add_ids = {f.get("id") for f in to_add if f.get("id")}
+    update_ids = {f.get("id") for f in to_update if f.get("id")}
+    remove_ids = {r.get("id") for r in to_remove if r.get("id")}
+    conflict_ids = (add_ids & update_ids) | (add_ids & remove_ids) | (update_ids & remove_ids)
+    for fid in conflict_ids:
+        if not fid:
+            continue
+        try:
+            file_info = _connector.get_file_by_id(_drive_id, fid)
+        except requests.RequestException:
+            continue
+        supported = (
+            file_info
+            and _is_mime_type_supported(file_info.get("mime_type"))
+            and file_info.get("download_url")
+        )
+        if not supported:
+            # File absent or unsupported: keep only in to_remove; drop from to_add and to_update
+            to_add[:] = [f for f in to_add if f.get("id") != fid]
+            to_update[:] = [f for f in to_update if f.get("id") != fid]
+            _pending_add_discard(fid)
+            _pending_update_discard(fid)
+        else:
+            # File exists and supported: keep only in to_add or to_update; drop from to_remove
+            to_remove[:] = [r for r in to_remove if r.get("id") != fid]
+            _pending_remove_discard(fid)
+            if fid in add_ids and fid in update_ids:
+                # In both add and update: keep only in to_update (update = delete-then-add)
+                to_add[:] = [f for f in to_add if f.get("id") != fid]
 
 
 def _compute_delta(
@@ -679,50 +726,77 @@ def _get_pending_removes_path() -> str:
     return _pending_remove_path
 
 
-def _load_pending_removes() -> set[str]:
-    """Load persisted pending-remove file_ids. Returns empty set if missing or error."""
-    global _pending_remove_file_ids
+def _load_pending_removes() -> list[dict]:
+    """Load persisted pending-remove entries. Returns list of {id, name, relative_path} for merge; uses stored display name when present."""
+    global _pending_remove_file_ids, _pending_remove_display_names
     path = _get_pending_removes_path()
     with _pending_remove_lock:
         try:
             with open(path, "r", encoding="utf-8") as f:
-                lines = (line.strip() for line in f if line.strip())
-                _pending_remove_file_ids = set(lines)
-                return set(_pending_remove_file_ids)
+                _pending_remove_file_ids = set()
+                _pending_remove_display_names = {}
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if "\t" in line:
+                        fid, display = line.split("\t", 1)
+                        fid, display = fid.strip(), display.strip()
+                        if fid:
+                            _pending_remove_file_ids.add(fid)
+                            _pending_remove_display_names[fid] = display or fid
+                    else:
+                        if line:
+                            _pending_remove_file_ids.add(line)
+                            _pending_remove_display_names[line] = line
+                return [
+                    {"id": fid, "name": _pending_remove_display_names.get(fid, fid), "relative_path": _pending_remove_display_names.get(fid, fid)}
+                    for fid in sorted(_pending_remove_file_ids)
+                ]
         except FileNotFoundError:
             _pending_remove_file_ids = set()
-            return set()
+            _pending_remove_display_names = {}
+            return []
         except OSError:
-            return set(_pending_remove_file_ids)
+            return [
+                {"id": fid, "name": _pending_remove_display_names.get(fid, fid), "relative_path": _pending_remove_display_names.get(fid, fid)}
+                for fid in sorted(_pending_remove_file_ids)
+            ]
 
 
 def _save_pending_removes() -> None:
-    """Persist pending-remove file_ids (one per line)."""
+    """Persist pending-remove file_ids and display names (one line per id, tab-separated: file_id and optional display_name)."""
     path = _get_pending_removes_path()
     with _pending_remove_lock:
         try:
             with open(path, "w", encoding="utf-8") as f:
                 for fid in sorted(_pending_remove_file_ids):
-                    f.write(fid + "\n")
+                    display = _pending_remove_display_names.get(fid, fid)
+                    if display != fid:
+                        f.write(f"{fid}\t{display}\n")
+                    else:
+                        f.write(fid + "\n")
         except OSError as e:
             print(f"[listener] Failed to save pending removes: {e}", file=sys.stderr)
 
 
-def _pending_remove_add(file_id: str) -> None:
-    """Add file_id to pending removes and persist. Retried on next full/delta sync."""
-    global _pending_remove_file_ids
-    _load_pending_removes()  # ensure set is loaded before we add
+def _pending_remove_add(file_id: str, display_name: Optional[str] = None) -> None:
+    """Add file_id to pending removes and persist. display_name used for logs on retry. Retried on next full/delta sync."""
+    global _pending_remove_file_ids, _pending_remove_display_names
+    _load_pending_removes()  # ensure state is loaded before we add
     with _pending_remove_lock:
         _pending_remove_file_ids.add(file_id)
+        _pending_remove_display_names[file_id] = display_name or file_id
     _save_pending_removes()
 
 
 def _pending_remove_discard(file_id: str) -> None:
     """Remove file_id from pending removes and persist."""
-    global _pending_remove_file_ids
+    global _pending_remove_file_ids, _pending_remove_display_names
     _load_pending_removes()  # ensure set is loaded so we don't overwrite file with stale empty set
     with _pending_remove_lock:
         _pending_remove_file_ids.discard(file_id)
+        _pending_remove_display_names.pop(file_id, None)
     _save_pending_removes()
 
 
@@ -928,12 +1002,12 @@ def _run_delta_sync(reason: str = "delta sync") -> None:
             to_add.append(file_info)
 
     # Merge pending removes (failed in a previous run) so we retry on this sync
-    pending = _load_pending_removes()
+    pending_removes = _load_pending_removes()
     to_remove_ids = {r["id"] for r in to_remove}
-    for fid in pending:
-        if fid not in to_remove_ids:
-            to_remove.append({"id": fid, "name": fid, "relative_path": fid})
-            to_remove_ids.add(fid)
+    for r in pending_removes:
+        if r["id"] not in to_remove_ids:
+            to_remove.append(r)
+            to_remove_ids.add(r["id"])
     # Merge pending add (failed Goodmem add): fetch file_info from SharePoint, add to to_add
     to_add_ids = {f["id"] for f in to_add}
     for fid in _load_pending_add():
@@ -968,6 +1042,7 @@ def _run_delta_sync(reason: str = "delta sync") -> None:
         file_info["relative_path"] = file_info.get("relative_path") or file_info.get("name") or fid
         to_update.append(file_info)
         to_update_ids.add(fid)
+    _resolve_sync_conflicts(to_add, to_update, to_remove)
     # Log delta file tree (same format as full sync) so watchers see To Add / To Update / To Remove
     add_paths = [f.get("relative_path") or f.get("name") or f["id"] for f in to_add]
     update_paths = [f.get("relative_path") or f.get("name") or f["id"] for f in to_update]
@@ -1266,12 +1341,12 @@ def _run_full_sync(reason: str = "full sync") -> None:
         return
     to_add, to_update, to_remove = _compute_delta(root_files, memories)
     # Merge pending removes (failed in a previous run) so we retry on this sync
-    pending = _load_pending_removes()
+    pending_removes = _load_pending_removes()
     to_remove_ids = {r["id"] for r in to_remove}
-    for fid in pending:
-        if fid not in to_remove_ids:
-            to_remove.append({"id": fid, "name": fid, "relative_path": fid})
-            to_remove_ids.add(fid)
+    for r in pending_removes:
+        if r["id"] not in to_remove_ids:
+            to_remove.append(r)
+            to_remove_ids.add(r["id"])
     # Merge pending add (failed Goodmem add): fetch file_info from SharePoint, add to to_add
     to_add_ids = {f["id"] for f in to_add}
     for fid in _load_pending_add():
@@ -1306,6 +1381,7 @@ def _run_full_sync(reason: str = "full sync") -> None:
         file_info["relative_path"] = file_info.get("relative_path") or file_info.get("name") or fid
         to_update.append(file_info)
         to_update_ids.add(fid)
+    _resolve_sync_conflicts(to_add, to_update, to_remove)
     tree_add = _format_tree_by_folder("To Add", [f.get("relative_path") or f.get("name") or f["id"] for f in to_add])
     tree_update = _format_tree_by_folder("To Update", [f.get("relative_path") or f.get("name") or f["id"] for f in to_update])
     tree_remove = _format_tree_by_folder("To Remove", [_display_name_for_remove(r) for r in to_remove])

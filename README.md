@@ -293,21 +293,11 @@ The server exposes **GET /activity** with an in-memory log of recent events. Use
 
 ## How file diff is computed
 
-We keep SharePoint and Goodmem in sync by computing **to add**, **to update**, and **to delete** using **set operations on UUIDs** and Goodmem’s **batch-get** API. Timestamps are compared only using the SharePoint value we store in Goodmem metadata (not Goodmem’s `updatedAt`), so both sides use the same clock.
+We keep SharePoint and Goodmem in sync by computing three **UUID-level diff sets**—`to_add_uuids`, `to_update_uuids`, and `to_delete_uuids`—using **set operations on UUIDs** and Goodmem’s **batch-get** API. For update decisions, timestamps are compared only using the SharePoint value we store in Goodmem metadata (not Goodmem’s `updatedAt`), so both sides use the same clock. The three diff sets, `to_{add,update,delete}_uuids`, are UUIDs of files that need to be (potentially) added to Goodmem, updated in Goodmem, or deleted from Goodmem respectively.
 
-### Deterministic memory ID
+Each SharePoint file is mapped to a **deterministic UUID** (i.e. UUID v5 from the file id) via the function `uuid_from_file_id`. That UUID is used as Goodmem’s `memoryId` when creating a memory. Same file ⇒ same UUID ⇒ no duplicate memories for the same file, and we never need to search Goodmem by `metadata.id` to find a memory. Thanks to the deterministic UUID, we can always locate the memory for a given SharePoint file.
 
-Each SharePoint file is mapped to a **deterministic UUID** (i.e. UUID v5 from the file id) via the function `uuid_from_file_id`. That UUID is used as Goodmem’s `memoryId` when creating a memory. Same file ⇒ same UUID ⇒ no duplicate memories for the same file, and we never need to search Goodmem by `metadata.id` to find a memory.
-
-### Operations (no list needed for IDs)
-
-| Operation | What we do | List needed? |
-|-----------|------------|--------------|
-| **Add** | `create_memory(..., memoryId=uuid_from_file_id(file_id))` | No (for the op itself). |
-| **Update** | `delete_memory(uuid_from_file_id(file_id))` then `create_memory(..., memoryId=uuid_from_file_id(file_id))` | No. |
-| **Remove** | `delete_memory(uuid_from_file_id(file_id))` | No. |
-
-### Full sync (e.g. startup, OAuth refresh, subscription renew)
+### Full sync (e.g. startup)
 
 1. **SharePoint:** Fetch all files → build `sharepoint_by_id: Dict` (file_id → file_info) and `sharepoint_uuids` = set of UUIDs computed for all `file_id`  in `sharepoint_by_id`.
 2. **Goodmem:** List the space once → `goodmem_uuids` = set of memory IDs in that space.
@@ -318,20 +308,6 @@ Each SharePoint file is mapped to a **deterministic UUID** (i.e. UUID v5 from th
 4. Find UUIDs of memories that need to be updated (i.e. `to_update_uuids`) from `both_uuids`:
    - Call Goodmem memory batch-get API for all UUIDs in `both_uuids` to get metadata for each memory.
    - For each memory, read `modified_datetime` in metadata (the SharePoint timestamp stored at ingestion) and compare it with the current timestamp of the same file in `sharepoint_by_id`. If the stored value is **older** than the current SharePoint timestamp, add the memory UUID to `to_update_uuids`. If **equal**, skip (file unchanged). If the stored value is **newer** than the current SharePoint timestamp, report an error — it cannot happen.
-5. **Apply:**
-
-   ```python
-   for uuid in to_delete_uuids:
-       delete_memory(uuid)
-
-   for file_id, file_info in sharepoint_by_id.items():
-      if uuid_from_file_id(file_id) in to_add_uuids:
-          create_memory(..., memoryId=uuid_from_file_id(file_id))
-
-      elif uuid_from_file_id(file_id) in to_update_uuids:
-          delete_memory(uuid_from_file_id(file_id))
-          create_memory(..., memoryId=uuid_from_file_id(file_id))
-   ```
 
 ### Delta sync (after a Graph notification)
 
@@ -343,20 +319,77 @@ The Graph delta API indicates whether a file change is a deletion or a non-delet
 4. Call Goodmem memory batch-get API for all UUIDs in `to_add_or_update_uuids`.
 5. For each batch-get result: if a memory is **found**, add its UUID to `to_update_uuids` and bufffer its metadata; otherwise (not found), add it to `to_add_uuids`.
 6. **Checkpoint:** For each file whose UUID is in `to_update_uuids`, the timestamp in Goodmem metadata (from batch-get) must be **older** than the timestamp of that file in `delta_by_id`. If any file has Goodmem timestamp ≥ SharePoint timestamp, raise an error.
-7. **Apply:**
+7. (The syncing section below describes how UUID sets are turned into the action lists and applied.)
 
-   ```python
-   for uuid in to_delete_uuids:
-       delete_memory(uuid)
+## How file diff is synced 
 
-   for file_id, file_info in delta_by_id.items():
-      if uuid_from_file_id(file_id) in to_add_uuids:
-          create_memory(..., memoryId=uuid_from_file_id(file_id))
+We take the UUID-level diff (`to_add_uuids`, `to_update_uuids`, `to_delete_uuids`), map it into action lists, merge pending syncs, resolve conflicts, then apply in a fixed order. SharePoint is the source of truth; we do not use order or timestamps—only current membership and a single re-check per conflicting file_id.
 
-      elif uuid_from_file_id(file_id) in to_update_uuids:
-          delete_memory(uuid_from_file_id(file_id))
-          create_memory(..., memoryId=uuid_from_file_id(file_id))
-   ```
+### Collecting info for sync actions
+
+Each UUID set is projected into one of three action lists the sync loop iterates over. 
+
+- **`to_{add,update}_uuids` → `to_{add,update}`**: `list[dict[str, Any]]` where each dict is a SharePoint `file_info` with **string keys** like `id`, `name`, `relative_path`, `mime_type`, `download_url`, `modified_datetime` (values are typically strings/URLs/timestamps from Graph).
+- **`to_delete_uuids` → `to_remove`**: `list[dict[str, Any]]` where each dit is a SharePoint `file_info` shaped like `id`, `name`, `relative_path` (metadata from Goodmem when available).
+
+**Both the UUID-level diff sets (`to_{add,update,delete}_uuids`) and action lists (`to_{add,update,remove}`) only reflect the current state.** 
+
+When a sync operation fails, its `file_id` is stored in one of three pending sets: `_pending_add_file_ids`, `_pending_update_file_ids`, or `_pending_remove_file_ids`. On the next sync we build **two action lists**: (1) the current diff (`to_add` / `to_update` / `to_remove`) and (2) a pending-retry list rebuilt by re-fetching SharePoint `file_info` by `file_id`. We then merge the pending-retry items into the current diff lists before conflict resolution and apply.
+
+### Conflict resolution (one action per file_id)
+
+After merging, the same file_id can appear in more than one list (e.g. in `to_add` and `to_remove`). Applying both would leave Goodmem out of sync (e.g. add then remove for a file deleted on SharePoint). Before applying, a **conflict-resolution** step runs:
+
+1. **Find conflicts:** Collect every file_id that appears in at least two of `to_add`, `to_update`, `to_remove`.
+2. **Re-validate with SharePoint:** For each such file_id, call `get_file_by_id(drive_id, file_id)` once.
+3. **One action per file:**
+   - If the file **exists** on SharePoint (and is supported): keep it only in `to_add` or `to_update` (remove it from `to_remove`). If in both add and update, keep only in `to_update` (update is delete-then-add, so it works even when the memory was never added).
+   - If the file **does not exist** on SharePoint: keep it only in `to_remove` (remove it from `to_add` and `to_update`). Discard that file_id from pending add/update so we do not retry adding a deleted file.
+   - If re-validation fails (e.g. network): leave the lists unchanged for that file_id; apply order **remove → add → update** then determines the outcome.
+
+**Source of truth:** SharePoint. Conflict resolution enforces a single action per file_id from current SharePoint state, so we never apply contradictory add and remove in the same run. Together with the fixed apply order and re-validation at merge time (for pending add/update), this keeps the six collections safe and Goodmem consistent with SharePoint.
+
+
+### Apply the sync
+
+Apply order: **remove**, then **add**, then **update**.
+
+
+**Full sync apply (pseudocode):**
+
+```python
+for uuid in to_delete_uuids:
+    delete_memory(uuid)
+
+for file_id, file_info in sharepoint_by_id.items():
+   if uuid_from_file_id(file_id) in to_add_uuids:
+       create_memory(..., memoryId=uuid_from_file_id(file_id))
+
+   elif uuid_from_file_id(file_id) in to_update_uuids:
+       delete_memory(uuid_from_file_id(file_id))
+       create_memory(..., memoryId=uuid_from_file_id(file_id))
+```
+
+**Delta sync apply (pseudocode):**
+
+```python
+for uuid in to_delete_uuids:
+    delete_memory(uuid)
+
+for file_id, file_info in delta_by_id.items():
+   if uuid_from_file_id(file_id) in to_add_uuids:
+       create_memory(..., memoryId=uuid_from_file_id(file_id))
+
+   elif uuid_from_file_id(file_id) in to_update_uuids:
+       delete_memory(uuid_from_file_id(file_id))
+       create_memory(..., memoryId=uuid_from_file_id(file_id))
+```
+
+### Why sets are safe (no order or timestamps)
+
+- **Diff lists:** A point-in-time snapshot of “what to do.” We only need *which* file_ids need add, update, or remove—not the order they were discovered. Applying order inside each list does not affect correctness.
+- **Pending sets:** “These file_ids failed before; retry next sync.” We do not use “which pending list was written first” or “when it failed.” Conflicts (same file_id in more than one list) are resolved by re-checking **current SharePoint state**, not by history. Sets (unordered, no timestamps) are sufficient.
+
 
 ## Known limitations
 
