@@ -40,7 +40,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, request
 
-from goodmem_client import GoodmemClient
+from goodmem_client import GoodmemClient, uuid_from_file_id
 from sharepoint_client import SharePointConnector, validate_token_refresh_buffer
 
 
@@ -181,6 +181,23 @@ _sync_queue: "queue.Queue[dict]" = queue.Queue()
 _root_sync_pending = False
 _root_sync_lock = threading.Lock()
 
+# Delta link persistence: file path (env GRAPH_DELTA_TOKEN_FILE or default .graph_delta_link in script dir)
+_delta_link_path: Optional[str] = None
+_delta_link_lock = threading.Lock()
+
+# Pending removes: file_ids we failed to delete from Goodmem; retried on next full/delta sync
+_pending_remove_file_ids: set[str] = set()
+_pending_remove_path: Optional[str] = None
+_pending_remove_lock = threading.Lock()
+
+# Pending add/update: file_ids we failed to add/update on Goodmem; retried on next full/delta sync
+_pending_add_file_ids: set[str] = set()
+_pending_add_path: Optional[str] = None
+_pending_add_lock = threading.Lock()
+_pending_update_file_ids: set[str] = set()
+_pending_update_path: Optional[str] = None
+_pending_update_lock = threading.Lock()
+
 
 def _log_activity(event_type: str, message: str, **details: object) -> None:
     """Append an event to the activity log (thread-safe)."""
@@ -288,12 +305,15 @@ def _ensure_space_id() -> Optional[str]:
     return _space_id
 
 
-def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
-    """Download file and insert (or replace) in Goodmem. Returns ('synced', name), ('skipped', reason), ('error', msg), or None."""
-    global _goodmem, _drive_id, _space_id
+def _add_one_file_to_goodmem(file_info: dict, *, is_update: bool = False) -> Optional[tuple[str, str]]:
+    """Download file and insert into Goodmem with memoryId=uuid_from_file_id(file_id). Returns ('synced', name), ('skipped', reason), ('error', msg), or None. When is_update=True, logs [Done]/[Failed] Update instead of Add."""
+    global _goodmem, _space_id
     if not _goodmem or not _space_id:
         return None
     file_id = file_info.get("id")
+    if not file_id:
+        name = file_info.get("name") or "(unknown)"
+        return ("skipped", f"No file id: {name}")
     name = file_info.get("name") or "(unknown)"
     mime_type = file_info.get("mime_type")
     if not _is_mime_type_supported(mime_type):
@@ -301,37 +321,29 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
     download_url = file_info.get("download_url")
     if not download_url:
         return ("skipped", f"No download URL: {name}")
-    # Skip if already in Goodmem with same modified time (avoids duplicate sync when Graph sends multiple root notifications)
-    modified = file_info.get("modified_datetime")
+    memory_uuid = uuid_from_file_id(file_id)
+    # Idempotency: if a memory with our UUID already exists (e.g. race with full sync or backend reused ID), treat as update to avoid duplicate memories
     try:
-        memories = _goodmem.list_all_memories(_space_id)
+        _goodmem.get_memory_by_id(memory_uuid)
+        return _update_one_file_to_goodmem(file_info)
     except requests.RequestException as e:
-        _log_goodmem_error(e)
-        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
-        return ("error", f"Goodmem unreachable: {name}")
-    existing_memory_id: Optional[str] = None
-    for mem in memories:
-        meta = mem.get("metadata") or {}
-        if meta.get("id") != file_id:
-            continue
-        existing_memory_id = mem.get("memoryId")
-        if modified and meta.get("modified_datetime") == modified:
-            return ("skipped", f"unchanged: {name}")
-        break
-    is_update = bool(existing_memory_id)
+        if e.response is not None and e.response.status_code == 404:
+            pass
+        else:
+            _log_goodmem_error(e)
+            print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+            if is_update:
+                _pending_update_add(file_id)
+            else:
+                _pending_add_add(file_id)
+            return ("error", f"Goodmem unreachable: {name}")
+    op_label = "Update" if is_update else "Add"
     name_with_id = name + " (id=" + (file_id or "?") + ")"
-    try:
-        if existing_memory_id:
-            _goodmem.delete_memory(existing_memory_id)
-    except requests.RequestException as e:
-        _log_goodmem_error(e)
-        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
-        return ("error", f"Goodmem unreachable: {name}")
     try:
         content_bytes = _download_file(download_url)
     except Exception as e:
         print(f"[listener] Download failed for {file_info.get('name')}: {e}", file=sys.stderr)
-        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id, error=str(e))
+        _log_activity("done", f"[Failed] {op_label}: " + name_with_id, file_name=name, file_id=file_id, error=str(e))
         return ("error", f"Download failed: {name}")
     metadata = {k: v for k, v in file_info.items() if v is not None}
     try:
@@ -340,44 +352,74 @@ def _sync_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
             content_bytes=content_bytes,
             content_type=mime_type or "application/octet-stream",
             metadata=metadata,
+            memory_id=memory_uuid,
         )
-        _log_activity("done", "[Done] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id)
+        _log_activity("done", f"[Done] {op_label}: " + name_with_id, file_name=name, file_id=file_id)
+        if is_update:
+            _pending_update_discard(file_id)
+        else:
+            _pending_add_discard(file_id)
         return ("synced", name)
     except requests.RequestException as e:
         _log_goodmem_error(e)
         print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
-        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id, error=str(e))
+        _log_activity("done", f"[Failed] {op_label}: " + name_with_id, file_name=name, file_id=file_id, error=str(e))
+        if is_update:
+            _pending_update_add(file_id)
+        else:
+            _pending_add_add(file_id)
         return ("error", f"Ingest failed: {name}")
     except Exception as e:
         print(f"[listener] Ingest failed for {file_info.get('name')}: {e}", file=sys.stderr)
-        _log_activity("done", "[Failed] " + ("Update" if is_update else "Add") + ": " + name_with_id, file_name=name, file_id=file_id, error=str(e))
+        _log_activity("done", f"[Failed] {op_label}: " + name_with_id, file_name=name, file_id=file_id, error=str(e))
+        if is_update:
+            _pending_update_add(file_id)
+        else:
+            _pending_add_add(file_id)
         return ("error", f"Ingest failed: {name}")
 
 
-def _remove_memory_for_file_id(file_id: str) -> Optional[str]:
-    """Delete Goodmem memory whose metadata.id equals file_id. Returns deleted file name or None."""
+def _update_one_file_to_goodmem(file_info: dict) -> Optional[tuple[str, str]]:
+    """Delete existing memory by UUID then insert (same memoryId). Returns ('synced', name), ('skipped', reason), ('error', msg), or None."""
     global _goodmem, _space_id
     if not _goodmem or not _space_id:
         return None
+    file_id = file_info.get("id")
+    name = file_info.get("name") or "(unknown)"
+    memory_uuid = uuid_from_file_id(file_id)
+    name_with_id = name + " (id=" + (file_id or "?") + ")"
     try:
-        memories = _goodmem.list_all_memories(_space_id)
+        _goodmem.delete_memory(memory_uuid)
     except requests.RequestException as e:
-        _log_goodmem_error(e)
-        print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
-        return None
-    for mem in memories:
-        meta = mem.get("metadata") or {}
-        if meta.get("id") == file_id:
-            path = meta.get("relative_path") or meta.get("name") or file_id
-            try:
-                _goodmem.delete_memory(mem.get("memoryId"))
-            except requests.RequestException as e:
-                _log_goodmem_error(e)
-                print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
-                return None
-            _log_activity("remove", "[Synced] Remove: " + path + " (id=" + file_id + ")", file_name=path, file_id=file_id)
-            return path
-    return None
+        if e.response is not None and e.response.status_code == 404:
+            pass  # already gone; treat as add
+        else:
+            _log_goodmem_error(e)
+            print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+            _pending_update_add(file_id)
+            return ("error", f"Goodmem unreachable: {name}")
+    return _add_one_file_to_goodmem(file_info, is_update=True)
+
+
+def _delete_memory_for_file_id(file_id: str, log_name: Optional[str] = None) -> None:
+    """Delete Goodmem memory by uuid_from_file_id(file_id). Logs remove activity. On failure (not 404), adds file_id to pending removes for retry on next sync."""
+    global _goodmem, _space_id
+    if not _goodmem or not _space_id:
+        return
+    display = log_name or file_id
+    try:
+        _goodmem.delete_memory(uuid_from_file_id(file_id))
+        _pending_remove_discard(file_id)
+        _log_activity("remove", "[Synced] Remove: " + display + " (id=" + file_id + ")", file_name=display, file_id=file_id)
+    except requests.RequestException as e:
+        if e.response is not None and e.response.status_code == 404:
+            _pending_remove_discard(file_id)
+            _log_activity("remove", "[Synced] Remove (already gone): " + display + " (id=" + file_id + ")", file_name=display, file_id=file_id)
+        else:
+            _pending_remove_add(file_id)
+            _log_goodmem_error(e)
+            print(f"[listener] Goodmem unreachable: {e}", file=sys.stderr)
+            _log_activity("error", f"Remove failed (will retry next sync): {display} (id={file_id})", file_id=file_id)
 
 
 def _is_root_sync_notification(value: list) -> bool:
@@ -404,6 +446,21 @@ def _is_root_sync_notification(value: list) -> bool:
         if change_type == "updated" and drive_id and (not item_id or _is_root_resource(resource)):
             return True
     return False
+
+
+def _display_name_for_remove(r: dict) -> str:
+    """Human-readable file name for a to_remove entry. Prefer actual filename over raw id."""
+    name = r.get("relative_path") or r.get("name") or ""
+    rid = r.get("id") or ""
+    # Use name if it looks like a filename (has a dot, or is not the raw id)
+    if name and name != rid:
+        return name
+    if name:
+        return name
+    # Fallback when metadata had no name: show truncated id so log isn't redundant
+    if rid:
+        return f"File {rid[:16]}..." if len(rid) > 16 else f"File {rid}"
+    return "(unknown)"
 
 
 def _format_tree_by_folder(title: str, relative_paths: list[str]) -> str:
@@ -438,37 +495,107 @@ def _compute_delta(
     root_files: list[dict], memories: list[dict]
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
-    Compare SharePoint root files vs Goodmem memories. Returns (to_add, to_update, to_remove).
+    Compare SharePoint root files vs Goodmem memories using UUID set operations and batch-get.
+    Returns (to_add, to_update, to_remove).
     to_add: file_info for files in SharePoint only (supported MIME).
-    to_update: file_info for files in both but different modified_datetime (supported MIME).
-    to_remove: items {id, name} for memories no longer in SharePoint.
+    to_update: file_info for files in both but older modified_datetime in Goodmem (supported MIME).
+    to_remove: items {id, name, relative_path} for memories no longer in SharePoint.
     """
+    global _goodmem
+    if not _goodmem:
+        return ([], [], [])
     sp_by_id = {f["id"]: f for f in root_files}
-    gm_by_id: dict[str, dict] = {}
-    for mem in memories:
-        meta = mem.get("metadata") or {}
-        sp_id = meta.get("id")
-        if sp_id:
-            name = meta.get("name") or sp_id
-            gm_by_id[sp_id] = {
-                "id": sp_id,
-                "name": name,
-                "modified_datetime": meta.get("modified_datetime"),
-                "relative_path": meta.get("relative_path") or name,
-            }
-    to_add = [f for f in root_files if f["id"] not in gm_by_id and _is_mime_type_supported(f.get("mime_type"))]
-    to_update = [
-        f for f in root_files
-        if f["id"] in gm_by_id
-        and gm_by_id[f["id"]].get("modified_datetime") != f.get("modified_datetime")
-        and _is_mime_type_supported(f.get("mime_type"))
+    sharepoint_uuids = {uuid_from_file_id(fid) for fid in sp_by_id}
+    goodmem_uuids = {m["memoryId"] for m in memories}
+    mem_by_id = {m["memoryId"]: m for m in memories}
+    uuid_to_file_id = {uuid_from_file_id(fid): fid for fid in sp_by_id}
+
+    to_add_uuids = sharepoint_uuids - goodmem_uuids
+    to_delete_uuids = goodmem_uuids - sharepoint_uuids
+    both_uuids = sharepoint_uuids & goodmem_uuids
+
+    # Batch-get both_uuids to decide which need update (Goodmem modified_datetime older than SharePoint)
+    to_update_uuids: set[str] = set()
+    if both_uuids:
+        both_meta = _goodmem.batch_get_memories(list(both_uuids))
+        for u in both_uuids:
+            fid = uuid_to_file_id.get(u)
+            if not fid:
+                continue
+            gm_modified = ((both_meta.get(u) or {}).get("metadata") or {}).get("modified_datetime")
+            sp_modified = sp_by_id[fid].get("modified_datetime")
+            if gm_modified is None or sp_modified is None:
+                to_update_uuids.add(u)
+                continue
+            if gm_modified < sp_modified:
+                to_update_uuids.add(u)
+            elif gm_modified > sp_modified:
+                print(f"[listener] Unexpected: Goodmem modified_datetime newer than SharePoint for file_id={fid}", file=sys.stderr)
+
+    to_add = [
+        sp_by_id[uuid_to_file_id[u]]
+        for u in to_add_uuids
+        if u in uuid_to_file_id and _is_mime_type_supported(sp_by_id[uuid_to_file_id[u]].get("mime_type"))
     ]
-    to_remove = [{"id": i, "name": gm_by_id[i]["name"], "relative_path": gm_by_id[i]["relative_path"]} for i in gm_by_id if i not in sp_by_id]
+    to_update = [
+        sp_by_id[uuid_to_file_id[u]]
+        for u in to_update_uuids
+        if u in uuid_to_file_id and _is_mime_type_supported(sp_by_id[uuid_to_file_id[u]].get("mime_type"))
+    ]
+
+    # Build to_remove from list data (memories) so we get metadata.name/relative_path the list returned
+    to_remove: list[dict] = []
+    for u in to_delete_uuids:
+        mem = mem_by_id.get(u) or {}
+        meta = mem.get("metadata") or {}
+        # Prefer file name from metadata (we store "name", "relative_path" at ingest); try common API shapes
+        file_name = (
+            meta.get("name")
+            or meta.get("fileName")
+            or meta.get("displayName")
+            or mem.get("name")
+            or mem.get("fileName")
+        )
+        relative_path = meta.get("relative_path") or file_name
+        rid = meta.get("id") or u
+        to_remove.append({
+            "id": rid,
+            "name": file_name or rid,
+            "relative_path": relative_path or rid,
+            "_uuid": u,
+        })
+    # If list didn't return metadata with name, batch-get so we can show file names in logs
+    need_names = [r["_uuid"] for r in to_remove if r.get("name") == r.get("id")]
+    if need_names:
+        try:
+            extra = _goodmem.batch_get_memories(need_names)
+            for r in to_remove:
+                if r["_uuid"] not in extra:
+                    continue
+                mem = extra[r["_uuid"]] or {}
+                meta = mem.get("metadata") or {}
+                file_name = (
+                    meta.get("name")
+                    or meta.get("fileName")
+                    or meta.get("displayName")
+                    or mem.get("name")
+                    or mem.get("fileName")
+                )
+                relative_path = meta.get("relative_path") or file_name
+                if file_name:
+                    r["name"] = file_name
+                if relative_path:
+                    r["relative_path"] = relative_path
+        except requests.RequestException:
+            pass
+    for r in to_remove:
+        r.pop("_uuid", None)
+
     return (to_add, to_update, to_remove)
 
 
 def _compute_file_diff() -> Optional[dict]:
-    """Compare SharePoint drive root files vs Goodmem space. Returns dict with only_in_sharepoint, only_in_goodmem, in_both, or None if not ready."""
+    """Compare SharePoint drive root files vs Goodmem space (UUID set-based). Returns dict with only_in_sharepoint, only_in_goodmem, in_both, or None if not ready."""
     global _connector, _goodmem, _drive_id, _space_id
     if not _connector or not _drive_id or not _goodmem or not _space_id:
         return None
@@ -480,17 +607,393 @@ def _compute_file_diff() -> Optional[dict]:
         return None
     except Exception:
         return None
+    sharepoint_uuids = {uuid_from_file_id(f["id"]) for f in root_files}
+    goodmem_uuids = {m["memoryId"] for m in memories}
     sp_by_id = {f["id"]: {"id": f["id"], "name": f.get("name") or f["id"], "modified_datetime": f.get("modified_datetime")} for f in root_files}
-    gm_by_id: dict[str, dict] = {}
+    only_in_sharepoint = [sp_by_id[f["id"]] for f in root_files if uuid_from_file_id(f["id"]) not in goodmem_uuids]
+    only_in_goodmem = []
     for mem in memories:
-        meta = mem.get("metadata") or {}
-        sp_id = meta.get("id")
-        if sp_id:
-            gm_by_id[sp_id] = {"id": sp_id, "name": meta.get("name") or sp_id, "modified_datetime": meta.get("modified_datetime")}
-    only_in_sharepoint = [sp_by_id[i] for i in sp_by_id if i not in gm_by_id]
-    only_in_goodmem = [gm_by_id[i] for i in gm_by_id if i not in sp_by_id]
-    in_both = [sp_by_id[i] for i in sp_by_id if i in gm_by_id]
+        if mem["memoryId"] not in sharepoint_uuids:
+            meta = mem.get("metadata") or {}
+            only_in_goodmem.append({"id": meta.get("id"), "name": meta.get("name") or meta.get("id"), "modified_datetime": meta.get("modified_datetime")})
+    in_both = [sp_by_id[f["id"]] for f in root_files if uuid_from_file_id(f["id"]) in goodmem_uuids]
     return {"only_in_sharepoint": only_in_sharepoint, "only_in_goodmem": only_in_goodmem, "in_both": in_both}
+
+
+def _get_delta_link_path() -> str:
+    """Path to file storing the Graph delta link. Uses GRAPH_DELTA_TOKEN_FILE or default in script dir."""
+    global _delta_link_path
+    if _delta_link_path is not None:
+        return _delta_link_path
+    env_path = (os.getenv("GRAPH_DELTA_TOKEN_FILE") or "").strip()
+    if env_path:
+        _delta_link_path = os.path.abspath(env_path)
+        return _delta_link_path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    _delta_link_path = os.path.join(script_dir, ".graph_delta_link")
+    return _delta_link_path
+
+
+def _load_delta_link() -> Optional[str]:
+    """Load persisted delta link from file. Returns None if missing or empty."""
+    path = _get_delta_link_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            link = (f.read() or "").strip()
+            return link if link else None
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+
+def _save_delta_link(delta_link: str) -> None:
+    """Persist delta link to file."""
+    path = _get_delta_link_path()
+    with _delta_link_lock:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(delta_link)
+        except OSError as e:
+            print(f"[listener] Failed to save delta link: {e}", file=sys.stderr)
+
+
+def _clear_delta_link() -> None:
+    """Remove persisted delta link file."""
+    path = _get_delta_link_path()
+    with _delta_link_lock:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as e:
+            print(f"[listener] Failed to clear delta link: {e}", file=sys.stderr)
+
+
+def _get_pending_removes_path() -> str:
+    """Path to file storing pending-remove file_ids (one per line). Same dir as delta link."""
+    global _pending_remove_path
+    if _pending_remove_path is not None:
+        return _pending_remove_path
+    base = _get_delta_link_path()
+    _pending_remove_path = os.path.join(os.path.dirname(base), ".graph_pending_removes")
+    return _pending_remove_path
+
+
+def _load_pending_removes() -> set[str]:
+    """Load persisted pending-remove file_ids. Returns empty set if missing or error."""
+    global _pending_remove_file_ids
+    path = _get_pending_removes_path()
+    with _pending_remove_lock:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = (line.strip() for line in f if line.strip())
+                _pending_remove_file_ids = set(lines)
+                return set(_pending_remove_file_ids)
+        except FileNotFoundError:
+            _pending_remove_file_ids = set()
+            return set()
+        except OSError:
+            return set(_pending_remove_file_ids)
+
+
+def _save_pending_removes() -> None:
+    """Persist pending-remove file_ids (one per line)."""
+    path = _get_pending_removes_path()
+    with _pending_remove_lock:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for fid in sorted(_pending_remove_file_ids):
+                    f.write(fid + "\n")
+        except OSError as e:
+            print(f"[listener] Failed to save pending removes: {e}", file=sys.stderr)
+
+
+def _pending_remove_add(file_id: str) -> None:
+    """Add file_id to pending removes and persist. Retried on next full/delta sync."""
+    global _pending_remove_file_ids
+    _load_pending_removes()  # ensure set is loaded before we add
+    with _pending_remove_lock:
+        _pending_remove_file_ids.add(file_id)
+    _save_pending_removes()
+
+
+def _pending_remove_discard(file_id: str) -> None:
+    """Remove file_id from pending removes and persist."""
+    global _pending_remove_file_ids
+    _load_pending_removes()  # ensure set is loaded so we don't overwrite file with stale empty set
+    with _pending_remove_lock:
+        _pending_remove_file_ids.discard(file_id)
+    _save_pending_removes()
+
+
+def _get_pending_add_path() -> str:
+    base = _get_delta_link_path()
+    global _pending_add_path
+    if _pending_add_path is None:
+        _pending_add_path = os.path.join(os.path.dirname(base), ".graph_pending_add")
+    return _pending_add_path
+
+
+def _load_pending_add() -> set[str]:
+    global _pending_add_file_ids
+    path = _get_pending_add_path()
+    with _pending_add_lock:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = (line.strip() for line in f if line.strip())
+                _pending_add_file_ids = set(lines)
+                return set(_pending_add_file_ids)
+        except FileNotFoundError:
+            _pending_add_file_ids = set()
+            return set()
+        except OSError:
+            return set(_pending_add_file_ids)
+
+
+def _save_pending_add() -> None:
+    path = _get_pending_add_path()
+    with _pending_add_lock:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for fid in sorted(_pending_add_file_ids):
+                    f.write(fid + "\n")
+        except OSError as e:
+            print(f"[listener] Failed to save pending add: {e}", file=sys.stderr)
+
+
+def _pending_add_add(file_id: str) -> None:
+    global _pending_add_file_ids
+    _load_pending_add()
+    with _pending_add_lock:
+        _pending_add_file_ids.add(file_id)
+    _save_pending_add()
+
+
+def _pending_add_discard(file_id: str) -> None:
+    global _pending_add_file_ids
+    _load_pending_add()
+    with _pending_add_lock:
+        _pending_add_file_ids.discard(file_id)
+    _save_pending_add()
+
+
+def _get_pending_update_path() -> str:
+    base = _get_delta_link_path()
+    global _pending_update_path
+    if _pending_update_path is None:
+        _pending_update_path = os.path.join(os.path.dirname(base), ".graph_pending_update")
+    return _pending_update_path
+
+
+def _load_pending_update() -> set[str]:
+    global _pending_update_file_ids
+    path = _get_pending_update_path()
+    with _pending_update_lock:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = (line.strip() for line in f if line.strip())
+                _pending_update_file_ids = set(lines)
+                return set(_pending_update_file_ids)
+        except FileNotFoundError:
+            _pending_update_file_ids = set()
+            return set()
+        except OSError:
+            return set(_pending_update_file_ids)
+
+
+def _save_pending_update() -> None:
+    path = _get_pending_update_path()
+    with _pending_update_lock:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for fid in sorted(_pending_update_file_ids):
+                    f.write(fid + "\n")
+        except OSError as e:
+            print(f"[listener] Failed to save pending update: {e}", file=sys.stderr)
+
+
+def _pending_update_add(file_id: str) -> None:
+    global _pending_update_file_ids
+    _load_pending_update()
+    with _pending_update_lock:
+        _pending_update_file_ids.add(file_id)
+    _save_pending_update()
+
+
+def _pending_update_discard(file_id: str) -> None:
+    global _pending_update_file_ids
+    _load_pending_update()
+    with _pending_update_lock:
+        _pending_update_file_ids.discard(file_id)
+    _save_pending_update()
+
+
+def _bootstrap_delta_link() -> None:
+    """Get current delta link from Graph (token=latest) and persist it. Call after full sync."""
+    global _connector, _drive_id
+    if not _connector or not _drive_id:
+        return
+    try:
+        items, new_link = _connector.drive_delta(_drive_id, token_latest=True)
+        if new_link:
+            _save_delta_link(new_link)
+            _log_activity("delta_bootstrap", "Delta link saved for future syncs")
+    except requests.RequestException as e:
+        print(f"[listener] Bootstrap delta link failed: {e}", file=sys.stderr)
+        _log_activity("error", f"Bootstrap delta link failed: {e}")
+
+
+def _run_delta_sync(reason: str = "delta sync") -> None:
+    """
+    Sync using Graph delta API: fetch only changes since last deltaLink, apply to Goodmem.
+    If no delta link or 410 Gone, run full list vs Goodmem then bootstrap delta link.
+    """
+    global _connector, _goodmem, _drive_id, _space_id
+    if not _connector or not _drive_id:
+        return
+
+    delta_link = _load_delta_link()
+    if not delta_link:
+        _run_full_sync(reason=reason)
+        _bootstrap_delta_link()
+        return
+
+    _log_activity("info", f"[{reason}] Delta sync (SharePoint → Goodmem) started", reason=reason)
+    if not _ensure_space_id():
+        _log_activity("skipped", f"No Goodmem space ({reason})", item_id=None)
+        return
+
+    try:
+        items, new_delta_link = _connector.drive_delta(_drive_id, delta_link=delta_link)
+    except requests.RequestException as e:
+        _log_goodmem_error(e)
+        print(f"[listener] Delta API failed: {e}", file=sys.stderr)
+        _log_activity("error", f"Delta API failed: {e}")
+        return
+
+    if items is None and new_delta_link is None:
+        _clear_delta_link()
+        _log_activity("info", "[delta] Token invalid (410); running full sync", reason="410")
+        _run_full_sync(reason=f"{reason} (410)")
+        _bootstrap_delta_link()
+        return
+
+    to_remove: list[dict] = []
+    to_sync: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not item_id:
+            continue
+        if item.get("deleted"):
+            to_remove.append({"id": item_id, "name": item.get("name") or item_id})
+            continue
+        if "file" not in item:
+            continue
+        file_info = _connector._format_file_info(item)
+        file_info["relative_path"] = item.get("name") or file_info.get("id") or item_id
+        if not file_info.get("download_url"):
+            full = _connector.get_file_by_id(_drive_id, item_id)
+            if full:
+                full["relative_path"] = file_info["relative_path"]
+                file_info = full
+        if file_info and file_info.get("download_url") and _is_mime_type_supported(file_info.get("mime_type")):
+            to_sync.append(file_info)
+
+    # Distinguish to_add vs to_update: batch-get UUIDs for to_sync; found -> update, not found -> add
+    to_add_or_update_uuids = [uuid_from_file_id(f["id"]) for f in to_sync if f.get("id")]
+    to_add: list[dict] = []
+    to_update: list[dict] = []
+    try:
+        batch_result = _goodmem.batch_get_memories(to_add_or_update_uuids) if to_add_or_update_uuids else {}
+    except requests.RequestException as e:
+        _log_goodmem_error(e)
+        print(f"[listener] Goodmem unreachable during delta sync: {e}", file=sys.stderr)
+        _log_activity("error", "Cannot batch-get memories for add/update classification")
+        return
+    for file_info in to_sync:
+        fid = file_info.get("id")
+        if not fid:
+            continue
+        u = uuid_from_file_id(fid)
+        if u in batch_result:
+            # Checkpoint: Goodmem modified_datetime must be older than delta file
+            gm_modified = (batch_result[u].get("metadata") or {}).get("modified_datetime")
+            sp_modified = file_info.get("modified_datetime")
+            if gm_modified is not None and sp_modified is not None and gm_modified >= sp_modified:
+                print(f"[listener] Unexpected: Goodmem modified_datetime >= SharePoint for file_id={fid}", file=sys.stderr)
+            to_update.append(file_info)
+        else:
+            to_add.append(file_info)
+
+    # Merge pending removes (failed in a previous run) so we retry on this sync
+    pending = _load_pending_removes()
+    to_remove_ids = {r["id"] for r in to_remove}
+    for fid in pending:
+        if fid not in to_remove_ids:
+            to_remove.append({"id": fid, "name": fid, "relative_path": fid})
+            to_remove_ids.add(fid)
+    # Merge pending add (failed Goodmem add): fetch file_info from SharePoint, add to to_add
+    to_add_ids = {f["id"] for f in to_add}
+    for fid in _load_pending_add():
+        if fid in to_add_ids:
+            continue
+        try:
+            file_info = _connector.get_file_by_id(_drive_id, fid)
+        except requests.RequestException:
+            continue
+        if not file_info:
+            _pending_add_discard(fid)
+            continue
+        if not _is_mime_type_supported(file_info.get("mime_type")) or not file_info.get("download_url"):
+            continue
+        file_info["relative_path"] = file_info.get("relative_path") or file_info.get("name") or fid
+        to_add.append(file_info)
+        to_add_ids.add(fid)
+    # Merge pending update (failed Goodmem update): fetch file_info from SharePoint, add to to_update
+    to_update_ids = {f["id"] for f in to_update}
+    for fid in _load_pending_update():
+        if fid in to_update_ids:
+            continue
+        try:
+            file_info = _connector.get_file_by_id(_drive_id, fid)
+        except requests.RequestException:
+            continue
+        if not file_info:
+            _pending_update_discard(fid)
+            continue
+        if not _is_mime_type_supported(file_info.get("mime_type")) or not file_info.get("download_url"):
+            continue
+        file_info["relative_path"] = file_info.get("relative_path") or file_info.get("name") or fid
+        to_update.append(file_info)
+        to_update_ids.add(fid)
+    # Log delta file tree (same format as full sync) so watchers see To Add / To Update / To Remove
+    add_paths = [f.get("relative_path") or f.get("name") or f["id"] for f in to_add]
+    update_paths = [f.get("relative_path") or f.get("name") or f["id"] for f in to_update]
+    remove_paths = [_display_name_for_remove(r) for r in to_remove]
+    tree_add = _format_tree_by_folder("To Add", add_paths)
+    tree_update = _format_tree_by_folder("To Update", update_paths)
+    tree_remove = _format_tree_by_folder("To Remove", remove_paths)
+    delta_message = tree_add + "\n" + tree_update + "\n" + tree_remove
+    _log_activity("delta", delta_message, to_add=len(to_add), to_update=len(to_update), to_remove=len(to_remove))
+
+    for r in to_remove:
+        rname = _display_name_for_remove(r)
+        _log_activity("syncing", "[Syncing] Remove: " + rname + " (id=" + r["id"] + ")", file_name=rname, file_id=r["id"])
+        _delete_memory_for_file_id(r["id"], log_name=rname)
+    for file_info in to_add:
+        path = file_info.get("relative_path") or file_info.get("name") or file_info["id"]
+        _log_activity("syncing", "[Syncing] Add: " + path + " (id=" + file_info["id"] + ")", file_name=path, file_id=file_info["id"])
+        _add_one_file_to_goodmem(file_info)
+    for file_info in to_update:
+        path = file_info.get("relative_path") or file_info.get("name") or file_info["id"]
+        _log_activity("syncing", "[Syncing] Update: " + path + " (id=" + file_info["id"] + ")", file_name=path, file_id=file_info["id"])
+        _update_one_file_to_goodmem(file_info)
+
+    if new_delta_link:
+        _save_delta_link(new_delta_link)
+    _log_activity("info", f"[{reason}] Delta sync (SharePoint → Goodmem) finished", reason=reason)
 
 
 def _list_subscriptions(connector: SharePointConnector) -> list[dict]:
@@ -701,6 +1204,7 @@ def _subscription_renewal_loop() -> None:
                     expiration_minutes=expiration_minutes,
                 )
                 _subscription_info_logged_ids.add(renewed.get("id") or "")
+                _sync_queue.put({"value": [], "is_root_sync": False, "force_full_sync": True, "reason": "subscription renew"})
                 exp_str = renewed.get("expirationDateTime")
                 exp_dt = _parse_expiration_datetime(exp_str)
                 if exp_dt:
@@ -761,31 +1265,64 @@ def _run_full_sync(reason: str = "full sync") -> None:
         print("[listener] Skipping full sync: SharePoint returned 0 files but Goodmem has memories (possible auth/API failure).", file=sys.stderr)
         return
     to_add, to_update, to_remove = _compute_delta(root_files, memories)
+    # Merge pending removes (failed in a previous run) so we retry on this sync
+    pending = _load_pending_removes()
+    to_remove_ids = {r["id"] for r in to_remove}
+    for fid in pending:
+        if fid not in to_remove_ids:
+            to_remove.append({"id": fid, "name": fid, "relative_path": fid})
+            to_remove_ids.add(fid)
+    # Merge pending add (failed Goodmem add): fetch file_info from SharePoint, add to to_add
+    to_add_ids = {f["id"] for f in to_add}
+    for fid in _load_pending_add():
+        if fid in to_add_ids:
+            continue
+        try:
+            file_info = _connector.get_file_by_id(_drive_id, fid)
+        except requests.RequestException:
+            continue
+        if not file_info:
+            _pending_add_discard(fid)
+            continue
+        if not _is_mime_type_supported(file_info.get("mime_type")) or not file_info.get("download_url"):
+            continue
+        file_info["relative_path"] = file_info.get("relative_path") or file_info.get("name") or fid
+        to_add.append(file_info)
+        to_add_ids.add(fid)
+    # Merge pending update (failed Goodmem update): fetch file_info from SharePoint, add to to_update
+    to_update_ids = {f["id"] for f in to_update}
+    for fid in _load_pending_update():
+        if fid in to_update_ids:
+            continue
+        try:
+            file_info = _connector.get_file_by_id(_drive_id, fid)
+        except requests.RequestException:
+            continue
+        if not file_info:
+            _pending_update_discard(fid)
+            continue
+        if not _is_mime_type_supported(file_info.get("mime_type")) or not file_info.get("download_url"):
+            continue
+        file_info["relative_path"] = file_info.get("relative_path") or file_info.get("name") or fid
+        to_update.append(file_info)
+        to_update_ids.add(fid)
     tree_add = _format_tree_by_folder("To Add", [f.get("relative_path") or f.get("name") or f["id"] for f in to_add])
     tree_update = _format_tree_by_folder("To Update", [f.get("relative_path") or f.get("name") or f["id"] for f in to_update])
-    tree_remove = _format_tree_by_folder("To Remove", [r.get("relative_path", r["name"]) for r in to_remove])
+    tree_remove = _format_tree_by_folder("To Remove", [_display_name_for_remove(r) for r in to_remove])
     delta_message = tree_add + "\n" + tree_update + "\n" + tree_remove
     _log_activity("delta", delta_message, to_add=len(to_add), to_update=len(to_update), to_remove=len(to_remove))
     for r in to_remove:
-        rname = r.get("relative_path", r.get("name", r["id"]))
+        rname = _display_name_for_remove(r)
         _log_activity("syncing", "[Syncing] Remove: " + rname + " (id=" + r["id"] + ")", file_name=rname, file_id=r["id"])
-        _remove_memory_for_file_id(r["id"])
+        _delete_memory_for_file_id(r["id"], log_name=rname)
     for file_info in to_add:
         path = file_info.get("relative_path") or file_info.get("name") or file_info["id"]
         _log_activity("syncing", "[Syncing] Add: " + path + " (id=" + file_info["id"] + ")", file_name=path, file_id=file_info["id"])
+        _add_one_file_to_goodmem(file_info)
     for file_info in to_update:
         path = file_info.get("relative_path") or file_info.get("name") or file_info["id"]
         _log_activity("syncing", "[Syncing] Update: " + path + " (id=" + file_info["id"] + ")", file_name=path, file_id=file_info["id"])
-    for file_info in to_add + to_update:
-        result = _sync_one_file_to_goodmem(file_info)
-        if result:
-            outcome, detail = result
-            if outcome == "synced":
-                pass  # already logged in _sync_one_file_to_goodmem
-            elif outcome == "skipped":
-                pass
-            elif outcome == "error":
-                pass
+        _update_one_file_to_goodmem(file_info)
     _log_activity("info", f"[{reason}] Full sync (SharePoint → Goodmem) finished", reason=reason)
 
 
@@ -817,14 +1354,13 @@ def process_notification_value(value: list) -> None:
             if not _connector:
                 continue
             if change_type == "updated" and drive_id and (not item_id or _is_root_resource(resource)):
-                _run_full_sync(reason="root notification")
+                _run_delta_sync(reason="root notification")
                 continue
             if not drive_id or not item_id:
                 continue
             if change_type == "deleted":
-                name = _remove_memory_for_file_id(item_id)
-                if name:
-                    deleted_names.append(name)
+                _delete_memory_for_file_id(item_id)
+                deleted_names.append(item_id)
                 continue
             if change_type in ("created", "updated"):
                 file_info = _connector.get_file_by_id(drive_id, item_id)
@@ -837,9 +1373,16 @@ def process_notification_value(value: list) -> None:
                     skipped_reasons.append("no Goodmem space")
                     continue
                 path = file_info.get("relative_path") or file_info.get("name") or file_info.get("id", item_id)
-                op = "Add" if change_type == "created" else "Update"
+                # Distinguish add vs update via batch-get
+                u = uuid_from_file_id(item_id)
+                try:
+                    found = _goodmem.batch_get_memories([u]) if _goodmem else {}
+                except requests.RequestException:
+                    found = {}
+                is_update = u in found
+                op = "Update" if is_update else "Add"
                 _log_activity("syncing", "[Syncing] " + op + ": " + path + " (id=" + item_id + ")", file_name=path, file_id=item_id)
-                result = _sync_one_file_to_goodmem(file_info)
+                result = _update_one_file_to_goodmem(file_info) if is_update else _add_one_file_to_goodmem(file_info)
                 if result:
                     outcome, detail = result
                     if outcome == "synced":
@@ -861,7 +1404,10 @@ def _worker_loop() -> None:
     while True:
         job = _sync_queue.get()
         try:
-            process_notification_value(job["value"])
+            if job.get("force_full_sync"):
+                _run_full_sync(reason=job.get("reason", "full sync"))
+            else:
+                process_notification_value(job["value"])
         except Exception as e:
             print(f"[listener] Worker error: {e}", file=sys.stderr)
         finally:
@@ -908,7 +1454,7 @@ def build_app() -> Flask:
                 _log_activity("coalesced", "Root sync already pending; skipping duplicate notification", count=len(value))
                 return "", 200
             _log_activity("notification_received", f"Received {len(value)} change(s) from Graph", count=len(value))
-            _sync_queue.put({"value": value, "is_root_sync": is_root_sync})
+            _sync_queue.put({"value": value, "is_root_sync": is_root_sync, "force_full_sync": False})
             if is_root_sync:
                 _root_sync_pending = True
 
@@ -1022,7 +1568,12 @@ def main() -> None:
             start_msg = "OAuth2 authenticating" if reason == "initial" else "OAuth2 re-authenticating"
             _log_activity("oauth2_start", start_msg, reason=reason)
             msg = "OAuth2 initial token obtained" if reason == "initial" else f"OAuth2 re-authenticated ({reason})"
-            _log_activity("oauth2_reauth", msg, reason=reason)
+            expires_at = None
+            if getattr(connector, "_token_expires_at", None):
+                expires_at = connector._token_expires_at.isoformat()
+            _log_activity("oauth2_reauth", msg, reason=reason, token_expires_at=expires_at)
+            if reason != "initial":
+                _sync_queue.put({"value": [], "is_root_sync": False, "force_full_sync": True, "reason": "oauth refresh"})
 
         connector.on_token_refresh = _on_token_refresh
         print("Authenticating with Microsoft Graph...", end=" ", flush=True)
@@ -1058,6 +1609,7 @@ def main() -> None:
         def run_startup_sync() -> None:
             print("Running startup full sync (same as sync_once)...", flush=True)
             _run_full_sync(reason="startup")
+            _bootstrap_delta_link()
             print("Startup full sync done.", flush=True)
         threading.Thread(target=run_startup_sync, daemon=True).start()
         print(f"Starting webhook server... ✓ Listening on port {sync_port}. Endpoint: /sync/webhook or /")

@@ -3,6 +3,12 @@
 .env.*
 !.env.example
 
+# Graph delta token (persisted deltaLink for incremental sync)
+.graph_delta_link
+.graph_pending_removes
+.graph_pending_add
+.graph_pending_update
+
 # Generated Fly configs (from *.template by deploy_fly_io.sh)
 fly.toml
 fly_io.listener.toml

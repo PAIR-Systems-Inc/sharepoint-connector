@@ -49,7 +49,7 @@ import os
 import sys
 import requests
 import json
-from typing import Callable, List, Dict, Optional
+from typing import Callable, List, Dict, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
@@ -568,6 +568,62 @@ class SharePointConnector:
         except requests.exceptions.RequestException as e:
             print(f"Warning: Failed to get item {item_id}: {e}")
             return None
+
+    def drive_delta(
+        self,
+        drive_id: str,
+        delta_link: Optional[str] = None,
+        token_latest: bool = False,
+    ) -> Tuple[Optional[List[Dict]], Optional[str]]:
+        """
+        Get changes from the drive using Graph delta API.
+
+        Args:
+            drive_id: Drive ID.
+            delta_link: Previous @odata.deltaLink URL (full URL). If set, request changes since that token.
+            token_latest: If True, request current deltaLink only (no items). Use after full sync to bootstrap.
+
+        Returns:
+            (items, new_delta_link). items is a list of driveItem dicts from the API; deleted items have
+            a "deleted" facet. new_delta_link is the @odata.deltaLink to use next time.
+            On 410 Gone (token invalid): returns (None, None). Caller should run full sync and re-bootstrap.
+        """
+        if token_latest:
+            url = f"{self.base_url}/drives/{drive_id}/root/delta?token=latest"
+        elif delta_link:
+            url = delta_link
+        else:
+            url = f"{self.base_url}/drives/{drive_id}/root/delta"
+
+        all_items: List[Dict] = []
+        new_delta_link: Optional[str] = None
+
+        try:
+            while True:
+                response = self._request("GET", url, timeout=60)
+                if response.status_code == 410:
+                    return (None, None)
+                response.raise_for_status()
+                data = response.json()
+                all_items.extend(data.get("value") or [])
+
+                next_link = data.get("@odata.nextLink")
+                delta_link_value = data.get("@odata.deltaLink")
+
+                if delta_link_value:
+                    new_delta_link = delta_link_value
+                    break
+                if next_link:
+                    url = next_link
+                else:
+                    break
+
+            return (all_items, new_delta_link)
+        except requests.exceptions.RequestException as e:
+            print(f"Warning: drive_delta failed: {e}", file=sys.stderr)
+            if hasattr(e, "response") and e.response is not None and e.response.status_code == 410:
+                return (None, None)
+            raise
 
     def _format_file_info(self, item: Dict) -> Dict:
         """Format file information into a clean dictionary."""

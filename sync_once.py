@@ -32,7 +32,7 @@ from urllib.parse import urlparse
 import requests
 from dotenv import load_dotenv
 
-from goodmem_client import GoodmemClient
+from goodmem_client import GoodmemClient, uuid_from_file_id
 from sharepoint_client import SharePointConnector, validate_token_refresh_buffer
 
 
@@ -249,29 +249,35 @@ def run_diff() -> None:
         print("Error: Could not resolve site.")
         return
     files = connector.list_files(site_id=site_id)
-    space_name = _space_name_from_site_url(site_url)
-    space_id = goodmem.find_space_by_name(space_name)
-    if not space_id:
-        print(f"Error: Goodmem space '{space_name}' not found.")
-        return
+    # Resolve space same as sync: GOODMEM_SPACE_ID / SPACE_ID / DEFAULT_SPACE_ID, else find by name
+    default_space_id = os.getenv("GOODMEM_SPACE_ID") or os.getenv("SPACE_ID") or os.getenv("DEFAULT_SPACE_ID")
+    if default_space_id:
+        space_id = default_space_id.strip()
+    else:
+        space_name = _space_name_from_site_url(site_url)
+        space_id = goodmem.find_space_by_name(space_name)
+        if not space_id:
+            print(f"Error: Goodmem space '{space_name}' not found.")
+            return
     memories = goodmem.list_all_memories(space_id)
+    sharepoint_uuids = {uuid_from_file_id(f["id"]) for f in files}
+    goodmem_uuids = {m["memoryId"] for m in memories}
     sp_by_id = {f["id"]: {"id": f["id"], "name": f.get("name") or f["id"], "modified_datetime": f.get("modified_datetime")} for f in files}
-    gm_by_id: dict = {}
+    only_sp = [sp_by_id[f["id"]] for f in files if uuid_from_file_id(f["id"]) not in goodmem_uuids]
+    only_gm = []
     for mem in memories:
-        meta = mem.get("metadata") or {}
-        sp_id = meta.get("id")
-        if sp_id:
-            gm_by_id[sp_id] = {"id": sp_id, "name": meta.get("name") or sp_id, "modified_datetime": meta.get("modified_datetime")}
-    only_sp = [sp_by_id[i] for i in sp_by_id if i not in gm_by_id]
-    only_gm = [gm_by_id[i] for i in gm_by_id if i not in sp_by_id]
-    in_both = [sp_by_id[i] for i in sp_by_id if i in gm_by_id]
+        if mem["memoryId"] not in sharepoint_uuids:
+            meta = mem.get("metadata") or {}
+            only_gm.append({"id": meta.get("id"), "name": meta.get("name") or meta.get("id"), "modified_datetime": meta.get("modified_datetime")})
+    in_both = [sp_by_id[f["id"]] for f in files if uuid_from_file_id(f["id"]) in goodmem_uuids]
     print("File-level diff (SharePoint drive root vs Goodmem space):")
     print(f"  Only in SharePoint: {len(only_sp)}")
     for x in only_sp:
         print(f"    - {x['name']} (id={x['id'][:12]}...)")
     print(f"  Only in Goodmem: {len(only_gm)}")
     for x in only_gm:
-        print(f"    - {x['name']} (id={x['id'][:12]}...)")
+        ident = (x.get("id") or "?")[:12] if x.get("id") else "?"
+        print(f"    - {x.get('name', '?')} (id={ident}...)")
     print(f"  In both: {len(in_both)}")
     for x in in_both:
         print(f"    - {x['name']} (id={x['id'][:12]}...)")
@@ -426,63 +432,71 @@ def main() -> None:
     print("Goodmem: Listing memories...", end=" ", flush=True)
     memories = goodmem.list_all_memories(space_id)
     print(f"Found {len(memories)}.")
-    # Map SharePoint file id -> { memory_id, modified_datetime } from metadata
-    goodmem_by_file_id: dict = {}
-    for mem in memories:
-        meta = mem.get("metadata") or {}
-        file_id = meta.get("id")
-        if file_id is not None:
-            goodmem_by_file_id[file_id] = {
-                "memory_id": mem.get("memoryId"),
-                "modified_datetime": meta.get("modified_datetime"),
-                "name": meta.get("name"),
-            }
 
-    current_sharepoint_ids = {f["id"] for f in files}
-    changed = False
+    # UUID set operations (same logic as listener)
+    sp_by_id = {f["id"]: f for f in files}
+    sharepoint_uuids = {uuid_from_file_id(fid) for fid in sp_by_id}
+    goodmem_uuids = {m["memoryId"] for m in memories}
+    uuid_to_file_id = {uuid_from_file_id(fid): fid for fid in sp_by_id}
 
-    # Rule 3: Delete memories for files no longer in SharePoint
-    for file_id, info in list(goodmem_by_file_id.items()):
-        if file_id not in current_sharepoint_ids:
-            mid = info.get("memory_id")
-            if mid:
-                file_name = info.get("name") or "(unknown name)"
-                print(f"Goodmem: Deleting memory for removed file: {file_name}")
-                goodmem.delete_memory(mid)
-                del goodmem_by_file_id[file_id]
-                changed = True
+    to_add_uuids = sharepoint_uuids - goodmem_uuids
+    to_delete_uuids = goodmem_uuids - sharepoint_uuids
+    both_uuids = sharepoint_uuids & goodmem_uuids
 
-    # Determine which files we will ingest and total bytes (for progress bar)
-    files_to_ingest: list[dict] = []
-    total_bytes_to_ingest = 0
-    for file_info in files:
-        file_id = file_info.get("id")
-        mime_type = file_info.get("mime_type")
-        if not _is_mime_type_supported(mime_type):
-            continue
-        existing = goodmem_by_file_id.get(file_id)
-        if existing and existing.get("modified_datetime") == file_info.get("modified_datetime"):
-            continue
-        files_to_ingest.append(file_info)
-        total_bytes_to_ingest += file_info.get("size") or 0
+    # Batch-get both_uuids to decide which need update (Goodmem modified_datetime older than SharePoint)
+    to_update_uuids: set[str] = set()
+    if both_uuids:
+        both_meta = goodmem.batch_get_memories(list(both_uuids))
+        for u in both_uuids:
+            fid = uuid_to_file_id.get(u)
+            if not fid:
+                continue
+            gm_modified = ((both_meta.get(u) or {}).get("metadata") or {}).get("modified_datetime")
+            sp_modified = sp_by_id[fid].get("modified_datetime")
+            if gm_modified is None or sp_modified is None:
+                to_update_uuids.add(u)
+                continue
+            if gm_modified < sp_modified:
+                to_update_uuids.add(u)
+            elif gm_modified > sp_modified:
+                print(f"Goodmem: Unexpected — Goodmem modified_datetime newer than SharePoint for file_id={fid}", file=sys.stderr)
 
-    # Rules 1 & 2: Ingest new files; for updated files, delete then ingest
-    bytes_ingested = 0
+    to_add_file_infos = [
+        sp_by_id[uuid_to_file_id[u]]
+        for u in to_add_uuids
+        if u in uuid_to_file_id and _is_mime_type_supported(sp_by_id[uuid_to_file_id[u]].get("mime_type"))
+    ]
+    to_update_file_infos = [
+        sp_by_id[uuid_to_file_id[u]]
+        for u in to_update_uuids
+        if u in uuid_to_file_id and _is_mime_type_supported(sp_by_id[uuid_to_file_id[u]].get("mime_type"))
+    ]
+
+    # Delete memories no longer in SharePoint (by UUID)
+    if to_delete_uuids:
+        delete_meta = goodmem.batch_get_memories(list(to_delete_uuids))
+        for u in to_delete_uuids:
+            meta = (delete_meta.get(u) or {}).get("metadata") or {}
+            name = meta.get("name") or meta.get("id") or u
+            print(f"Goodmem: Deleting memory for removed file: {name}")
+            goodmem.delete_memory(u)
+
+    # Add: ingest with memoryId=uuid_from_file_id(file_id)
+    # Update: delete then ingest with same memoryId
+    files_to_ingest = to_add_file_infos + to_update_file_infos
+    total_bytes_to_ingest = sum(f.get("size") or 0 for f in files_to_ingest)
     num_to_ingest = len(files_to_ingest)
+    changed = bool(to_delete_uuids or files_to_ingest)
+
     if num_to_ingest:
         print(f"Goodmem: Ingesting {num_to_ingest} file(s) ({_format_bytes(total_bytes_to_ingest)} total)...")
+    bytes_ingested = 0
     for file_info in files_to_ingest:
         file_id = file_info.get("id")
-        mime_type = file_info.get("mime_type") or "application/octet-stream"
-        existing = goodmem_by_file_id.get(file_id)
-        if existing:
-            mid = existing.get("memory_id")
-            if mid:
-                print(f"Goodmem: Deleting old memory for updated file: {file_info.get('name')}")
-                goodmem.delete_memory(mid)
-            changed = True
-        else:
-            changed = True
+        memory_uuid = uuid_from_file_id(file_id)
+        is_update = memory_uuid in to_update_uuids
+        if is_update:
+            goodmem.delete_memory(memory_uuid)
 
         download_url = file_info.get("download_url")
         if not download_url:
@@ -495,7 +509,7 @@ def main() -> None:
             print(f"  Failed to download {file_info.get('name')}: {e}")
             continue
 
-        # Metadata: all fields from the file JSON (README)
+        mime_type = file_info.get("mime_type") or "application/octet-stream"
         metadata = {k: v for k, v in file_info.items() if v is not None}
 
         try:
@@ -504,6 +518,7 @@ def main() -> None:
                 content_bytes=content_bytes,
                 content_type=mime_type,
                 metadata=metadata,
+                memory_id=memory_uuid,
             )
         except Exception as e:
             print(f"  Failed to ingest {file_info.get('name')}: {e}")

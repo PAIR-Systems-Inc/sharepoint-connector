@@ -14,8 +14,13 @@
 
 """Goodmem API client for interacting with Goodmem.ai."""
 
+# Max memory IDs per batch-get request. Backend has no limit; smaller batches
+# reduce risk of OOM or transmission issues.
+BATCH_GET_MEMORIES_SIZE = 20
+
 import base64
 import json
+import uuid
 from typing import Any
 from typing import Dict
 from typing import List
@@ -23,6 +28,12 @@ from typing import Optional
 from urllib.parse import quote
 
 import requests
+
+
+def uuid_from_file_id(file_id: str) -> str:
+    """Deterministic UUID v5 for a SharePoint file id. Used as Goodmem memoryId."""
+    namespace = uuid.uuid5(uuid.NAMESPACE_DNS, "sharepoint.file.id")
+    return str(uuid.uuid5(namespace, file_id))
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +191,7 @@ class GoodmemClient:
       content_type: str,
       metadata: Optional[Dict[str, Any]] = None,
       *,
+      memory_id: Optional[str] = None,
       use_base64_fallback: bool = True,
   ) -> Dict[str, Any]:
     """Inserts a binary memory into a Goodmem space using multipart upload.
@@ -189,6 +201,7 @@ class GoodmemClient:
       content_bytes: The raw binary content as bytes.
       content_type: The MIME type (e.g., application/pdf, image/png).
       metadata: Optional metadata dict (e.g., session_id, user_id, filename).
+      memory_id: Optional deterministic memory ID (e.g. uuid_from_file_id(file_id)).
 
     Returns:
       The response JSON containing memoryId and processingStatus.
@@ -211,6 +224,8 @@ class GoodmemClient:
         "spaceId": space_id,
         "contentType": content_type,
     }
+    if memory_id:
+      request_data["memoryId"] = memory_id
     if metadata:
       request_data["metadata"] = metadata
 
@@ -256,6 +271,8 @@ class GoodmemClient:
             "contentType": content_type,
             "originalContentB64": base64.standard_b64encode(content_bytes).decode("ascii"),
         }
+        if memory_id:
+          json_payload["memoryId"] = memory_id
         if metadata:
           json_payload["metadata"] = metadata
         response = requests.post(
@@ -397,6 +414,30 @@ class GoodmemClient:
     response = requests.get(url, headers=self._headers, timeout=30)
     response.raise_for_status()
     return response.json()
+
+  def batch_get_memories(
+      self, memory_ids: List[str]
+  ) -> Dict[str, Dict[str, Any]]:
+    """Fetches multiple memories by ID in batches of BATCH_GET_MEMORIES_SIZE.
+
+    Args:
+      memory_ids: List of memory IDs to fetch.
+
+    Returns:
+      Dict mapping memory_id -> memory dict for each successfully retrieved
+      memory. IDs that are not found (404) are omitted.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    for i in range(0, len(memory_ids), BATCH_GET_MEMORIES_SIZE):
+      chunk = memory_ids[i : i + BATCH_GET_MEMORIES_SIZE]
+      for mid in chunk:
+        try:
+          result[mid] = self.get_memory_by_id(mid)
+        except requests.exceptions.HTTPError as e:
+          if e.response is not None and e.response.status_code == 404:
+            continue
+          raise
+    return result
 
   def list_memories(
       self,

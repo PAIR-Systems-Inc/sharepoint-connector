@@ -49,6 +49,44 @@ def _ts_to_local(ts_iso: str) -> str:
         return ts_iso[:19].replace("T", " ")  # fallback
 
 
+def _format_expiration(iso_str: str | None) -> str:
+    """Format ISO expiration for display (local YYYY-MM-DD HH:MM:SS). Returns '' if missing/invalid."""
+    if not iso_str:
+        return ""
+    return _ts_to_local(iso_str)
+
+
+def _parse_iso_to_utc(iso_str: str | None) -> datetime | None:
+    """Parse ISO timestamp to timezone-aware UTC datetime. Returns None if missing/invalid."""
+    if not iso_str:
+        return None
+    try:
+        s = (iso_str or "").strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_subscription_expiry(expiration_iso: str | None, event_ts_iso: str | None) -> str:
+    """Format subscription expiry as ' (expires in N minutes at YYYY-MM-DD HH:MM:SS)' or ' (expires at ...)' if no event_ts. Returns '' if no expiration."""
+    if not expiration_iso:
+        return ""
+    at_str = _format_expiration(expiration_iso)
+    if not at_str:
+        return ""
+    exp_dt = _parse_iso_to_utc(expiration_iso)
+    event_dt = _parse_iso_to_utc(event_ts_iso)
+    if exp_dt is not None and event_dt is not None:
+        delta_sec = (exp_dt - event_dt).total_seconds()
+        if delta_sec >= 0:
+            minutes = int(round(delta_sec / 60))
+            return f" (expires in {minutes} minutes at {at_str})"
+    return f" (expires at {at_str})"
+
+
 def _hierarchical_tag(typ: str, msg: str) -> tuple[str, str] | None:
     """Map event type (and message) to [category] [action] for display. Returns (category, action) or None for passthrough."""
     if typ == "oauth2_start":
@@ -90,7 +128,11 @@ def _hierarchical_tag(typ: str, msg: str) -> tuple[str, str] | None:
     return None
 
 
-def _parse_sync_message(typ: str, msg: str) -> tuple[str, str] | tuple[str, str, str] | None:
+# Op from listener (Add/Update/Remove) -> display label
+_SYNC_OP_ACTION = {"Add": "Add", "Update": "Update", "Remove": "Remove"}
+
+
+def _parse_sync_message(typ: str, msg: str) -> tuple[str, str, str] | tuple[str, str, str, str] | None:
     """Parse listener sync messages. Returns ('start', op, path) or ('end', op, path, 'DONE'|'FAILED') or None."""
     if not msg or not isinstance(msg, str):
         return None
@@ -120,6 +162,17 @@ def _parse_sync_message(typ: str, msg: str) -> tuple[str, str] | tuple[str, str,
             op, path = rest.split(": ", 1)
             return ("end", op.strip(), path.strip(), "DONE")
     return None
+
+
+def _sync_display_path(e: dict, parsed_path: str) -> str:
+    """File path for sync line: prefer file_name from event, else parsed path (without trailing id=)."""
+    path = e.get("file_name") or parsed_path
+    # If path looks like "name (id=xxx)", use name only when we have file_id in event
+    if e.get("file_id") and path.endswith(")"):
+        idx = path.rfind(" (id=")
+        if idx != -1:
+            path = path[:idx]
+    return path or "(unknown)"
 
 
 def get_listener_base_url(args: argparse.Namespace) -> str | None:
@@ -163,9 +216,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Load .env or the given env file so GRAPH_NOTIFICATION_URL / LISTENER_ACTIVITY_URL are set
-    if args.env_file and os.path.isfile(args.env_file):
-        load_dotenv(args.env_file, override=True)
+    # Load .env or the given env file so GRAPH_NOTIFICATION_URL / LISTENER_ACTIVITY_URL are set.
+    # Resolve relative --env-file against script dir (same as listener.py) so it works from any cwd.
+    env_file = args.env_file
+    if env_file and not os.path.isabs(env_file):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        env_file = os.path.join(script_dir, env_file)
+    if env_file and os.path.isfile(env_file):
+        load_dotenv(env_file, override=True)
+    elif args.env_file:
+        print(f"Warning: env file not found: {args.env_file}", file=sys.stderr)
+        load_dotenv()
     else:
         load_dotenv()
 
@@ -219,34 +280,72 @@ def main() -> int:
                         typ = e.get("type", "?")
                         msg = e.get("message", "")
                         parsed = _parse_sync_message(typ, msg)
-                        # Sync lines: [Sync] [Op]: path  [Started] / — [Done] / [FAILED]
+                        # Sync lines: [Add/Update/Remove] <path> (<file_id>) : Started/Done/Failed
                         if parsed is not None:
+                            action = _SYNC_OP_ACTION.get(parsed[1], parsed[1])
+                            path = _sync_display_path(e, parsed[2])
+                            file_id = e.get("file_id") or ""
+                            item = f"{path} ({file_id})" if file_id else path
                             if parsed[0] == "start":
-                                _, op, path = parsed
-                                print(f"  {ts}  [Sync] [{op}]: {path}  [Started]")
+                                print(f"  {ts}  [{action}] {item} : Started")
                             else:
-                                _, op, path, status = parsed
-                                status_label = "Done" if status == "DONE" else "FAILED"
-                                print(f"  {ts}  [Sync] [{op}]: {path}  —  [{status_label}]")
+                                status = "Done" if parsed[3] == "DONE" else "Failed"
+                                print(f"  {ts}  [{action}] {item} : {status}")
                             continue
-                        # OAuth2 / subscription: two lines — [Started] then — [Done]
-                        if typ in ("oauth2_start", "subscription_creating", "subscription_renewing"):
-                            tag = _hierarchical_tag(typ, msg)
-                            if tag:
-                                cat, act = tag
-                                print(f"  {ts}  [{cat}] [{act}]  [Started]")
+                        # Graph webhook subscription: Subscribing / Subscribed, Renewing / Renewed
+                        if typ == "subscription_creating":
+                            print(f"  {ts}  [Graph Webhook] Subscribing")
                             continue
-                        if typ in ("oauth2_reauth", "subscription_created", "subscription_renewed"):
-                            tag = _hierarchical_tag(typ, msg)
-                            if tag:
-                                cat, act = tag
-                                print(f"  {ts}  [{cat}] [{act}]  —  [Done]")
+                        if typ == "subscription_created":
+                            suffix = _format_subscription_expiry(
+                                e.get("expirationDateTime"), e.get("ts")
+                            )
+                            print(f"  {ts}  [Graph Webhook] Subscribed{suffix}")
                             continue
-                        # Delta: [sync] [delta] then multi-line tree
+                        if typ == "subscription_renewing":
+                            print(f"  {ts}  [Graph Webhook] Renewing")
+                            continue
+                        if typ == "subscription_renewed":
+                            suffix = _format_subscription_expiry(
+                                e.get("expirationDateTime"), e.get("ts")
+                            )
+                            print(f"  {ts}  [Graph Webhook] Renewed{suffix}")
+                            continue
+                        # OAuth2: Obtaining token / Token obtained (expires in N minutes at ...)
+                        if typ == "oauth2_start":
+                            print(f"  {ts}  [oauth2] Obtaining token")
+                            continue
+                        if typ == "oauth2_reauth":
+                            suffix = _format_subscription_expiry(
+                                e.get("token_expires_at"), e.get("ts")
+                            )
+                            print(f"  {ts}  [oauth2] Token obtained{suffix}")
+                            continue
+                        # Graph webhook notification received
+                        if typ == "notification_received":
+                            count = e.get("count", 1)
+                            print(f"  {ts}  [Graph Webhook] Received {count} change(s)")
+                            continue
+                        # Delta tree (To Add / To Update / To Remove): skip in watcher output
+                        # Delta tree: To Add / To Update / To Remove (no header line)
                         if typ == "delta":
-                            print(f"  {ts}  [sync] [delta]")
                             for line in msg.split("\n"):
                                 print(f"  {ts}  {line}")
+                            continue
+                        # Info: skip Graph subscription length config line
+                        if typ == "info" and msg and (
+                            "subscription length" in msg.lower() or "GRAPH_SUBSCRIPTION_MINUTES" in msg
+                        ):
+                            continue
+                        # Full/Delta sync started/finished: [info] Full/Delta Sync (SharePoint → Goodmem): Started/Done
+                        if typ == "info" and msg and ("Full sync" in msg or "Delta sync" in msg):
+                            kind = "Full Sync" if "Full sync" in msg else "Delta Sync"
+                            if "started" in msg.lower():
+                                print(f"  {ts}  [info] {kind} (SharePoint → Goodmem): Started")
+                            elif "finished" in msg.lower():
+                                print(f"  {ts}  [info] {kind} (SharePoint → Goodmem): Done")
+                            else:
+                                print(f"  {ts}  [info] {kind} (SharePoint → Goodmem): {msg}")
                             continue
                         # Other: hierarchical [category] [action]  message
                         tag = _hierarchical_tag(typ, msg)
@@ -270,11 +369,10 @@ def main() -> int:
                         print(f"  {ts}  [{typ}]  {msg}")
                     idle_line_shown = False  # after activity, allow one idle line again
                 else:
-                    # No new events: at most one idle line (with timestamp) until next activity
-                    if not idle_line_shown:
-                        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                        print(f"\r  {ts}  — no new activity (listener reachable)\033[K", end="", flush=True)
-                        idle_line_shown = True
+                    # No new events: refresh idle line with current timestamp
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                    print(f"\r  {ts}  — no new activity (listener reachable)\033[K", end="", flush=True)
+                    idle_line_shown = True
 
             except requests.RequestException as e:
                 connected = False

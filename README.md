@@ -202,7 +202,7 @@ python watch_listener.py -n 0.5 # use the GRAPH_NOTIFICATION_URL from .env
 python watch_listener.py -n 0.5 https://sharepoint-joint-listener.fly.dev
 ```
 
-**Under the hood:** Polls `GET <listener_base>/activity?since=<id>` at the given interval. Prints new events: notification received, delta tree (To Add / To Update / To Remove), `[Syncing]` per file, `[Synced]` or `[Failed]` when each finishes. When idle, at most one "no new activity (listener reachable)" line.
+**Under the hood:** Polls `GET <listener_base>/activity?since=<id>` at the given interval. Prints new events: notification received, Full/Delta sync started/done, `[Sync] Add-ing`/`Update-ing`/`Delete-ing` per file and `Add-ed`/`Update-ed`/`Delete-ed` when each finishes. When idle, at most one "no new activity (listener reachable)" line.
 
 **Example output:**
 ```
@@ -281,18 +281,87 @@ One-time full sync from SharePoint to Goodmem. Env file: `--env-file` to specify
 
 ### `listener.py`
 
-Microsoft Graph webhook server. Requires same SharePoint/Goodmem env as `sync_once.py` plus `GRAPH_NOTIFICATION_URL` and `GRAPH_CLIENT_STATE`.
+Microsoft Graph webhook server. Requires same SharePoint/Goodmem env as `sync_once.py` plus `GRAPH_NOTIFICATION_URL` and `GRAPH_CLIENT_STATE`. Optional: `GRAPH_DELTA_TOKEN_FILE` — path to file where the Graph delta link is persisted (default: `.graph_delta_link` in the script directory).
 
-**On startup:** (1) The server runs a **one-time full sync** (same logic as `sync_once.py`) in a background thread so Goodmem is up to date before handling webhooks. (2) A background **subscription renewal loop** creates a Graph subscription if none exists (using `GRAPH_NOTIFICATION_URL`), or renews the existing one via PATCH **before it expires** using the `expirationDateTime` returned by Graph (sleeps until near expiry, then renews and reschedules from the new expiration).
+**Sync strategy:** On each **root** change notification the server uses the **Graph driveItem delta API** to fetch only changes since the last sync and applies them to Goodmem (no full tree list). A **full list vs Goodmem** sync runs (1) **on startup**, (2) **on OAuth token refresh**, and (3) **on subscription renew** to repair drift. After each full sync the current delta link is saved for the next delta sync.
+
+**On startup:** (1) The server runs a **one-time full sync** (same logic as `sync_once.py`) in a background thread, then persists the Graph delta link for future incremental syncs. (2) A background **subscription renewal loop** creates a Graph subscription if none exists (using `GRAPH_NOTIFICATION_URL`), or renews the existing one via PATCH **before it expires** using the `expirationDateTime` returned by Graph (sleeps until near expiry, then renews and reschedules from the new expiration). After each renewal it queues a full list vs Goodmem sync.
 
 **Commands:** `listener.py create-subscription` creates or renews the subscription manually (same PATCH-if-exists behavior). Useful if renewal failed or you want to renew ahead of the loop.
 
 The server exposes **GET /activity** with an in-memory log of recent events. Use **`watch_listener.py`** locally to poll and print this log; use `.env` (default) or `--env-file` for `GRAPH_NOTIFICATION_URL`, or pass the listener base URL as an argument.
 
+## How file diff is computed
+
+We keep SharePoint and Goodmem in sync by computing **to add**, **to update**, and **to delete** using **set operations on UUIDs** and Goodmem’s **batch-get** API. Timestamps are compared only using the SharePoint value we store in Goodmem metadata (not Goodmem’s `updatedAt`), so both sides use the same clock.
+
+### Deterministic memory ID
+
+Each SharePoint file is mapped to a **deterministic UUID** (i.e. UUID v5 from the file id) via the function `uuid_from_file_id`. That UUID is used as Goodmem’s `memoryId` when creating a memory. Same file ⇒ same UUID ⇒ no duplicate memories for the same file, and we never need to search Goodmem by `metadata.id` to find a memory.
+
+### Operations (no list needed for IDs)
+
+| Operation | What we do | List needed? |
+|-----------|------------|--------------|
+| **Add** | `create_memory(..., memoryId=uuid_from_file_id(file_id))` | No (for the op itself). |
+| **Update** | `delete_memory(uuid_from_file_id(file_id))` then `create_memory(..., memoryId=uuid_from_file_id(file_id))` | No. |
+| **Remove** | `delete_memory(uuid_from_file_id(file_id))` | No. |
+
+### Full sync (e.g. startup, OAuth refresh, subscription renew)
+
+1. **SharePoint:** Fetch all files → build `sharepoint_by_id: Dict` (file_id → file_info) and `sharepoint_uuids` = set of UUIDs computed for all `file_id`  in `sharepoint_by_id`.
+2. **Goodmem:** List the space once → `goodmem_uuids` = set of memory IDs in that space.
+3. **Set operations:**
+   - `to_add_uuids` = `sharepoint_uuids` − `goodmem_uuids` (files in SharePoint, not in Goodmem).
+   - `to_delete_uuids` = `goodmem_uuids` − `sharepoint_uuids` (files in Goodmem, not in SharePoint).
+   - `both_uuids` = `sharepoint_uuids` ∩ `goodmem_uuids` (files in both; need timestamp to decide update).
+4. Find UUIDs of memories that need to be updated (i.e. `to_update_uuids`) from `both_uuids`:
+   - Call Goodmem memory batch-get API for all UUIDs in `both_uuids` to get metadata for each memory.
+   - For each memory, read `modified_datetime` in metadata (the SharePoint timestamp stored at ingestion) and compare it with the current timestamp of the same file in `sharepoint_by_id`. If the stored value is **older** than the current SharePoint timestamp, add the memory UUID to `to_update_uuids`. If **equal**, skip (file unchanged). If the stored value is **newer** than the current SharePoint timestamp, report an error — it cannot happen.
+5. **Apply:**
+
+   ```python
+   for uuid in to_delete_uuids:
+       delete_memory(uuid)
+
+   for file_id, file_info in sharepoint_by_id.items():
+      if uuid_from_file_id(file_id) in to_add_uuids:
+          create_memory(..., memoryId=uuid_from_file_id(file_id))
+
+      elif uuid_from_file_id(file_id) in to_update_uuids:
+          delete_memory(uuid_from_file_id(file_id))
+          create_memory(..., memoryId=uuid_from_file_id(file_id))
+   ```
+
+### Delta sync (after a Graph notification)
+
+The Graph delta API indicates whether a file change is a deletion or a non-deletion. The non-deletion case covers both addition and update, but the Graph API does not distinguish between them. We must distinguish them because update requires deletion before addition.
+
+1. **Graph delta API:** Page through all changes (delta API has pagination) → build `delta_by_id: Dict` (file_id → file_info) for changed files.
+2. For all files labeled as deleted by the Graph delta API, compute their UUIDs and add them to the set `to_delete_uuids`.
+3. For all remaining (non-deleted but changed) files, compute their UUIDs and add them to the set `to_add_or_update_uuids`. We still need to classify each as add or update.
+4. Call Goodmem memory batch-get API for all UUIDs in `to_add_or_update_uuids`.
+5. For each batch-get result: if a memory is **found**, add its UUID to `to_update_uuids` and bufffer its metadata; otherwise (not found), add it to `to_add_uuids`.
+6. **Checkpoint:** For each file whose UUID is in `to_update_uuids`, the timestamp in Goodmem metadata (from batch-get) must be **older** than the timestamp of that file in `delta_by_id`. If any file has Goodmem timestamp ≥ SharePoint timestamp, raise an error.
+7. **Apply:**
+
+   ```python
+   for uuid in to_delete_uuids:
+       delete_memory(uuid)
+
+   for file_id, file_info in delta_by_id.items():
+      if uuid_from_file_id(file_id) in to_add_uuids:
+          create_memory(..., memoryId=uuid_from_file_id(file_id))
+
+      elif uuid_from_file_id(file_id) in to_update_uuids:
+          delete_memory(uuid_from_file_id(file_id))
+          create_memory(..., memoryId=uuid_from_file_id(file_id))
+   ```
+
 ## Known limitations
 
 - It takes about 30 seconds for the update to reach our listener from Azure. This is a limitation of the Microsoft Graph API.
-- Current implementation requires the listener to do delta every time a push is received. 
+- The listener uses the Graph driveItem delta API on root notifications so only changes are fetched; full list vs Goodmem runs at startup, OAuth refresh, and subscription renew. 
 
 ##  Roadmap
 
