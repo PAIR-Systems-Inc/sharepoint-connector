@@ -1,4 +1,4 @@
-# fly_io.listener.toml — listener-only Fly config (generated from this template by deploy_fly_io.sh)
+# fly_io.toml — Fly config for the SharePoint listener (generated from this template by deploy_fly_io.sh)
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #

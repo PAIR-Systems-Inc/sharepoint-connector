@@ -9,10 +9,9 @@
 .graph_pending_add
 .graph_pending_update
 
-# Generated Fly configs (from *.template by deploy_fly_io.sh)
+# Generated Fly config (from fly_io.toml.template by deploy_fly_io.sh)
 fly.toml
-fly_io.listener.toml
-fly_io.both.toml
+fly_io.toml
 
 # Legacy Dockerfiles (consolidated into Dockerfile)
 Dockerfile.listener

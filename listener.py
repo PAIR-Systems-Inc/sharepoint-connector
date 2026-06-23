@@ -23,7 +23,7 @@ Create or renew the Graph subscription (run once, or before expiration):
   python listener.py create-subscription
 
 Requires: GRAPH_NOTIFICATION_URL, GRAPH_CLIENT_STATE, and same SharePoint/Goodmem env as sync_once.py.
-See permission.md for Azure AD / SharePoint permissions.
+See docs/permission.md for Azure AD / SharePoint permissions.
 """
 
 import json
@@ -1825,7 +1825,7 @@ def main() -> None:
     print("", file=sys.stderr)
     print("  --env-file PATH   Load this env file. Default: .env", file=sys.stderr)
     print("Env: GRAPH_NOTIFICATION_URL, GRAPH_CLIENT_STATE, GRAPH_PORT (default 5000).", file=sys.stderr)
-    print("See permission.md for Azure AD and SharePoint permissions.", file=sys.stderr)
+    print("See docs/permission.md for Azure AD and SharePoint permissions.", file=sys.stderr)
     sys.exit(0)
 
 

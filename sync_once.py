@@ -314,16 +314,17 @@ def main() -> None:
         "--env-file",
         metavar="PATH",
         default=None,
-        help="Load this env file. Default: .env if present, else .env.example.",
+        help="Load this env file (default: .env).",
     )
     args = parser.parse_args()
 
-    # Resolve env file: --env-file if given; else .env if exists, else .env.example
-    env_file = args.env_file
-    if env_file is None:
-        env_file = ".env" if os.path.isfile(".env") else ".env.example"
+    # Resolve env file: --env-file if given, else .env. (.env.example is only a template — never loaded.)
+    env_file = args.env_file if args.env_file is not None else ".env"
     if not os.path.isfile(env_file):
-        print(f"Error: Env file not found: {env_file}", file=sys.stderr)
+        if args.env_file is None:
+            print("Error: .env not found. Create it from the template and fill it in: cp .env.example .env", file=sys.stderr)
+        else:
+            print(f"Error: Env file not found: {env_file}", file=sys.stderr)
         sys.exit(1)
     load_dotenv(env_file, override=True)
     validate_token_refresh_buffer()
