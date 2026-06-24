@@ -1,0 +1,28 @@
+# fly_io.toml — Fly config for the SharePoint listener (generated from this template by deploy_fly_io.sh)
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = '{{APP_NAME}}'
+primary_region = '{{PRIMARY_REGION}}'
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Listener must stay up to receive Graph webhooks; do not stop when idle
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
