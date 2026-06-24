@@ -94,8 +94,8 @@ fi
 # App names: <FLY_CLUSTER>-goodmem, <FLY_CLUSTER>-listener. FLY_CLUSTER is required in .env (legacy: APP_CLUSTER_NAME).
 FLY_CLUSTER=""
 if [[ -f "$ENV_FILE" ]]; then
-  FLY_CLUSTER="$(grep -E '^FLY_CLUSTER=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^FLY_CLUSTER=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n')"
-  [[ -z "$FLY_CLUSTER" ]] && FLY_CLUSTER="$(grep -E '^APP_CLUSTER_NAME=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^APP_CLUSTER_NAME=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n')"
+  FLY_CLUSTER="$(grep -E '^FLY_CLUSTER=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^FLY_CLUSTER=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n' || true)"
+  [[ -z "$FLY_CLUSTER" ]] && FLY_CLUSTER="$(grep -E '^APP_CLUSTER_NAME=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^APP_CLUSTER_NAME=//; s/[A-Z_][A-Z0-9_]*=.*//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r\n' || true)"
 fi
 if [[ -z "$FLY_CLUSTER" ]]; then
   echo "Error: FLY_CLUSTER is required in .env (set it in .env.example before copying, or in .env). It controls Fly app names and must be unique to avoid collision. Legacy: APP_CLUSTER_NAME." >&2
@@ -182,9 +182,9 @@ do_goodmem() {
   echo ""
 
   # Optional: create OpenAI embedder if OPENAI_API_KEY is set in ENV_FILE
-  goodmem_base="$(grep -E '^GOODMEM_BASE_URL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')"
-  goodmem_key="$(grep -E '^GOODMEM_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')"
-  openai_key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')"
+  goodmem_base="$(grep -E '^GOODMEM_BASE_URL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r' || true)"
+  goodmem_key="$(grep -E '^GOODMEM_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r' || true)"
+  openai_key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r' || true)"
   if [[ -n "$openai_key" ]] && [[ -n "$goodmem_base" ]] && [[ -n "$goodmem_key" ]]; then
     echo "Creating OpenAI embedder (text-embedding-3-small)..."
     embedder_url="${goodmem_base%/}/v1/embedders"
@@ -271,7 +271,7 @@ do_listener() {
 
   # Ensure a Graph clientState secret exists; generate a random one only if unset or still the template placeholder.
   # (Reused on re-deploy so it stays stable — changing it would break validation of an existing subscription.)
-  client_state="$(grep -E '^[[:space:]]*GRAPH_CLIENT_STATE[[:space:]]*=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^[^=]*=//; s/[[:space:]]*#.*$//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r')"
+  client_state="$(grep -E '^[[:space:]]*GRAPH_CLIENT_STATE[[:space:]]*=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^[^=]*=//; s/[[:space:]]*#.*$//; s/^["'\'' ]+//; s/["'\'' ]+$//' | tr -d '\r' || true)"
   if [[ -z "$client_state" || "$client_state" == your-secret* ]]; then
     client_state="$(openssl rand -hex 24 2>/dev/null || (head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 40))"
     sed -i.bak '/^[[:space:]]*GRAPH_CLIENT_STATE[[:space:]]*=/d' "$ENV_FILE" 2>/dev/null || true
@@ -301,7 +301,7 @@ do_listener() {
 case "$MODE" in
   both)
     # OPENAI_API_KEY required for hands-free: script creates text-embedding-3-small embedder in Goodmem
-    openai_key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r' | head -1)"
+    openai_key="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r' | head -1 || true)"
     if [[ -z "${openai_key:-}" ]]; then
       echo "Error: OPENAI_API_KEY is required in $ENV_FILE for --hands-free. Set it so the script can create a text-embedding-3-small embedder in Goodmem." >&2
       exit 1
