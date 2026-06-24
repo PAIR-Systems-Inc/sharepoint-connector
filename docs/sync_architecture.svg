@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 515" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="14" role="img">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 515" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="14" role="img">
   <title>SharePoint connector sync modes: manual/periodic (sync_once.py) and event-triggered (listener + watcher + deploy_fly_io.sh)</title>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
@@ -30,7 +30,7 @@
 
   <text x="405" y="150" text-anchor="middle" fill="#64748b" font-size="13">Run on demand or on a schedule (cron), from anywhere.</text>
 
-  <line x1="30" y1="188" x2="790" y2="188" stroke="#e2e8f0" stroke-width="1.5"/>
+  <line x1="30" y1="188" x2="730" y2="188" stroke="#e2e8f0" stroke-width="1.5"/>
 
   <!-- ============ Panel 2: Event-triggered sync ============ -->
   <text x="30" y="226" font-weight="600" font-size="15" fill="#0f172a">Event-triggered sync</text>
@@ -77,7 +77,7 @@
 
   <!-- deploy connector to Goodmem: optional (dashed) -->
   <line x1="650" y1="430" x2="650" y2="342" stroke="#1d4ed8" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#barrow)"/>
-  <text x="662" y="366" text-anchor="start" fill="#1d4ed8" font-size="11">only with</text>
-  <text x="662" y="381" text-anchor="start" fill="#1d4ed8" font-size="11">--hands-free</text>
-  <text x="662" y="396" text-anchor="start" fill="#1d4ed8" font-size="11">or --goodmem-only</text>
+  <text x="656" y="372" text-anchor="start" fill="#1d4ed8" font-size="11">deploys with</text>
+  <text x="656" y="387" text-anchor="start" fill="#1d4ed8" font-size="10"><tspan font-family="'Courier New', Courier, monospace">--hands-free</tspan> or</text>
+  <text x="656" y="402" text-anchor="start" fill="#1d4ed8" font-size="10" font-family="'Courier New', Courier, monospace">--goodmem-only</text>
 </svg>
