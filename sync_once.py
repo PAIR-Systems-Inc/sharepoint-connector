@@ -91,6 +91,9 @@ def _is_mime_type_supported(mime_type: str) -> bool:
         "application/rtf",
         "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        # OOXML presentation/spreadsheet — supported by Goodmem's OoxmlContentExtractor.
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
     ):
         return True
 
@@ -248,7 +251,7 @@ def run_diff() -> None:
     if not site_id:
         print("Error: Could not resolve site.")
         return
-    files = connector.list_files(site_id=site_id)
+    files = connector.list_files(site_id=site_id, folder_path=os.getenv("SHAREPOINT_FOLDER_PATH", ""))
     # Resolve space same as sync: GOODMEM_SPACE_ID / SPACE_ID / DEFAULT_SPACE_ID, else find by name
     default_space_id = os.getenv("GOODMEM_SPACE_ID") or os.getenv("SPACE_ID") or os.getenv("DEFAULT_SPACE_ID")
     if default_space_id:
@@ -383,8 +386,9 @@ def main() -> None:
     connector.print_site_info()
     print("✓ Connected.")
 
-    print("Fetching files from SharePoint...", end=" ", flush=True)
-    files = connector.list_files(site_id=site_id)
+    _folder = os.getenv("SHAREPOINT_FOLDER_PATH", "")
+    print(f"Fetching files from SharePoint ({'folder: ' + _folder if _folder else 'site root'})...", end=" ", flush=True)
+    files = connector.list_files(site_id=site_id, folder_path=_folder)
     if not files:
         print("✗ No files found.")
         return

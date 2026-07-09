@@ -20,6 +20,7 @@ BATCH_GET_MEMORIES_SIZE = 20
 
 import base64
 import json
+import os
 import uuid
 from typing import Any
 from typing import Dict
@@ -222,6 +223,12 @@ class GoodmemClient:
       if metadata:
         print(f"  - metadata:\n{self._safe_json_dumps(metadata)}")
 
+    # Opt-in page-image extraction (e.g. PDF page screenshots for citations).
+    # Enabled when GOODMEM_EXTRACT_PAGE_IMAGES is set to a truthy value.
+    extract_page_images = os.getenv("GOODMEM_EXTRACT_PAGE_IMAGES", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
     # Build the JSON request metadata
     request_data: Dict[str, Any] = {
         "spaceId": space_id,
@@ -231,6 +238,8 @@ class GoodmemClient:
       request_data["memoryId"] = memory_id
     if metadata:
       request_data["metadata"] = metadata
+    if extract_page_images:
+      request_data["extractPageImages"] = True
 
     if self._debug:
       print(f"[DEBUG] request_data:\n{self._safe_json_dumps(request_data)}")
@@ -278,6 +287,8 @@ class GoodmemClient:
           json_payload["memoryId"] = memory_id
         if metadata:
           json_payload["metadata"] = metadata
+        if extract_page_images:
+          json_payload["extractPageImages"] = True
         response = requests.post(
             url,
             json=json_payload,
