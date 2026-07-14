@@ -73,7 +73,7 @@ func runSyncOnce(args []string) error {
 		return err
 	}
 	ctx := context.Background()
-	spaceID, err := syncer.ResolveSpaceID(ctx, gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID)
+	spaceID, err := syncer.ResolveSpaceID(ctx, gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	spaceID, err := syncer.ResolveSpaceID(context.Background(), gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID)
+	spaceID, err := syncer.ResolveSpaceID(context.Background(), gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
 	if err != nil {
 		return err
 	}
