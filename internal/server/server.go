@@ -108,6 +108,9 @@ func (s *Server) handleActivity(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"events": events})
 }
 
+// Log records an activity event (also used by the Listener orchestration).
+func (s *Server) Log(typ, msg string) { s.log(typ, msg) }
+
 func (s *Server) log(typ, msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
