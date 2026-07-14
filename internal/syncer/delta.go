@@ -61,18 +61,43 @@ func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID
 	plan := DiffDelta(items, stored)
 	res = &Result{Plan: plan}
 
-	for _, uuid := range plan.Delete {
-		if err := gm.Memories().Delete(ctx, uuid); err != nil && !isNotFound(err) {
-			res.Errors = append(res.Errors, fmt.Sprintf("delete %s: %v", uuid, err))
-			continue
-		}
-		res.Deleted++
-	}
+	// Assemble the work as file infos / IDs so the durable pending sets (and
+	// their re-fetched SharePoint state) can be merged in before applying.
+	var addFiles, updateFiles []graph.FileInfo
 	for _, id := range plan.Add {
-		res.ingest(ctx, gc, gm, spaceID, fileByID[id], false, opts.ExtractPageImages)
+		addFiles = append(addFiles, fileByID[id])
 	}
 	for _, id := range plan.Update {
-		res.ingest(ctx, gc, gm, spaceID, fileByID[id], true, opts.ExtractPageImages)
+		updateFiles = append(updateFiles, fileByID[id])
+	}
+	var removeIDs []string // SharePoint file IDs of deleted items
+	for _, it := range items {
+		if it.Deleted && it.ID != "" {
+			removeIDs = append(removeIDs, it.ID)
+		}
+	}
+
+	// Listener mode: fold in previously-failed items and resolve any file that
+	// now lands in more than one action list.
+	if opts.Retry != nil {
+		addFiles, updateFiles, removeIDs = opts.Retry.merge(gc, driveID, addFiles, updateFiles, removeIDs)
+	}
+
+	for _, fid := range removeIDs {
+		err := gm.Memories().Delete(ctx, memid.FromFileID(fid))
+		ok := err == nil || isNotFound(err)
+		if ok {
+			res.Deleted++
+		} else {
+			res.Errors = append(res.Errors, fmt.Sprintf("delete %s: %v", fid, err))
+		}
+		opts.Retry.recordRemove(fid, ok)
+	}
+	for _, f := range addFiles {
+		opts.Retry.recordAdd(f.ID, res.ingest(ctx, gc, gm, spaceID, f, false, opts))
+	}
+	for _, f := range updateFiles {
+		opts.Retry.recordUpdate(f.ID, res.ingest(ctx, gc, gm, spaceID, f, true, opts))
 	}
 	return newLink, res, nil
 }

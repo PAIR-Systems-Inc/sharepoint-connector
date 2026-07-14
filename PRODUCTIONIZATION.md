@@ -39,14 +39,21 @@ equivalent.)
   now falls through to re-add instead of erroring (matches `listener.py`).
 - **`GRAPH_PORT` default** — 8080 → 5000, matching Python and `.env.example`.
 
+**Fixed (2026-07-14, part 2):**
+- **Pending-retry sets** — the listener now keeps three durable sets
+  (`.graph_pending_add` / `_update` / `_removes`, alongside the delta link) via
+  `syncer.Retrier`: a failed Goodmem add/update/delete is queued and retried on
+  the next delta sync (re-fetching the file's current SharePoint state), with
+  intra-sync conflict resolution when a file lands in more than one action list.
+  Gated to the listener — the one-shot CLI (`Options.Retry == nil`) stays simple,
+  matching `sync_once.py`. **Note:** these files live under
+  `GRAPH_DELTA_TOKEN_FILE`'s dir (ephemeral `/tmp` on Fly) — real durability is
+  still §5.
+- **Goodmem processing-status polling** — a create is now polled to
+  COMPLETED/FAILED (or a ~5-min timeout); a 200-but-FAILED ingest is reported as
+  a failure and re-queued as delete-then-add instead of counted as success.
+
 **Deferred / tracked (larger work):**
-- **Pending-retry sets** (`_pending_add/update/remove`, persisted + retried each
-  sync): a failed Goodmem add/update/delete is currently dropped and not retried
-  until the file next changes. Ties into §5 (durable state).
-- **Goodmem async processing-status polling**: a create that returns 200 but
-  later FAILS server-side is counted as success; Python polls and retries FAILED
-  as delete-then-add. (Only the listener/delta path diverges; `sync-once` matches
-  Python, which also doesn't poll.)
 - **Notification coalescing** (`_root_sync_pending`): Go runs one delta sync per
   notification; Python debounces bursts.
 - **`clientState` handling**: Go rejects the whole webhook batch on any mismatch

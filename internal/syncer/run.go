@@ -29,9 +29,10 @@ type Result struct {
 
 // Options carries cross-cutting sync settings shared by the full and delta paths.
 type Options struct {
-	FolderPath        string // scope the full-sync listing to this folder; "" = whole drive
-	ExtractPageImages bool   // hint Goodmem to extract page images (e.g. PDF page screenshots)
-	DryRun            bool   // compute the plan without mutating Goodmem (full sync only)
+	FolderPath        string   // scope the full-sync listing to this folder; "" = whole drive
+	ExtractPageImages bool     // hint Goodmem to extract page images (e.g. PDF page screenshots)
+	DryRun            bool     // compute the plan without mutating Goodmem (full sync only)
+	Retry             *Retrier // listener durable retry + status polling; nil = one-shot CLI (no pending sets, no polling)
 }
 
 // RunFull performs a one-shot full sync from a SharePoint site to a Goodmem
@@ -81,11 +82,15 @@ func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID 
 	}
 
 	// Ingest adds and updates (update = delete-then-create with the same memoryId).
+	// In listener mode (opts.Retry != nil) the outcome updates the pending sets:
+	// a success clears any stale pending entry, a failure queues a retry. The
+	// full sync itself re-heals dropped adds/removes via the diff, so it does not
+	// merge the pending sets (that happens in the delta path).
 	for _, id := range plan.Add {
-		res.ingest(ctx, gc, gm, spaceID, byID[id], false, opts.ExtractPageImages)
+		opts.Retry.recordAdd(id, res.ingest(ctx, gc, gm, spaceID, byID[id], false, opts))
 	}
 	for _, id := range plan.Update {
-		res.ingest(ctx, gc, gm, spaceID, byID[id], true, opts.ExtractPageImages)
+		opts.Retry.recordUpdate(id, res.ingest(ctx, gc, gm, spaceID, byID[id], true, opts))
 	}
 	return res, nil
 }
@@ -99,10 +104,10 @@ func refuseMassDelete(nFiles, nMemories int) bool {
 
 // ingest downloads a file and (re-)creates its memory. Unsupported types and
 // files without a download URL are skipped (mirroring sync_once.py).
-func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, f graph.FileInfo, isUpdate, extractPageImages bool) {
+func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, f graph.FileInfo, isUpdate bool, opts Options) ingestResult {
 	if !IsMimeSupported(f.MimeType) || f.DownloadURL == "" {
 		res.Skipped++
-		return
+		return resSkipped
 	}
 	uuid := memid.FromFileID(f.ID)
 	if isUpdate {
@@ -110,23 +115,50 @@ func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Cli
 		// through rather than aborting the update (matching listener.py).
 		if err := gm.Memories().Delete(ctx, uuid); err != nil && !isNotFound(err) {
 			res.Errors = append(res.Errors, fmt.Sprintf("pre-update delete %s: %v", f.Name, err))
-			return
+			return resTransient
 		}
 	}
 	content, err := gc.Download(f.DownloadURL)
 	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("download %s: %v", f.Name, err))
-		return
+		return resTransient
 	}
-	if err := ingestFile(ctx, gm, spaceID, f, content, extractPageImages); err != nil {
+	mem, err := createMemory(ctx, gm, spaceID, f, content, opts.ExtractPageImages)
+	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: %v", f.Name, err))
-		return
+		return resTransient
 	}
+
+	// In listener mode, confirm Goodmem finished processing: a 200 create can
+	// still end in FAILED. The one-shot CLI (opts.Retry == nil) treats a 200 as
+	// done, matching sync_once.py.
+	if opts.Retry != nil {
+		status := strings.ToUpper(mem.ProcessingStatus)
+		if status != "COMPLETED" && status != "FAILED" {
+			memID := mem.MemoryID
+			if memID == "" {
+				memID = uuid
+			}
+			status = opts.Retry.pollStatus(ctx, gm, memID)
+		}
+		switch status {
+		case "FAILED":
+			res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: Goodmem processing FAILED", f.Name))
+			return resFailedProcessing
+		case "COMPLETED":
+			// confirmed
+		default: // still PENDING after the poll timeout
+			res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: Goodmem processing still pending (timeout)", f.Name))
+			return resTransient
+		}
+	}
+
 	if isUpdate {
 		res.Updated++
 	} else {
 		res.Added++
 	}
+	return resOK
 }
 
 // listGoodmemMemories returns the memory ids in a space and a map of memory id →
@@ -151,9 +183,10 @@ func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string
 	return ids, stored, nil
 }
 
-// ingestFile creates a Goodmem memory for f's content, using the deterministic
-// memoryId and storing the file metadata (including modified_datetime).
-func ingestFile(ctx context.Context, gm *goodmem.Client, spaceID string, f graph.FileInfo, content []byte, extractPageImages bool) error {
+// createMemory creates a Goodmem memory for f's content, using the deterministic
+// memoryId and storing the file metadata (including modified_datetime). It
+// returns the created memory so the caller can inspect its processingStatus.
+func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f graph.FileInfo, content []byte, extractPageImages bool) (*gmodels.Memory, error) {
 	mime := f.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
@@ -173,8 +206,7 @@ func ingestFile(ctx context.Context, gm *goodmem.Client, spaceID string, f graph
 		t := true
 		req.ExtractPageImages = &t
 	}
-	_, err := gm.Memories().CreateFromReader(ctx, bytes.NewReader(content), filename, req)
-	return err
+	return gm.Memories().CreateFromReader(ctx, bytes.NewReader(content), filename, req)
 }
 
 // fileMetadata converts a FileInfo to the metadata map stored on the memory,
