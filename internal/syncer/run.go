@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -164,10 +165,11 @@ func fileMetadata(f graph.FileInfo) map[string]any {
 	return m
 }
 
-// ResolveSpaceID returns the target Goodmem space id. Preference order:
-// explicit spaceID; else a space named SharePoint_{Org}_{Site}. Creating a new
-// space from an embedder is not yet ported.
-func ResolveSpaceID(ctx context.Context, gm *goodmem.Client, spaceID, siteURL, embedderID string) (string, error) {
+// ResolveSpaceID returns the target Goodmem space id: an explicit spaceID, else
+// a space named SharePoint_{Org}_{Site}, creating it if absent — with an
+// embedder that is the given one, else the first available, else a
+// text-embedding-3-small embedder created from openaiKey.
+func ResolveSpaceID(ctx context.Context, gm *goodmem.Client, spaceID, siteURL, embedderID, openaiKey string) (string, error) {
 	if strings.TrimSpace(spaceID) != "" {
 		return spaceID, nil
 	}
@@ -184,10 +186,64 @@ func ResolveSpaceID(ctx context.Context, gm *goodmem.Client, spaceID, siteURL, e
 			return sp.SpaceID, nil
 		}
 	}
-	if strings.TrimSpace(embedderID) != "" {
-		return "", fmt.Errorf("space %q not found; embedder-based creation is not yet ported — create the space or set GOODMEM_SPACE_ID", name)
+
+	// Not found — create it with a resolved embedder.
+	embID, err := ensureEmbedder(ctx, gm, embedderID, openaiKey)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("space %q not found; set GOODMEM_SPACE_ID", name)
+	weight := 1.0
+	sp, err := gm.Spaces().Create(ctx, &gmodels.SpaceCreationRequest{
+		Name:           name,
+		SpaceEmbedders: []gmodels.SpaceEmbedderConfig{{EmbedderID: embID, DefaultRetrievalWeight: &weight}},
+		DefaultChunkingConfig: gmodels.ChunkingConfiguration{
+			Recursive: &gmodels.RecursiveChunkingConfiguration{
+				ChunkSize:         512,
+				ChunkOverlap:      64,
+				KeepStrategy:      gmodels.SeparatorKeepStrategy("KEEP_END"),
+				LengthMeasurement: gmodels.LengthMeasurement("CHARACTER_COUNT"),
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("create space %q: %w", name, err)
+	}
+	return sp.SpaceID, nil
+}
+
+// ensureEmbedder returns an embedder id: the given one, else the first existing
+// embedder, else a text-embedding-3-small OpenAI embedder created from openaiKey.
+func ensureEmbedder(ctx context.Context, gm *goodmem.Client, embedderID, openaiKey string) (string, error) {
+	if strings.TrimSpace(embedderID) != "" {
+		return embedderID, nil
+	}
+	resp, err := gm.Embedders().List(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("list embedders: %w", err)
+	}
+	if len(resp.Embedders) > 0 {
+		return resp.Embedders[0].EmbedderID, nil
+	}
+	if strings.TrimSpace(openaiKey) == "" {
+		return "", errors.New("no embedders available and no OPENAI_API_KEY to create one; set GOODMEM_EMBEDDER_ID or GOODMEM_SPACE_ID")
+	}
+	apiPath := "/embeddings"
+	maxSeq := int32(8192)
+	er, err := gm.Embedders().Create(ctx, &gmodels.EmbedderCreationRequest{
+		DisplayName:         "text-embedding-3-small",
+		ProviderType:        gmodels.ProviderType("OPENAI"),
+		EndpointURL:         "https://api.openai.com/v1/",
+		APIPath:             &apiPath,
+		ModelIdentifier:     "text-embedding-3-small",
+		Dimensionality:      1536,
+		DistributionType:    gmodels.DistributionType("DENSE"),
+		MaxSequenceLength:   &maxSeq,
+		SupportedModalities: []gmodels.Modality{gmodels.Modality("TEXT")},
+	}, openaiKey)
+	if err != nil {
+		return "", fmt.Errorf("create embedder: %w", err)
+	}
+	return er.EmbedderID, nil
 }
 
 // SpaceNameFromSiteURL derives the Goodmem space name from the SharePoint site

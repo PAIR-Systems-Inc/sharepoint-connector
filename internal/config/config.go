@@ -34,6 +34,10 @@ type Config struct {
 	SharePointSearchScope string
 	SharePointFolderPath  string
 	SharePointStartDate   string
+
+	// OpenAI — used only to create a text-embedding-3-small embedder when a fresh
+	// Goodmem has none (e.g. after a hands-free deploy).
+	OpenAIAPIKey string
 }
 
 // Load reads configuration from the process environment. If envFile is
@@ -61,6 +65,7 @@ func Load(envFile string) (*Config, error) {
 		SharePointSearchScope:    os.Getenv("SHAREPOINT_SEARCH_SCOPE"),
 		SharePointFolderPath:     os.Getenv("SHAREPOINT_FOLDER_PATH"),
 		SharePointStartDate:      os.Getenv("SHAREPOINT_START_DATE"),
+		OpenAIAPIKey:             os.Getenv("OPENAI_API_KEY"),
 	}, nil
 }
 
@@ -80,9 +85,8 @@ func (c *Config) ValidateSync() error {
 			missing = append(missing, k)
 		}
 	}
-	if c.GoodmemSpaceID == "" && c.GoodmemEmbedderID == "" {
-		missing = append(missing, "GOODMEM_SPACE_ID or GOODMEM_EMBEDDER_ID")
-	}
+	// Note: GOODMEM_SPACE_ID / GOODMEM_EMBEDDER_ID are optional — the space is
+	// resolved (or created from an embedder) at runtime; see ResolveSpaceID.
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required config: %s", strings.Join(missing, ", "))
 	}
