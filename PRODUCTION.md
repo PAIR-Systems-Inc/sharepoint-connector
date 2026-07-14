@@ -13,6 +13,56 @@ plus the source-protection requirement.
 
 ---
 
+## 0. Port-fidelity audit (2026-07-14)
+
+A module-by-module cross-check of the Go port against the Python oracle found
+several **silent divergences** — behaviors present in Python but missing or
+different in Go. The high-impact ones are fixed; the larger features are tracked
+below. (The Go port is otherwise faithful: deterministic UUIDs, diff/classify,
+MIME set, space/chunking config, webhook handshake, 410→full-sync fallback,
+delta persistence, subscription renew-vs-create, and token/refresh all verified
+equivalent.)
+
+**Fixed (2026-07-14):**
+- **Mass-delete guard** — `RunFull` now refuses to apply when SharePoint returns
+  0 files while Goodmem has memories (a likely transient Graph/auth failure that
+  would otherwise wipe the whole space). Mirrors `listener.py`'s guard.
+- **`SHAREPOINT_FOLDER_PATH` scoping** — was loaded but ignored; now wired into
+  `sync-once` (the listener syncs the whole drive, matching `listener.py`).
+- **Space/embedder env aliases** — `SPACE_ID`/`DEFAULT_SPACE_ID` and
+  `EMBEDDER_ID`/`DEFAULT_EMBEDDER_ID` are honored again (GOODMEM_-prefixed wins).
+- **`GOODMEM_EXTRACT_PAGE_IMAGES`** — now sent through to Goodmem on ingest.
+- **Retry-safety regression (self-inflicted)** — the new throttling layer had
+  been retrying the non-idempotent subscription-create `POST` on 5xx/network,
+  risking a duplicate subscription. `POST` is now retried only on `429`.
+- **Pre-update delete 404 tolerance** — an update whose memory is already gone
+  now falls through to re-add instead of erroring (matches `listener.py`).
+- **`GRAPH_PORT` default** — 8080 → 5000, matching Python and `.env.example`.
+
+**Deferred / tracked (larger work):**
+- **Pending-retry sets** (`_pending_add/update/remove`, persisted + retried each
+  sync): a failed Goodmem add/update/delete is currently dropped and not retried
+  until the file next changes. Ties into §5 (durable state).
+- **Goodmem async processing-status polling**: a create that returns 200 but
+  later FAILS server-side is counted as success; Python polls and retries FAILED
+  as delete-then-add. (Only the listener/delta path diverges; `sync-once` matches
+  Python, which also doesn't poll.)
+- **Notification coalescing** (`_root_sync_pending`): Go runs one delta sync per
+  notification; Python debounces bursts.
+- **`clientState` handling**: Go rejects the whole webhook batch on any mismatch
+  (and enforces even when unset); Python skips only the offending entries.
+- **`serve` without `GRAPH_NOTIFICATION_URL`**: Python runs (skips auto-subscribe);
+  Go hard-requires it.
+- **`.env` precedence**: Python `load_dotenv(override=True)` lets `.env` win;
+  Go lets real process env win. Go's behavior is arguably better for Fly secrets —
+  **kept intentionally**, noted here so the divergence is on record.
+- **Missing CLI**: `list` / `diff` subcommands and the richer `watch` output
+  (env-URL fallback, `?since=` paging) are not ported.
+- **Base64 fallback** on Goodmem's multipart `400 Invalid JSON`; **cosmetic**
+  metadata differences (JSON `null` vs `""`, `size:0` presence).
+
+---
+
 ## 1. Language & architecture decision
 
 ### Rewrite the whole application in Go
@@ -134,6 +184,10 @@ memories.
 ---
 
 ## 6. Observability
+
+> **Deferred (2026-07-14).** Not planned for the current push. `/activity` +
+> `/healthz` are sufficient for now; revisit when scale/operational needs grow.
+> The `OnThrottle` hook (§5) is already in place to feed metrics when we return.
 
 - Replace the in-memory `/activity` log + `watch_listener.py` polling with
   **structured logging** (JSON) and **metrics** (sync latency, files

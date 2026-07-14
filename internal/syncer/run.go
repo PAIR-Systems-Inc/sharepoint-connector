@@ -27,15 +27,22 @@ type Result struct {
 	Errors          []string // non-fatal per-item failures
 }
 
+// Options carries cross-cutting sync settings shared by the full and delta paths.
+type Options struct {
+	FolderPath        string // scope the full-sync listing to this folder; "" = whole drive
+	ExtractPageImages bool   // hint Goodmem to extract page images (e.g. PDF page screenshots)
+	DryRun            bool   // compute the plan without mutating Goodmem (full sync only)
+}
+
 // RunFull performs a one-shot full sync from a SharePoint site to a Goodmem
-// space (the sync-once path). When dryRun is true it computes and returns the
-// plan without mutating Goodmem.
-func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, dryRun bool) (*Result, error) {
+// space (the sync-once path). When opts.DryRun is true it computes and returns
+// the plan without mutating Goodmem.
+func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, opts Options) (*Result, error) {
 	siteID, err := gc.GetSiteID()
 	if err != nil {
 		return nil, fmt.Errorf("resolve site: %w", err)
 	}
-	files, err := gc.ListFiles("", "", true, siteID)
+	files, err := gc.ListFiles("", opts.FolderPath, true, siteID)
 	if err != nil {
 		return nil, fmt.Errorf("list SharePoint files: %w", err)
 	}
@@ -47,8 +54,16 @@ func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID 
 
 	plan := DiffFull(files, memIDs, stored)
 	res := &Result{SharePointFiles: len(files), GoodmemMemories: len(memIDs), Plan: plan}
-	if dryRun {
+	if opts.DryRun {
 		return res, nil
+	}
+
+	// Guard: if SharePoint returned zero files but Goodmem has memories, this is
+	// almost always a transient Graph/auth failure (e.g. an expired token mid-run),
+	// not a genuinely empty site — and applying the plan would delete every
+	// memory. Refuse, matching listener.py's mass-delete guard.
+	if refuseMassDelete(len(files), len(memIDs)) {
+		return res, fmt.Errorf("refusing to apply: SharePoint returned 0 files but Goodmem has %d memories (likely a transient Graph/auth failure); skipping to avoid deleting everything", len(memIDs))
 	}
 
 	byID := make(map[string]graph.FileInfo, len(files))
@@ -67,24 +82,33 @@ func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID 
 
 	// Ingest adds and updates (update = delete-then-create with the same memoryId).
 	for _, id := range plan.Add {
-		res.ingest(ctx, gc, gm, spaceID, byID[id], false)
+		res.ingest(ctx, gc, gm, spaceID, byID[id], false, opts.ExtractPageImages)
 	}
 	for _, id := range plan.Update {
-		res.ingest(ctx, gc, gm, spaceID, byID[id], true)
+		res.ingest(ctx, gc, gm, spaceID, byID[id], true, opts.ExtractPageImages)
 	}
 	return res, nil
 }
 
+// refuseMassDelete reports whether a full-sync apply should be refused because
+// SharePoint returned no files while Goodmem has memories — a likely transient
+// Graph/auth failure that would otherwise delete every memory.
+func refuseMassDelete(nFiles, nMemories int) bool {
+	return nFiles == 0 && nMemories > 0
+}
+
 // ingest downloads a file and (re-)creates its memory. Unsupported types and
 // files without a download URL are skipped (mirroring sync_once.py).
-func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, f graph.FileInfo, isUpdate bool) {
+func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, f graph.FileInfo, isUpdate, extractPageImages bool) {
 	if !IsMimeSupported(f.MimeType) || f.DownloadURL == "" {
 		res.Skipped++
 		return
 	}
 	uuid := memid.FromFileID(f.ID)
 	if isUpdate {
-		if err := gm.Memories().Delete(ctx, uuid); err != nil {
+		// A 404 means the memory is already gone; treat it as an add and fall
+		// through rather than aborting the update (matching listener.py).
+		if err := gm.Memories().Delete(ctx, uuid); err != nil && !isNotFound(err) {
 			res.Errors = append(res.Errors, fmt.Sprintf("pre-update delete %s: %v", f.Name, err))
 			return
 		}
@@ -94,7 +118,7 @@ func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Cli
 		res.Errors = append(res.Errors, fmt.Sprintf("download %s: %v", f.Name, err))
 		return
 	}
-	if err := ingestFile(ctx, gm, spaceID, f, content); err != nil {
+	if err := ingestFile(ctx, gm, spaceID, f, content, extractPageImages); err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: %v", f.Name, err))
 		return
 	}
@@ -129,7 +153,7 @@ func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string
 
 // ingestFile creates a Goodmem memory for f's content, using the deterministic
 // memoryId and storing the file metadata (including modified_datetime).
-func ingestFile(ctx context.Context, gm *goodmem.Client, spaceID string, f graph.FileInfo, content []byte) error {
+func ingestFile(ctx context.Context, gm *goodmem.Client, spaceID string, f graph.FileInfo, content []byte, extractPageImages bool) error {
 	mime := f.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
@@ -144,6 +168,10 @@ func ingestFile(ctx context.Context, gm *goodmem.Client, spaceID string, f graph
 		MemoryID:    &uuid,
 		ContentType: mime,
 		Metadata:    fileMetadata(f),
+	}
+	if extractPageImages {
+		t := true
+		req.ExtractPageImages = &t
 	}
 	_, err := gm.Memories().CreateFromReader(ctx, bytes.NewReader(content), filename, req)
 	return err

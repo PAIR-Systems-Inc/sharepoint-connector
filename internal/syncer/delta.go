@@ -18,7 +18,7 @@ var ErrDeltaExpired = errors.New("delta token expired (410); full sync required"
 // RunDelta applies one Graph delta batch to Goodmem and returns the next delta
 // link. Deleted items are removed; changed files are added or updated (via the
 // diff's existence check). On a 410 it returns ErrDeltaExpired.
-func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID, driveID, deltaLink string) (newLink string, res *Result, err error) {
+func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID, driveID, deltaLink string, opts Options) (newLink string, res *Result, err error) {
 	items, newLink, err := gc.DriveDelta(driveID, deltaLink, false)
 	if err != nil {
 		return "", nil, err
@@ -69,10 +69,10 @@ func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID
 		res.Deleted++
 	}
 	for _, id := range plan.Add {
-		res.ingest(ctx, gc, gm, spaceID, fileByID[id], false)
+		res.ingest(ctx, gc, gm, spaceID, fileByID[id], false, opts.ExtractPageImages)
 	}
 	for _, id := range plan.Update {
-		res.ingest(ctx, gc, gm, spaceID, fileByID[id], true)
+		res.ingest(ctx, gc, gm, spaceID, fileByID[id], true, opts.ExtractPageImages)
 	}
 	return newLink, res, nil
 }

@@ -305,18 +305,26 @@ func (c *Client) httpDoRetry(reqFn func() (*http.Request, error)) ([]byte, int, 
 		if err != nil {
 			return nil, 0, err
 		}
+		// Whether repeating THIS request on an ambiguous failure is safe. A 429
+		// means "not processed, back off" and is always safe to retry; a 5xx or a
+		// network error is ambiguous (the server may have already applied a POST),
+		// so those are retried only for idempotent methods — otherwise a retried
+		// POST /subscriptions could create a duplicate.
+		retrySafe := isRetrySafeMethod(req.Method)
 		resp, err := c.http.Do(req)
 		if err != nil {
-			if attempt >= c.maxRetries {
-				return nil, 0, err
+			if retrySafe && attempt < c.maxRetries {
+				c.notifyThrottle(0, attempt+1, 0)
+				c.sleepFn(c.backoff(attempt, 0))
+				continue
 			}
-			c.notifyThrottle(0, attempt+1, 0)
-			c.sleepFn(c.backoff(attempt, 0))
-			continue
+			return nil, 0, err
 		}
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if shouldRetryStatus(resp.StatusCode) && attempt < c.maxRetries {
+		retryable := shouldRetryStatus(resp.StatusCode) &&
+			(retrySafe || resp.StatusCode == http.StatusTooManyRequests)
+		if retryable && attempt < c.maxRetries {
 			ra := parseRetryAfter(resp.Header.Get("Retry-After"))
 			c.notifyThrottle(resp.StatusCode, attempt+1, ra)
 			c.sleepFn(c.backoff(attempt, ra))
@@ -326,6 +334,17 @@ func (c *Client) httpDoRetry(reqFn func() (*http.Request, error)) ([]byte, int, 
 	}
 }
 
+// isRetrySafeMethod reports whether repeating a request with this method is safe
+// on an ambiguous failure (network error or 5xx). POST is not — a retried
+// create could duplicate server-side state — so POST is retried only on 429.
+func isRetrySafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodOptions:
+		return true
+	}
+	return false
+}
+
 func (c *Client) notifyThrottle(status, attempt int, retryAfter time.Duration) {
 	if c.OnThrottle != nil {
 		c.OnThrottle(status, attempt, retryAfter)
@@ -333,9 +352,8 @@ func (c *Client) notifyThrottle(status, attempt int, retryAfter time.Duration) {
 }
 
 // shouldRetryStatus reports whether an HTTP status is a Graph throttle (429) or
-// a transient server error worth retrying. All retried statuses map to
-// idempotent-safe outcomes for our usage (reads, and create/renew/delete that
-// tolerate a repeat).
+// a transient server error worth retrying. Whether a given method may actually
+// be retried on a 5xx is gated separately by isRetrySafeMethod.
 func shouldRetryStatus(code int) bool {
 	switch code {
 	case http.StatusTooManyRequests, // 429

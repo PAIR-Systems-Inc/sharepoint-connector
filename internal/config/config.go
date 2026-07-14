@@ -38,6 +38,10 @@ type Config struct {
 	// OpenAI — used only to create a text-embedding-3-small embedder when a fresh
 	// Goodmem has none (e.g. after a hands-free deploy).
 	OpenAIAPIKey string
+
+	// ExtractPageImages hints Goodmem to extract page images (e.g. PDF page
+	// screenshots for citations). From GOODMEM_EXTRACT_PAGE_IMAGES.
+	ExtractPageImages bool
 }
 
 // Load reads configuration from the process environment. If envFile is
@@ -56,8 +60,8 @@ func Load(envFile string) (*Config, error) {
 		SharePointSiteURL:        os.Getenv("SHAREPOINT_SITE_URL"),
 		GoodmemBaseURL:           os.Getenv("GOODMEM_BASE_URL"),
 		GoodmemAPIKey:            os.Getenv("GOODMEM_API_KEY"),
-		GoodmemSpaceID:           os.Getenv("GOODMEM_SPACE_ID"),
-		GoodmemEmbedderID:        os.Getenv("GOODMEM_EMBEDDER_ID"),
+		GoodmemSpaceID:           firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),
+		GoodmemEmbedderID:        firstEnv("GOODMEM_EMBEDDER_ID", "EMBEDDER_ID", "DEFAULT_EMBEDDER_ID"),
 		GraphClientState:         os.Getenv("GRAPH_CLIENT_STATE"),
 		GraphNotificationURL:     os.Getenv("GRAPH_NOTIFICATION_URL"),
 		GraphPort:                os.Getenv("GRAPH_PORT"),
@@ -66,7 +70,29 @@ func Load(envFile string) (*Config, error) {
 		SharePointFolderPath:     os.Getenv("SHAREPOINT_FOLDER_PATH"),
 		SharePointStartDate:      os.Getenv("SHAREPOINT_START_DATE"),
 		OpenAIAPIKey:             os.Getenv("OPENAI_API_KEY"),
+		ExtractPageImages:        envTruthy("GOODMEM_EXTRACT_PAGE_IMAGES"),
 	}, nil
+}
+
+// firstEnv returns the first non-empty value among the given env var names,
+// mirroring the Python `os.getenv(A) or os.getenv(B) or ...` alias chains.
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// envTruthy reports whether an env var is set to a truthy value, matching the
+// Python check `value.strip().lower() in ("1","true","yes","on")`.
+func envTruthy(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // ValidateSync checks the fields required to run a SharePoint→Goodmem sync

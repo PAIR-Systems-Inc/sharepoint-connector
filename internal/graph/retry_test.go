@@ -161,6 +161,69 @@ func TestSend_HonorsRetryAfterSeconds(t *testing.T) {
 	}
 }
 
+// TestRetryPolicy_POSTvsIdempotent verifies the idempotency gate: a POST is NOT
+// retried on 5xx/network (ambiguous — could duplicate server state) but IS
+// retried on 429 (explicit "not processed"); a GET is retried on 5xx.
+func TestRetryPolicy_POSTvsIdempotent(t *testing.T) {
+	// POST + 503: must NOT retry (one call, returns the 503).
+	var postCalls int32
+	post503 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&postCalls, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer post503.Close()
+	c := newTestClient(post503.URL)
+	if _, status, _ := c.send(http.MethodPost, post503.URL+"/subscriptions", "tok", []byte("{}")); status != http.StatusServiceUnavailable {
+		t.Fatalf("POST 503 status = %d, want 503", status)
+	}
+	if got := atomic.LoadInt32(&postCalls); got != 1 {
+		t.Errorf("POST on 503: server calls = %d, want 1 (no retry)", got)
+	}
+
+	// POST + 429: MUST retry (429 = not processed, safe to repeat).
+	var post429 int32
+	srv429 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&post429, 1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv429.Close()
+	c2 := newTestClient(srv429.URL)
+	if _, status, _ := c2.send(http.MethodPost, srv429.URL+"/subscriptions", "tok", []byte("{}")); status != http.StatusOK {
+		t.Fatalf("POST 429→200 status = %d, want 200", status)
+	}
+	if got := atomic.LoadInt32(&post429); got != 2 {
+		t.Errorf("POST on 429: server calls = %d, want 2 (one retry)", got)
+	}
+
+	// POST + network error: must NOT retry.
+	var dialCalls int32
+	c3 := newTestClient("http://127.0.0.1:1") // unroutable port
+	c3.http.Transport = &countingErrTransport{n: &dialCalls}
+	if _, _, err := c3.send(http.MethodPost, "http://127.0.0.1:1/subscriptions", "tok", []byte("{}")); err == nil {
+		t.Fatal("POST network error: expected error, got nil")
+	}
+	if got := atomic.LoadInt32(&dialCalls); got != 1 {
+		t.Errorf("POST on network error: attempts = %d, want 1 (no retry)", got)
+	}
+}
+
+// countingErrTransport always fails, counting attempts.
+type countingErrTransport struct{ n *int32 }
+
+func (t *countingErrTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	atomic.AddInt32(t.n, 1)
+	return nil, errTransport
+}
+
+var errTransport = &transportErr{}
+
+type transportErr struct{}
+
+func (*transportErr) Error() string { return "simulated transport failure" }
+
 // newTestClient builds a client whose sleepFn is a no-op (so retries don't add
 // real wall-clock) pointed at a test server.
 func newTestClient(base string) *Client {

@@ -21,14 +21,15 @@ import (
 // change subscription (with a renewal loop), and on each notification runs a
 // delta sync. Syncs are serialized. Ported from listener.py's orchestration.
 type Listener struct {
-	GC              *graph.Client
-	GM              *goodmem.Client
-	SpaceID         string
-	ClientState     string
-	NotificationURL string
-	SubMinutes      int
-	Port            string
-	DeltaPath       string // file holding the Graph delta link
+	GC                *graph.Client
+	GM                *goodmem.Client
+	SpaceID           string
+	ClientState       string
+	NotificationURL   string
+	SubMinutes        int
+	Port              string
+	DeltaPath         string // file holding the Graph delta link
+	ExtractPageImages bool   // hint Goodmem to extract page images
 
 	driveID string
 	delta   deltaStore
@@ -92,7 +93,7 @@ func (l *Listener) Run(ctx context.Context) error {
 func (l *Listener) startup() {
 	l.syncMu.Lock()
 	l.server.Log("info", "[startup] full sync starting")
-	if res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, false); err != nil {
+	if res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages}); err != nil {
 		l.server.Log("error", "[startup] full sync: "+err.Error())
 	} else {
 		l.server.Log("info", fmt.Sprintf("[startup] full sync done: +%d ~%d -%d (skipped %d)", res.Added, res.Updated, res.Deleted, res.Skipped))
@@ -136,10 +137,10 @@ func (l *Listener) onNotification() {
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
 	l.server.Log("info", "[delta] sync starting")
-	newLink, res, err := syncer.RunDelta(l.baseCtx, l.GC, l.GM, l.SpaceID, l.driveID, l.delta.load())
+	newLink, res, err := syncer.RunDelta(l.baseCtx, l.GC, l.GM, l.SpaceID, l.driveID, l.delta.load(), syncer.Options{ExtractPageImages: l.ExtractPageImages})
 	if err == syncer.ErrDeltaExpired {
 		l.server.Log("info", "[delta] token expired; running full sync")
-		if _, ferr := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, false); ferr != nil {
+		if _, ferr := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages}); ferr != nil {
 			l.server.Log("error", "[delta] fallback full sync: "+ferr.Error())
 		}
 		if _, link, e := l.GC.DriveDelta(l.driveID, "", true); e == nil && link != "" {

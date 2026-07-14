@@ -79,7 +79,11 @@ func runSyncOnce(args []string) error {
 	}
 	fmt.Printf("Space: %s\n", spaceID)
 
-	res, err := syncer.RunFull(ctx, gc, gmc, spaceID, *dryRun)
+	res, err := syncer.RunFull(ctx, gc, gmc, spaceID, syncer.Options{
+		FolderPath:        cfg.SharePointFolderPath,
+		ExtractPageImages: cfg.ExtractPageImages,
+		DryRun:            *dryRun,
+	})
 	if err != nil {
 		return err
 	}
@@ -129,19 +133,20 @@ func runServe(args []string) error {
 		return err
 	}
 
-	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "8080")
+	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "5000")
 	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
 	subMin := atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault)
 
 	l := &server.Listener{
-		GC:              gc,
-		GM:              gmc,
-		SpaceID:         spaceID,
-		ClientState:     cfg.GraphClientState,
-		NotificationURL: cfg.GraphNotificationURL,
-		SubMinutes:      subMin,
-		Port:            port,
-		DeltaPath:       deltaPath,
+		GC:                gc,
+		GM:                gmc,
+		SpaceID:           spaceID,
+		ClientState:       cfg.GraphClientState,
+		NotificationURL:   cfg.GraphNotificationURL,
+		SubMinutes:        subMin,
+		Port:              port,
+		DeltaPath:         deltaPath,
+		ExtractPageImages: cfg.ExtractPageImages,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
