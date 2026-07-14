@@ -6,8 +6,15 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"os"
+
+	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/config"
+	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/gm"
+	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
+	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
 )
 
 func main() {
@@ -16,10 +23,13 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "sync-once":
+		if err := runSyncOnce(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
 	case "serve":
 		notImplemented("serve")
-	case "sync-once":
-		notImplemented("sync-once")
 	case "watch":
 		notImplemented("watch")
 	case "create-subscription":
@@ -33,6 +43,68 @@ func main() {
 	}
 }
 
+func runSyncOnce(args []string) error {
+	fs := flag.NewFlagSet("sync-once", flag.ExitOnError)
+	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
+	dryRun := fs.Bool("dry-run", false, "compute the sync plan without changing Goodmem")
+	_ = fs.Parse(args)
+
+	ef := *envFile
+	if ef == "" {
+		if _, err := os.Stat(".env"); err == nil {
+			ef = ".env"
+		}
+	}
+	cfg, err := config.Load(ef)
+	if err != nil {
+		return err
+	}
+	if err := cfg.ValidateSync(); err != nil {
+		return err
+	}
+	if err := graph.ValidateTokenRefreshBuffer(); err != nil {
+		return err
+	}
+
+	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+	gmc, err := gm.New(cfg.GoodmemBaseURL, cfg.GoodmemAPIKey)
+	if err != nil {
+		return fmt.Errorf("goodmem client: %w", err)
+	}
+
+	ctx := context.Background()
+	spaceID, err := syncer.ResolveSpaceID(ctx, gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Space: %s\n", spaceID)
+
+	res, err := syncer.RunFull(ctx, gc, gmc, spaceID, *dryRun)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("SharePoint files: %d   Goodmem memories: %d\n", res.SharePointFiles, res.GoodmemMemories)
+	fmt.Printf("Plan: +%d add   ~%d update   -%d delete\n", len(res.Plan.Add), len(res.Plan.Update), len(res.Plan.Delete))
+	if n := len(res.Plan.UnexpectedNewer); n > 0 {
+		fmt.Printf("Warning: %d file(s) have a Goodmem timestamp ≥ SharePoint (skipped): %v\n", n, res.Plan.UnexpectedNewer)
+	}
+	if *dryRun {
+		fmt.Println("(dry run — no changes applied)")
+		return nil
+	}
+
+	fmt.Printf("Applied: %d added, %d updated, %d deleted, %d skipped\n", res.Added, res.Updated, res.Deleted, res.Skipped)
+	for _, e := range res.Errors {
+		fmt.Fprintln(os.Stderr, "  ! "+e)
+	}
+	if len(res.Errors) > 0 {
+		return fmt.Errorf("%d item(s) failed", len(res.Errors))
+	}
+	fmt.Println("Sync complete.")
+	return nil
+}
+
 func notImplemented(cmd string) {
 	fmt.Fprintf(os.Stderr, "%s: not yet implemented (port in progress)\n", cmd)
 	os.Exit(1)
@@ -44,8 +116,9 @@ func usage(w *os.File) {
 Usage: connector <command> [flags]
 
 Commands:
-  serve                Run the Microsoft Graph webhook listener + sync engine
   sync-once            One-time full sync from SharePoint to Goodmem
+                         flags: --env-file PATH, --dry-run
+  serve                Run the Microsoft Graph webhook listener + sync engine
   watch                Monitor a deployed listener's activity log
   create-subscription  Create or renew the Graph change subscription
   help                 Show this help
