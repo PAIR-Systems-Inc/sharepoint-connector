@@ -92,6 +92,48 @@ func classify(gmModified, spModified string) (update, newer bool) {
 	}
 }
 
+// DiffDelta classifies Microsoft Graph delta items into a Plan, mirroring the
+// listener's delta handling:
+//
+//   - Deleted items     → Delete (the item's memory UUID; deletion is idempotent).
+//   - Non-deleted files → Add when the memory is absent from Goodmem, else Update.
+//
+// gmStoredModified maps a candidate memory UUID to the SharePoint
+// modified_datetime stored in its metadata (from a batch-get); a present key
+// means the memory exists. Folders and non-file items are ignored. Callers
+// should pre-filter unsupported MIME types and items lacking a download URL
+// (see IsMimeSupported). A present file whose stored timestamp is not older than
+// the delta timestamp is still updated but flagged in UnexpectedNewer.
+func DiffDelta(items []graph.Item, gmStoredModified map[string]string) Plan {
+	var p Plan
+	for _, it := range items {
+		if it.ID == "" {
+			continue
+		}
+		if it.Deleted {
+			p.Delete = append(p.Delete, memid.FromFileID(it.ID))
+			continue
+		}
+		if !it.IsFile {
+			continue
+		}
+		u := memid.FromFileID(it.ID)
+		if stored, exists := gmStoredModified[u]; exists {
+			p.Update = append(p.Update, it.ID)
+			if sp := it.File.ModifiedDateTime; stored != "" && sp != "" && stored >= sp {
+				p.UnexpectedNewer = append(p.UnexpectedNewer, it.ID)
+			}
+		} else {
+			p.Add = append(p.Add, it.ID)
+		}
+	}
+	sort.Strings(p.Add)
+	sort.Strings(p.Update)
+	sort.Strings(p.Delete)
+	sort.Strings(p.UnexpectedNewer)
+	return p
+}
+
 // IsMimeSupported reports whether Goodmem's content extractor supports mimeType.
 // Ported from _is_mime_type_supported in sync_once.py.
 func IsMimeSupported(mimeType string) bool {

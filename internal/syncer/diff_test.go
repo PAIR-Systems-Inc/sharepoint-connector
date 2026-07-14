@@ -50,6 +50,31 @@ func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
 	}
 }
 
+// TestDiffDelta pins the delta classification to the listener's behavior.
+func TestDiffDelta(t *testing.T) {
+	items := []graph.Item{
+		{ID: "D", Deleted: true},   // deleted -> Delete uuid(D)
+		{ID: "F", IsFolder: true},  // folder  -> ignored
+		{ID: "A", IsFile: true, File: graph.FileInfo{ID: "A", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // new     -> Add
+		{ID: "B", IsFile: true, File: graph.FileInfo{ID: "B", ModifiedDateTime: "2026-01-02T00:00:00Z"}}, // present, stored older -> Update
+		{ID: "C", IsFile: true, File: graph.FileInfo{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // present, stored newer -> Update + anomaly
+	}
+	stored := map[string]string{
+		memid.FromFileID("B"): "2026-01-01T00:00:00Z", // older -> update
+		memid.FromFileID("C"): "2026-01-02T00:00:00Z", // newer -> update + anomaly
+	}
+	got := DiffDelta(items, stored)
+	want := Plan{
+		Add:             []string{"A"},
+		Update:          []string{"B", "C"},
+		Delete:          []string{memid.FromFileID("D")},
+		UnexpectedNewer: []string{"C"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DiffDelta:\n got  %+v\n want %+v", got, want)
+	}
+}
+
 func TestIsMimeSupported(t *testing.T) {
 	supported := []string{
 		"text/plain", "text/html", "TEXT/CSV",
