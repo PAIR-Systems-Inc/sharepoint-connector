@@ -5,6 +5,7 @@
 package graph
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -200,13 +201,13 @@ func (c *Client) token() (string, error) {
 	return c.accessToken, nil
 }
 
-// do sends an authenticated GET; on 401 it re-authenticates once and retries.
-func (c *Client) do(rawURL string) (body []byte, status int, err error) {
+// do sends an authenticated request; on 401 it re-authenticates once and retries.
+func (c *Client) do(method, rawURL string, reqBody []byte) (body []byte, status int, err error) {
 	tok, err := c.token()
 	if err != nil {
 		return nil, 0, err
 	}
-	body, status, err = c.send(rawURL, tok)
+	body, status, err = c.send(method, rawURL, tok, reqBody)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -221,13 +222,17 @@ func (c *Client) do(rawURL string) (body []byte, status int, err error) {
 		if reErr != nil {
 			return body, status, nil
 		}
-		return c.send(rawURL, tok)
+		return c.send(method, rawURL, tok, reqBody)
 	}
 	return body, status, nil
 }
 
-func (c *Client) send(rawURL, token string) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+func (c *Client) send(method, rawURL, token string, reqBody []byte) ([]byte, int, error) {
+	var r io.Reader
+	if reqBody != nil {
+		r = bytes.NewReader(reqBody)
+	}
+	req, err := http.NewRequest(method, rawURL, r)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -242,16 +247,32 @@ func (c *Client) send(rawURL, token string) ([]byte, int, error) {
 	return b, resp.StatusCode, nil
 }
 
-// getJSON does an authenticated GET and unmarshals a 2xx JSON body into out.
-func (c *Client) getJSON(rawURL string, out any) error {
-	body, status, err := c.do(rawURL)
+// reqJSON sends method+url with an optional JSON body and unmarshals a 2xx JSON
+// response into out (out may be nil).
+func (c *Client) reqJSON(method, rawURL string, reqBody, out any) error {
+	var b []byte
+	if reqBody != nil {
+		var err error
+		if b, err = json.Marshal(reqBody); err != nil {
+			return err
+		}
+	}
+	respBody, status, err := c.do(method, rawURL, b)
 	if err != nil {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return &HTTPError{StatusCode: status, Body: string(body)}
+		return &HTTPError{StatusCode: status, Body: string(respBody)}
 	}
-	return json.Unmarshal(body, out)
+	if out != nil {
+		return json.Unmarshal(respBody, out)
+	}
+	return nil
+}
+
+// getJSON does an authenticated GET and unmarshals a 2xx JSON body into out.
+func (c *Client) getJSON(rawURL string, out any) error {
+	return c.reqJSON(http.MethodGet, rawURL, nil, out)
 }
 
 // GetSiteID resolves the Graph site id from the configured site URL.
@@ -403,7 +424,7 @@ func (c *Client) DriveDelta(driveID, deltaLink string, tokenLatest bool) (items 
 		u = fmt.Sprintf("%s/drives/%s/root/delta", c.graphBase, driveID)
 	}
 	for {
-		body, status, derr := c.do(u)
+		body, status, derr := c.do(http.MethodGet, u, nil)
 		if derr != nil {
 			return nil, "", derr
 		}
