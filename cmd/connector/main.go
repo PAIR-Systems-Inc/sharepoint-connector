@@ -7,13 +7,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"fury.io/pairsys/goodmem"
 
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/config"
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/gm"
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
+	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/server"
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
 )
 
@@ -22,18 +33,16 @@ func main() {
 		usage(os.Stderr)
 		os.Exit(2)
 	}
+	var err error
 	switch os.Args[1] {
 	case "sync-once":
-		if err := runSyncOnce(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			os.Exit(1)
-		}
+		err = runSyncOnce(os.Args[2:])
 	case "serve":
-		notImplemented("serve")
-	case "watch":
-		notImplemented("watch")
+		err = runServe(os.Args[2:])
 	case "create-subscription":
-		notImplemented("create-subscription")
+		err = runCreateSubscription(os.Args[2:])
+	case "watch":
+		err = runWatch(os.Args[2:])
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 	default:
@@ -41,7 +50,13 @@ func main() {
 		usage(os.Stderr)
 		os.Exit(2)
 	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 }
+
+// --- sync-once ---
 
 func runSyncOnce(args []string) error {
 	fs := flag.NewFlagSet("sync-once", flag.ExitOnError)
@@ -49,29 +64,14 @@ func runSyncOnce(args []string) error {
 	dryRun := fs.Bool("dry-run", false, "compute the sync plan without changing Goodmem")
 	_ = fs.Parse(args)
 
-	ef := *envFile
-	if ef == "" {
-		if _, err := os.Stat(".env"); err == nil {
-			ef = ".env"
-		}
-	}
-	cfg, err := config.Load(ef)
+	cfg, err := loadConfig(*envFile)
 	if err != nil {
 		return err
 	}
-	if err := cfg.ValidateSync(); err != nil {
-		return err
-	}
-	if err := graph.ValidateTokenRefreshBuffer(); err != nil {
-		return err
-	}
-
-	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
-	gmc, err := gm.New(cfg.GoodmemBaseURL, cfg.GoodmemAPIKey)
+	gc, gmc, err := buildClients(cfg)
 	if err != nil {
-		return fmt.Errorf("goodmem client: %w", err)
+		return err
 	}
-
 	ctx := context.Background()
 	spaceID, err := syncer.ResolveSpaceID(ctx, gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID)
 	if err != nil {
@@ -83,7 +83,6 @@ func runSyncOnce(args []string) error {
 	if err != nil {
 		return err
 	}
-
 	fmt.Printf("SharePoint files: %d   Goodmem memories: %d\n", res.SharePointFiles, res.GoodmemMemories)
 	fmt.Printf("Plan: +%d add   ~%d update   -%d delete\n", len(res.Plan.Add), len(res.Plan.Update), len(res.Plan.Delete))
 	if n := len(res.Plan.UnexpectedNewer); n > 0 {
@@ -93,7 +92,6 @@ func runSyncOnce(args []string) error {
 		fmt.Println("(dry run — no changes applied)")
 		return nil
 	}
-
 	fmt.Printf("Applied: %d added, %d updated, %d deleted, %d skipped\n", res.Added, res.Updated, res.Deleted, res.Skipped)
 	for _, e := range res.Errors {
 		fmt.Fprintln(os.Stderr, "  ! "+e)
@@ -105,9 +103,159 @@ func runSyncOnce(args []string) error {
 	return nil
 }
 
-func notImplemented(cmd string) {
-	fmt.Fprintf(os.Stderr, "%s: not yet implemented (port in progress)\n", cmd)
-	os.Exit(1)
+// --- serve ---
+
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
+	_ = fs.Parse(args)
+
+	cfg, err := loadConfig(*envFile)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.GraphClientState) == "" {
+		return errors.New("GRAPH_CLIENT_STATE is required for serve")
+	}
+	if strings.TrimSpace(cfg.GraphNotificationURL) == "" {
+		return errors.New("GRAPH_NOTIFICATION_URL is required for serve")
+	}
+	gc, gmc, err := buildClients(cfg)
+	if err != nil {
+		return err
+	}
+	spaceID, err := syncer.ResolveSpaceID(context.Background(), gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID)
+	if err != nil {
+		return err
+	}
+
+	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "8080")
+	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
+	subMin := atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault)
+
+	l := &server.Listener{
+		GC:              gc,
+		GM:              gmc,
+		SpaceID:         spaceID,
+		ClientState:     cfg.GraphClientState,
+		NotificationURL: cfg.GraphNotificationURL,
+		SubMinutes:      subMin,
+		Port:            port,
+		DeltaPath:       deltaPath,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Printf("Listener on :%s   space=%s   webhook=%s\n", port, spaceID, cfg.GraphNotificationURL)
+	return l.Run(ctx)
+}
+
+// --- create-subscription ---
+
+func runCreateSubscription(args []string) error {
+	fs := flag.NewFlagSet("create-subscription", flag.ExitOnError)
+	envFile := fs.String("env-file", "", "env file to load (default: .env if present)")
+	_ = fs.Parse(args)
+
+	cfg, err := loadConfig(*envFile)
+	if err != nil {
+		return err
+	}
+	if cfg.GraphClientState == "" || cfg.GraphNotificationURL == "" {
+		return errors.New("GRAPH_CLIENT_STATE and GRAPH_NOTIFICATION_URL are required")
+	}
+	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+	sub, err := gc.EnsureSubscription(cfg.GraphNotificationURL, cfg.GraphClientState, atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Subscription ready: id=%s\n  resource=%s\n  expires=%s\n", sub.ID, sub.Resource, sub.ExpirationDateTime)
+	return nil
+}
+
+// --- watch ---
+
+func runWatch(args []string) error {
+	fs := flag.NewFlagSet("watch", flag.ExitOnError)
+	interval := fs.Float64("n", 2, "poll interval in seconds")
+	_ = fs.Parse(args)
+	if fs.NArg() < 1 {
+		return errors.New("usage: connector watch [-n SECS] <listener-base-url>")
+	}
+	base := strings.TrimRight(fs.Arg(0), "/")
+	if strings.HasSuffix(base, "/sync/webhook") {
+		base = strings.TrimSuffix(base, "/sync/webhook")
+	}
+	fmt.Printf("Watching %s/activity every %.1fs (Ctrl+C to stop)\n", base, *interval)
+
+	seen := 0
+	for {
+		resp, err := http.Get(base + "/activity")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "  poll error:", err)
+		} else {
+			var data struct {
+				Events []server.Event `json:"events"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&data)
+			resp.Body.Close()
+			if seen > len(data.Events) {
+				seen = 0 // log rotated/truncated
+			}
+			for _, e := range data.Events[seen:] {
+				fmt.Printf("  %s  [%s]  %s\n", e.TS.Local().Format("2006-01-02 15:04:05"), e.Type, e.Message)
+			}
+			seen = len(data.Events)
+		}
+		time.Sleep(time.Duration(*interval * float64(time.Second)))
+	}
+}
+
+// --- shared helpers ---
+
+// loadConfig loads from envFile (or .env when present) and validates the fields
+// common to all syncing commands.
+func loadConfig(envFile string) (*config.Config, error) {
+	if envFile == "" {
+		if _, err := os.Stat(".env"); err == nil {
+			envFile = ".env"
+		}
+	}
+	cfg, err := config.Load(envFile)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateSync(); err != nil {
+		return nil, err
+	}
+	if err := graph.ValidateTokenRefreshBuffer(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func buildClients(cfg *config.Config) (*graph.Client, *goodmem.Client, error) {
+	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+	gmc, err := gm.New(cfg.GoodmemBaseURL, cfg.GoodmemAPIKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("goodmem client: %w", err)
+	}
+	return gc, gmc, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func atoiOr(s string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return n
+	}
+	return def
 }
 
 func usage(w *os.File) {
@@ -116,11 +264,10 @@ func usage(w *os.File) {
 Usage: connector <command> [flags]
 
 Commands:
-  sync-once            One-time full sync from SharePoint to Goodmem
-                         flags: --env-file PATH, --dry-run
-  serve                Run the Microsoft Graph webhook listener + sync engine
-  watch                Monitor a deployed listener's activity log
-  create-subscription  Create or renew the Graph change subscription
+  sync-once            One-time full sync (flags: --env-file PATH, --dry-run)
+  serve                Run the Graph webhook listener + sync engine (--env-file PATH)
+  create-subscription  Create or renew the Graph change subscription (--env-file PATH)
+  watch                Monitor a listener's activity log (watch [-n SECS] <base-url>)
   help                 Show this help
 `)
 }
