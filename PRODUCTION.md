@@ -117,9 +117,12 @@ memories.
 
 ## 5. Resilience
 
-- **Microsoft Graph throttling:** there is currently **no `429` / `Retry-After`
-  handling** — Graph *will* throttle at scale. Add retry-with-backoff honoring
-  `Retry-After` on every Graph call; jittered backoff for transient 5xx/network.
+- **Microsoft Graph throttling:** ✅ **done.** Every Graph call (auth, JSON
+  requests, delta, download) now retries through a single executor
+  (`graph.Client.httpDoRetry`): it honors `Retry-After` on `429`/`503`, applies
+  full-jitter exponential backoff to transient `5xx` and network errors, caps
+  attempts at `GRAPH_MAX_RETRIES` (default 5, clamp `[0,10]`) and `Retry-After`
+  at 120s, and fires an `OnThrottle` hook that the listener logs to `/activity`.
 - **Idempotency & crash safety:** deterministic UUIDs already help; ensure sync
   is resumable/re-runnable after a crash mid-apply with no data loss
   (checkpoint before/after apply).
@@ -145,9 +148,11 @@ memories.
 
 ## 7. Build, CI/CD & supply chain
 
-- **CI today only deploys** (`.github/workflows/fly-deploy.yml`) — no test/lint
-  gate. Add a pipeline: `go test ./...`, `go vet`, `golangci-lint`, build,
-  vulnerability scan (`govulncheck`), then deploy on green.
+- **CI gate:** ✅ **done** (`.github/workflows/go-ci.yml`). The `build-test` job
+  is the merge gate — `go build`, `go vet`, a `gofmt`-clean check, and
+  `go test -race ./...`; `golangci-lint` and `govulncheck` run as advisory
+  (`continue-on-error`) jobs, ready to promote to gates once confirmed clean.
+  `fly-deploy.yml` still handles deploy-on-push-to-main.
 - **Reproducible builds:** Go modules with a checked-in `go.sum` (replaces the
   unpinned `requests>=…` / `flask>=…` in `requirements.txt`, no lockfile today).
 - **Minimal image:** multi-stage Dockerfile → static binary in

@@ -43,6 +43,15 @@ func (l *Listener) Run(ctx context.Context) error {
 	l.delta = deltaStore{path: l.DeltaPath}
 	l.server = New(l.ClientState, func(int) { l.onNotification() })
 
+	// Surface Graph throttling/backoff in the activity log for observability.
+	l.GC.OnThrottle = func(status, attempt int, retryAfter time.Duration) {
+		msg := fmt.Sprintf("[throttle] Graph status=%d; backing off before retry %d", status, attempt)
+		if retryAfter > 0 {
+			msg += fmt.Sprintf(" (Retry-After %s)", retryAfter)
+		}
+		l.server.Log("warn", msg)
+	}
+
 	siteID, err := l.GC.GetSiteID()
 	if err != nil {
 		return fmt.Errorf("resolve site: %w", err)

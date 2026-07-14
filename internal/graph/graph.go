@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,6 +29,16 @@ const (
 	tokenMinutesDefault = 60
 	tokenMinutesMin     = 10
 	tokenMinutesMax     = 1440
+
+	// Retry/backoff for Graph throttling (429) and transient 5xx/network errors.
+	// Overridable via GRAPH_MAX_RETRIES (clamped to [0, maxRetriesCeil]).
+	maxRetriesDefault = 5
+	maxRetriesCeil    = 10
+	baseBackoff       = 500 * time.Millisecond
+	maxBackoff        = 30 * time.Second
+	// Cap on honoring a server-provided Retry-After so a hostile/absurd value
+	// cannot stall the connector indefinitely.
+	maxRetryAfter = 120 * time.Second
 )
 
 // FileInfo is the flattened metadata for a SharePoint drive file. JSON tags
@@ -88,6 +99,12 @@ type Client struct {
 	loginBase string
 	http      *http.Client
 
+	// Retry/backoff tuning. sleepFn is time.Sleep (overridable in tests).
+	maxRetries  int
+	baseBackoff time.Duration
+	maxBackoff  time.Duration
+	sleepFn     func(time.Duration)
+
 	mu          sync.Mutex
 	accessToken string
 	expiresAt   time.Time
@@ -96,6 +113,13 @@ type Client struct {
 	// reason after a (re)authentication: "initial", "expired", or "401". It must
 	// not call back into the client.
 	OnTokenRefresh func(reason string)
+
+	// OnThrottle, if set, is called before each backoff sleep caused by a
+	// throttle (429) or transient (5xx/network) response: the HTTP status (0 for
+	// a network error), the upcoming retry number (1-based), and the Retry-After
+	// the server asked for (0 if none). For observability/logging; must not call
+	// back into the client.
+	OnThrottle func(status, attempt int, retryAfter time.Duration)
 }
 
 // NewClient returns a Graph client for the given Azure app and SharePoint site.
@@ -108,7 +132,27 @@ func NewClient(clientID, tenantID, clientSecret, siteURL string) *Client {
 		graphBase:    defaultGraphBase,
 		loginBase:    defaultLoginBase,
 		http:         &http.Client{Timeout: 60 * time.Second},
+		maxRetries:   maxRetriesFromEnv(),
+		baseBackoff:  baseBackoff,
+		maxBackoff:   maxBackoff,
+		sleepFn:      time.Sleep,
 	}
+}
+
+// maxRetriesFromEnv reads GRAPH_MAX_RETRIES, clamped to [0, maxRetriesCeil].
+func maxRetriesFromEnv() int {
+	s := strings.TrimSpace(os.Getenv("GRAPH_MAX_RETRIES"))
+	if s == "" {
+		return maxRetriesDefault
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 0 {
+		return maxRetriesDefault
+	}
+	if v > maxRetriesCeil {
+		return maxRetriesCeil
+	}
+	return v
 }
 
 // ValidateTokenRefreshBuffer checks AZURE_AD_OAUTH_TOKEN_MINUTES is within
@@ -149,14 +193,19 @@ func (c *Client) authenticate() error {
 		"scope":         {"https://graph.microsoft.com/.default"},
 		"grant_type":    {"client_credentials"},
 	}
-	resp, err := c.http.PostForm(tokenURL, form)
+	body, status, err := c.httpDoRetry(func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req, nil
+	})
 	if err != nil {
 		return fmt.Errorf("authentication request failed: %w", err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{StatusCode: resp.StatusCode, Body: string(body)}
+	if status < 200 || status >= 300 {
+		return &HTTPError{StatusCode: status, Body: string(body)}
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`
@@ -228,23 +277,118 @@ func (c *Client) do(method, rawURL string, reqBody []byte) (body []byte, status 
 }
 
 func (c *Client) send(method, rawURL, token string, reqBody []byte) ([]byte, int, error) {
-	var r io.Reader
-	if reqBody != nil {
-		r = bytes.NewReader(reqBody)
+	return c.httpDoRetry(func() (*http.Request, error) {
+		var r io.Reader
+		if reqBody != nil {
+			r = bytes.NewReader(reqBody)
+		}
+		req, err := http.NewRequest(method, rawURL, r)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
+}
+
+// httpDoRetry executes reqFn — which must build a fresh *http.Request on each
+// call, since a request body reader is consumed per attempt — retrying on Graph
+// throttling (429) and transient errors (5xx, network failures). It honors a
+// Retry-After header when present, otherwise uses jittered exponential backoff,
+// up to c.maxRetries additional attempts. It returns the final response's body
+// and status (401 and other non-retryable statuses pass straight through so the
+// caller's own handling — e.g. do()'s 401 re-auth — still applies).
+func (c *Client) httpDoRetry(reqFn func() (*http.Request, error)) ([]byte, int, error) {
+	for attempt := 0; ; attempt++ {
+		req, err := reqFn()
+		if err != nil {
+			return nil, 0, err
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			if attempt >= c.maxRetries {
+				return nil, 0, err
+			}
+			c.notifyThrottle(0, attempt+1, 0)
+			c.sleepFn(c.backoff(attempt, 0))
+			continue
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if shouldRetryStatus(resp.StatusCode) && attempt < c.maxRetries {
+			ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+			c.notifyThrottle(resp.StatusCode, attempt+1, ra)
+			c.sleepFn(c.backoff(attempt, ra))
+			continue
+		}
+		return b, resp.StatusCode, nil
 	}
-	req, err := http.NewRequest(method, rawURL, r)
-	if err != nil {
-		return nil, 0, err
+}
+
+func (c *Client) notifyThrottle(status, attempt int, retryAfter time.Duration) {
+	if c.OnThrottle != nil {
+		c.OnThrottle(status, attempt, retryAfter)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, 0, err
+}
+
+// shouldRetryStatus reports whether an HTTP status is a Graph throttle (429) or
+// a transient server error worth retrying. All retried statuses map to
+// idempotent-safe outcomes for our usage (reads, and create/renew/delete that
+// tolerate a repeat).
+func shouldRetryStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, // 429
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+		http.StatusGatewayTimeout:      // 504
+		return true
 	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return b, resp.StatusCode, nil
+	return false
+}
+
+// backoff returns how long to wait before the next attempt. A positive
+// retryAfter (from a Retry-After header) is honored verbatim, capped at
+// maxRetryAfter; otherwise it is full-jittered exponential backoff — a random
+// duration in [d/2, d] where d = baseBackoff·2^attempt capped at maxBackoff.
+func (c *Client) backoff(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		if retryAfter > maxRetryAfter {
+			return maxRetryAfter
+		}
+		return retryAfter
+	}
+	d := c.baseBackoff
+	for i := 0; i < attempt && d < c.maxBackoff; i++ {
+		d *= 2
+	}
+	if d > c.maxBackoff {
+		d = c.maxBackoff
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int63n(int64(half)+1))
+}
+
+// parseRetryAfter parses a Retry-After header, which is either delta-seconds or
+// an HTTP-date. Returns 0 for empty/unparseable/past values.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // reqJSON sends method+url with an optional JSON body and unmarshals a 2xx JSON
@@ -455,16 +599,17 @@ func (c *Client) DriveDelta(driveID, deltaLink string, tokenLatest bool) (items 
 	}
 }
 
-// Download fetches the bytes at a pre-authenticated @microsoft.graph.downloadUrl.
+// Download fetches the bytes at a pre-authenticated @microsoft.graph.downloadUrl,
+// with the same throttle/transient retry as authenticated calls.
 func (c *Client) Download(downloadURL string) ([]byte, error) {
-	resp, err := c.http.Get(downloadURL)
+	body, status, err := c.httpDoRetry(func() (*http.Request, error) {
+		return http.NewRequest(http.MethodGet, downloadURL, nil)
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &HTTPError{StatusCode: resp.StatusCode, Body: string(body)}
+	if status < 200 || status >= 300 {
+		return nil, &HTTPError{StatusCode: status, Body: string(body)}
 	}
 	return body, nil
 }

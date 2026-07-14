@@ -53,8 +53,8 @@ func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
 // TestDiffDelta pins the delta classification to the listener's behavior.
 func TestDiffDelta(t *testing.T) {
 	items := []graph.Item{
-		{ID: "D", Deleted: true},   // deleted -> Delete uuid(D)
-		{ID: "F", IsFolder: true},  // folder  -> ignored
+		{ID: "D", Deleted: true},  // deleted -> Delete uuid(D)
+		{ID: "F", IsFolder: true}, // folder  -> ignored
 		{ID: "A", IsFile: true, File: graph.FileInfo{ID: "A", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // new     -> Add
 		{ID: "B", IsFile: true, File: graph.FileInfo{ID: "B", ModifiedDateTime: "2026-01-02T00:00:00Z"}}, // present, stored older -> Update
 		{ID: "C", IsFile: true, File: graph.FileInfo{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // present, stored newer -> Update + anomaly
