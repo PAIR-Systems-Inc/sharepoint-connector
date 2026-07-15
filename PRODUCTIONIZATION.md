@@ -119,6 +119,13 @@ Replace `listener.py` + `sync_once.py` with a single binary (e.g. `connector`):
 
 ## 2. Port strategy (de-risk the rewrite)
 
+> **Status (2026-07-14):** steps 1–3 are effectively done — behavior was pinned
+> by the §0 audit, the port is complete, and the sync engine now has unit +
+> end-to-end integration tests (the living spec). Step 1/3's *Python-side*
+> characterization/differential tests were port-time scaffolding and are **not**
+> being built as a maintained suite (Python is being retired). Only step 4
+> (shadow-run → cutover, retire Python) remains.
+
 The sync engine is intricate and currently **effectively untested** — porting it
 blind would be dangerous. Sequence:
 
@@ -153,8 +160,13 @@ memories.
   folder scoping, delta (add + update + delete), pending-retry, and
   FAILED-processing. Plus component-level `httptest` coverage of the Graph client
   (incl. retry/backoff) and webhook handshake.
-- **Differential tests** (Go vs Python oracle): ⏳ **partial** — a manual
-  module-by-module audit was done (see §0); not yet codified as an automated suite.
+- **Differential tests** (Go vs Python oracle): ✅ **served its purpose** — this
+  was always a *port-time* scaffold (Python is a throwaway oracle, deleted at
+  cutover). Its job — catching port divergences — was done by the one-time
+  module-by-module audit (§0), and the integration tests above are now the living
+  spec. No ongoing automated suite is needed (it would force us to keep Python
+  alive to diff against). Optional: a single differential run over shared fixtures
+  right before deleting Python, for extra confidence — not a maintained suite.
 - **Load/soak**: notification bursts, large drives, throttling behavior. ❌ not started.
 - Wire it all into CI (see §7). ✅ **done.**
 
@@ -260,8 +272,8 @@ Phases here are the "tiers" — **Phase/Tier 1 is the Go port + engine tests** (
 
 | Phase / Tier | Focus | Key deliverables | Status |
 |---|---|---|---|
-| **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) | ⏳ **Partial** — manual module-by-module audit done (§0); not a codified oracle suite |
-| **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, differential tests vs Python, shadow-run then cutover | ✅ **Mostly done** — binary + packages complete, port-fidelity gaps fixed (§0), unit **and end-to-end integration** tests green (§3); automated differential-vs-Python suite still partial; shadow-run → cutover still an ops step |
+| **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) | ✅ **Served its purpose** — the module-by-module audit (§0) pinned behavior and the integration tests are now the living spec; a codified oracle suite isn't needed (Python is being retired, not maintained) |
+| **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, port validated vs Python, shadow-run then cutover | ✅ **Code complete** — binary + packages done, port-fidelity gaps fixed (§0), unit + end-to-end integration tests green (§3). Only the operational **shadow-run → cutover** (retire Python) remains; no ongoing Python-diff suite needed |
 | **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) | ⏳ **In progress** — throttling/backoff ✅ and pending-retry ✅; durable state, worker queue, and HA (>1 instance) pending |
 | **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Partial** — CI gate ✅ + distroless image ✅; observability **deferred** (§6); signed image/SBOM pending |
 | **4. Hardening & ops** | Productization | Secret/scope tightening, binary hardening (`-s -w`/garble), multi-tenant onboarding automation, runbooks, backups | ❌ **Not started** |
