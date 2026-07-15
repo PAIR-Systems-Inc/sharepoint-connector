@@ -44,8 +44,15 @@ type Listener struct {
 func (l *Listener) Run(ctx context.Context) error {
 	l.baseCtx = ctx
 	l.delta = deltaStore{path: l.DeltaPath}
-	l.retry = syncer.NewRetrier(filepath.Dir(l.DeltaPath))
+	// Durable state (delta cursor + pending-retry sets) lives in this directory —
+	// on a mounted volume in production, so it survives restarts. Ensure it exists.
+	stateDir := filepath.Dir(l.DeltaPath)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return fmt.Errorf("create state dir %s: %w", stateDir, err)
+	}
+	l.retry = syncer.NewRetrier(stateDir)
 	l.server = New(l.ClientState, func(int) { l.onNotification() })
+	l.server.Log("info", "durable state dir: "+stateDir+" (delta cursor + pending-retry sets)")
 
 	// Surface Graph throttling/backoff in the activity log for observability.
 	l.GC.OnThrottle = func(status, attempt int, retryAfter time.Duration) {

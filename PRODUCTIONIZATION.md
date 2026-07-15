@@ -179,12 +179,15 @@ memories.
 - **Concurrency model:** decouple webhook receipt from work — webhook handler
   enqueues; a bounded pool of workers (goroutines) drains a **durable queue**.
   Replaces the current in-process `threading` + locks and enables >1 instance.
-- **Durable state (kills 3 PoC-isms at once):** the delta link is a **local
-  file** (`.graph_delta_link`) and the activity log is **in-memory**
-  (`_activity_log`) — both lost on restart and broken with >1 machine. Move
-  delta cursors, subscription state, pending-retry sets, and an audit log to a
-  **datastore** (Postgres, or SQLite on a Fly volume for single-tenant). This
-  also unblocks **HA** (currently `min_machines_running=1` = SPOF).
+- **Durable state:** ✅ **done (single-tenant)** — the delta cursor and
+  pending-retry sets now live on a **persistent Fly volume** mounted at `/data`
+  (`[mounts]` in `fly_io.toml.template`; `deploy_fly_io.sh` creates the volume;
+  the image seeds `/data` owned by the nonroot user), so they survive
+  restarts/redeploys instead of dying with `/tmp`. Reuses the existing file
+  storage — no datastore dependency at single-tenant scale. Still open: the
+  **activity log** stays in-memory (observability only — deferred, §6), and a
+  *shared* datastore is only needed if we later want **HA / >1 machine** (a
+  volume binds to a single machine).
 - **Full-sync memory:** startup/refresh loads the whole drive into maps —
   stream/paginate and bound memory for large tenants.
 
@@ -274,7 +277,7 @@ Phases here are the "tiers" — **Phase/Tier 1 is the Go port + engine tests** (
 |---|---|---|---|
 | **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) | ✅ **Served its purpose** — the module-by-module audit (§0) pinned behavior and the integration tests are now the living spec; a codified oracle suite isn't needed (Python is being retired, not maintained) |
 | **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, port validated vs Python, shadow-run then cutover | ✅ **Code complete** — binary + packages done, port-fidelity gaps fixed (§0), unit + end-to-end integration tests green (§3). Only the operational **shadow-run → cutover** (retire Python) remains; no ongoing Python-diff suite needed |
-| **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) | ⏳ **In progress** — throttling/backoff ✅ and pending-retry ✅; durable state, worker queue, and HA (>1 instance) pending |
+| **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) | ⏳ **Mostly done** — throttling/backoff ✅, pending-retry ✅, durable state on a volume ✅ (single-tenant); worker queue + HA (>1 instance) pending — both effectively YAGNI for one site per cluster |
 | **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Partial** — CI gate ✅ + distroless image ✅; observability **deferred** (§6); signed image/SBOM pending |
 | **4. Hardening & ops** | Productization | Secret/scope tightening, binary hardening (`-s -w`/garble), multi-tenant onboarding automation, runbooks, backups | ❌ **Not started** |
 
@@ -287,8 +290,9 @@ throttling/retry.
 
 ## Open decisions
 
-- Datastore: Postgres (HA, multi-tenant) vs SQLite-on-volume (simplest,
-  single-tenant)?
-- Graph access in Go: official `msgraph-sdk-go` vs hand-rolled REST (smaller,
-  fewer deps, easier to audit/obfuscate)?
-- Obfuscation level: symbol-stripping only, or `garble`?
+- ~~Datastore: Postgres vs SQLite-on-volume?~~ **Resolved:** plain state files on
+  a **Fly volume** (single-tenant) — no datastore needed at this scale. Revisit a
+  shared datastore (Postgres/LiteFS) only if HA / >1 machine becomes a goal.
+- ~~Graph access in Go: official SDK vs hand-rolled REST?~~ **Resolved:**
+  hand-rolled REST client (`internal/graph`), smaller and easier to audit.
+- Obfuscation level: symbol-stripping (`-s -w`, done) only, or add `garble`?

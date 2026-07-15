@@ -284,6 +284,15 @@ do_listener() {
   $FLY_CMD secrets import -a "$name" < "$ENV_FILE"
   echo ""
 
+  # Ensure a persistent volume for durable state (delta cursor + pending-retry
+  # sets) exists in the primary region before deploying (the [mounts] in the
+  # config requires it). Single machine → one volume.
+  if ! $FLY_CMD volumes list -a "$name" 2>/dev/null | grep -q 'sharepoint_state'; then
+    echo "Creating persistent volume 'sharepoint_state' (1GB, $FLY_REGION) for durable state..."
+    $FLY_CMD volumes create sharepoint_state -a "$name" -r "$FLY_REGION" -n 1 -s 1 --yes
+    echo ""
+  fi
+
   echo "Deploying (single machine: --ha=false, region: $FLY_REGION)..."
   $FLY_CMD deploy -a "$name" --config "$config" --ha=false --primary-region "$FLY_REGION"
   echo ""
