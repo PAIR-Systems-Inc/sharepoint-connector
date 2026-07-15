@@ -146,10 +146,13 @@ memories.
   classification, intra-sync conflict resolution (a file landing in more than one
   action list after the pending merge), pending merge/retry, timestamp
   comparisons, and unsupported MIME handling all have tests.
-- **Integration tests** with a fake SharePoint (Graph) + fake Goodmem: ⏳ **partial** —
-  component-level `httptest` coverage exists (Graph client flows incl.
-  retry/backoff, webhook handshake, `processingStatus` polling, pending-merge +
-  conflict resolution); a single end-to-end full-sync/delta harness is not built.
+- **Integration tests** with a fake SharePoint (Graph) + fake Goodmem: ✅ **done** —
+  `internal/syncer/integration_test.go` drives the real `graph.Client` and real
+  Goodmem SDK against in-process fake servers, covering the full-sync lifecycle
+  (add / idempotent re-run / update / orphan delete), the mass-delete guard,
+  folder scoping, delta (add + update + delete), pending-retry, and
+  FAILED-processing. Plus component-level `httptest` coverage of the Graph client
+  (incl. retry/backoff) and webhook handshake.
 - **Differential tests** (Go vs Python oracle): ⏳ **partial** — a manual
   module-by-module audit was done (see §0); not yet codified as an automated suite.
 - **Load/soak**: notification bursts, large drives, throttling behavior. ❌ not started.
@@ -258,7 +261,7 @@ Phases here are the "tiers" — **Phase/Tier 1 is the Go port + engine tests** (
 | Phase / Tier | Focus | Key deliverables | Status |
 |---|---|---|---|
 | **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) | ⏳ **Partial** — manual module-by-module audit done (§0); not a codified oracle suite |
-| **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, differential tests vs Python, shadow-run then cutover | ✅ **Mostly done** — binary + packages complete, port-fidelity gaps fixed (§0), unit tests green; integration/differential tests partial (§3); shadow-run → cutover still an ops step |
+| **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, differential tests vs Python, shadow-run then cutover | ✅ **Mostly done** — binary + packages complete, port-fidelity gaps fixed (§0), unit **and end-to-end integration** tests green (§3); automated differential-vs-Python suite still partial; shadow-run → cutover still an ops step |
 | **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) | ⏳ **In progress** — throttling/backoff ✅ and pending-retry ✅; durable state, worker queue, and HA (>1 instance) pending |
 | **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Partial** — CI gate ✅ + distroless image ✅; observability **deferred** (§6); signed image/SBOM pending |
 | **4. Hardening & ops** | Productization | Secret/scope tightening, binary hardening (`-s -w`/garble), multi-tenant onboarding automation, runbooks, backups | ❌ **Not started** |

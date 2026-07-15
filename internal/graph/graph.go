@@ -122,9 +122,25 @@ type Client struct {
 	OnThrottle func(status, attempt int, retryAfter time.Duration)
 }
 
+// Option customizes a Client at construction.
+type Option func(*Client)
+
+// WithBaseURLs overrides the Graph API and OAuth login base URLs — for sovereign
+// clouds or, in tests, an httptest server. Empty values are left at the default.
+func WithBaseURLs(graphBase, loginBase string) Option {
+	return func(c *Client) {
+		if graphBase != "" {
+			c.graphBase = graphBase
+		}
+		if loginBase != "" {
+			c.loginBase = loginBase
+		}
+	}
+}
+
 // NewClient returns a Graph client for the given Azure app and SharePoint site.
-func NewClient(clientID, tenantID, clientSecret, siteURL string) *Client {
-	return &Client{
+func NewClient(clientID, tenantID, clientSecret, siteURL string, opts ...Option) *Client {
+	c := &Client{
 		clientID:     clientID,
 		tenantID:     tenantID,
 		clientSecret: clientSecret,
@@ -137,6 +153,10 @@ func NewClient(clientID, tenantID, clientSecret, siteURL string) *Client {
 		maxBackoff:   maxBackoff,
 		sleepFn:      time.Sleep,
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // maxRetriesFromEnv reads GRAPH_MAX_RETRIES, clamped to [0, maxRetriesCeil].
