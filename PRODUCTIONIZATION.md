@@ -142,22 +142,25 @@ Today: only `test_graph_permissions.py` (87 lines); the 1,830-line sync logic is
 untested. This is the biggest risk — a subtle bug silently drops or duplicates
 memories.
 
-- **Unit tests** for the sync engine: UUID set math, add/update/delete
-  classification, conflict resolution (same file in multiple lists), pending
-  merge/retry, timestamp comparisons, unsupported MIME handling.
-- **Integration tests** with a fake SharePoint (Graph) + fake Goodmem: full
-  sync, delta sync, deletes, renames/moves, pagination, partial-ingest failure,
-  `processingStatus` PENDING/FAILED/COMPLETED, subscription create/renew.
-- **Differential tests** (Go vs Python oracle) during the port.
-- **Load/soak**: notification bursts, large drives, throttling behavior.
-- Wire it all into CI (see §7).
+- **Unit tests** for the sync engine: ✅ **done** — UUID set math, add/update/delete
+  classification, intra-sync conflict resolution (a file landing in more than one
+  action list after the pending merge), pending merge/retry, timestamp
+  comparisons, and unsupported MIME handling all have tests.
+- **Integration tests** with a fake SharePoint (Graph) + fake Goodmem: ⏳ **partial** —
+  component-level `httptest` coverage exists (Graph client flows incl.
+  retry/backoff, webhook handshake, `processingStatus` polling, pending-merge +
+  conflict resolution); a single end-to-end full-sync/delta harness is not built.
+- **Differential tests** (Go vs Python oracle): ⏳ **partial** — a manual
+  module-by-module audit was done (see §0); not yet codified as an automated suite.
+- **Load/soak**: notification bursts, large drives, throttling behavior. ❌ not started.
+- Wire it all into CI (see §7). ✅ **done.**
 
 ---
 
 ## 4. Runtime, concurrency & durability (Tier 1–2)
 
-- **Serving:** Go stdlib `net/http` (drops the `app.run()` dev-server problem);
-  add graceful shutdown that drains in-flight syncs.
+- **Serving:** ✅ **done** — Go stdlib `net/http`, with graceful shutdown on
+  SIGINT/SIGTERM (10s HTTP drain; in-flight syncs cancel via context).
 - **Concurrency model:** decouple webhook receipt from work — webhook handler
   enqueues; a bounded pool of workers (goroutines) drains a **durable queue**.
   Replaces the current in-process `threading` + locks and enables >1 instance.
@@ -180,13 +183,15 @@ memories.
   full-jitter exponential backoff to transient `5xx` and network errors, caps
   attempts at `GRAPH_MAX_RETRIES` (default 5, clamp `[0,10]`) and `Retry-After`
   at 120s, and fires an `OnThrottle` hook that the listener logs to `/activity`.
-- **Idempotency & crash safety:** deterministic UUIDs already help; ensure sync
-  is resumable/re-runnable after a crash mid-apply with no data loss
-  (checkpoint before/after apply).
-- **Poison handling:** cap retries per file; dead-letter persistently failing
-  items with visibility, rather than looping forever.
-- **Subscription lifecycle:** harden the renew loop (renew-before-expiry exists);
-  alert on renewal failure; recreate on 404.
+- **Idempotency & crash safety:** ⏳ **partial** — deterministic UUIDs +
+  durable pending-retry sets (§0) mean failed items are re-attempted; still
+  missing an explicit checkpoint before/after apply, and the state files are
+  ephemeral (see §4 durable state).
+- **Poison handling:** ⏳ **partial** — persistently failing items are retried
+  via the pending sets, but with **no cap / dead-letter** yet (they loop
+  indefinitely, matching Python).
+- **Subscription lifecycle:** ⏳ **partial** — renew-before-expiry loop and
+  recreate-on-404 (`EnsureSubscription`) exist; alerting on renewal failure does not.
 
 ---
 
@@ -214,10 +219,10 @@ memories.
   `go test -race ./...`; `golangci-lint` and `govulncheck` run as advisory
   (`continue-on-error`) jobs, ready to promote to gates once confirmed clean.
   `fly-deploy.yml` still handles deploy-on-push-to-main.
-- **Reproducible builds:** Go modules with a checked-in `go.sum` (replaces the
-  unpinned `requests>=…` / `flask>=…` in `requirements.txt`, no lockfile today).
-- **Minimal image:** multi-stage Dockerfile → static binary in
-  `distroless`/`scratch` (no interpreter, no source, small CVE surface).
+- **Reproducible builds:** ✅ **done** — Go modules with a checked-in `go.sum`
+  (replaces the unpinned `requests>=…` / `flask>=…` in `requirements.txt`).
+- **Minimal image:** ✅ **done** — multi-stage Dockerfile → static binary in
+  `gcr.io/distroless/static-debian12:nonroot` (no interpreter, no source).
 - **Release hygiene:** version stamping via `-ldflags`, signed images, SBOM.
 
 ---
@@ -247,13 +252,16 @@ memories.
 
 ## Phased roadmap
 
-| Phase | Focus | Key deliverables |
-|---|---|---|
-| **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) |
-| **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`sync` packages, differential tests vs Python, shadow-run then cutover |
-| **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) |
-| **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image |
-| **4. Hardening & ops** | Productization | Secret/scope tightening, binary hardening (`-s -w`/garble), multi-tenant onboarding automation, runbooks, backups |
+Phases here are the "tiers" — **Phase/Tier 1 is the Go port + engine tests** (§3),
+**Tier 1–2 is runtime/durability** (§4). Status of each:
+
+| Phase / Tier | Focus | Key deliverables | Status |
+|---|---|---|---|
+| **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) | ⏳ **Partial** — manual module-by-module audit done (§0); not a codified oracle suite |
+| **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, differential tests vs Python, shadow-run then cutover | ✅ **Mostly done** — binary + packages complete, port-fidelity gaps fixed (§0), unit tests green; integration/differential tests partial (§3); shadow-run → cutover still an ops step |
+| **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) | ⏳ **In progress** — throttling/backoff ✅ and pending-retry ✅; durable state, worker queue, and HA (>1 instance) pending |
+| **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Partial** — CI gate ✅ + distroless image ✅; observability **deferred** (§6); signed image/SBOM pending |
+| **4. Hardening & ops** | Productization | Secret/scope tightening, binary hardening (`-s -w`/garble), multi-tenant onboarding automation, runbooks, backups | ❌ **Not started** |
 
 **Top 3 if nothing else:** (1) tests around the sync engine, (2) the Go
 rewrite with durable state + production serving (protects the source *and*
