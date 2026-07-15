@@ -50,8 +50,9 @@ func TestEnsureSubscription(t *testing.T) {
 		t.Errorf("expected create; created=%v sub=%+v", created, sub)
 	}
 
-	// A matching subscription exists -> renew, not create.
-	existing = []map[string]any{{"id": "sub1", "resource": "sites/site1/drives/drive1/root", "clientState": "cs"}}
+	// A matching subscription exists -> renew, not create. Note: no clientState —
+	// Graph omits it from list responses, so the match must key on notificationUrl.
+	existing = []map[string]any{{"id": "sub1", "resource": "sites/site1/drives/drive1/root", "notificationUrl": "https://x/sync/webhook"}}
 	created = false
 	if _, err := c.EnsureSubscription("https://x/sync/webhook", "cs", SubMinutesDefault); err != nil {
 		t.Fatalf("EnsureSubscription (renew): %v", err)

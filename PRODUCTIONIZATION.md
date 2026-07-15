@@ -39,6 +39,15 @@ equivalent.)
   now falls through to re-add instead of erroring (matches `listener.py`).
 - **`GRAPH_PORT` default** — 8080 → 5000, matching Python and `.env.example`.
 
+**Fixed (2026-07-15, found in live deploy):**
+- **Duplicate subscriptions on every restart/renewal** — `EnsureSubscription`
+  matched existing subscriptions on `resource` **+ `clientState`**, but Graph
+  omits `clientState` from `GET /subscriptions` responses, so the match always
+  failed and each startup/renewal created a *new* subscription (a live 3-restart
+  test left 3 duplicates). Now matches on `resource` + `notificationUrl` (both
+  returned). Faithful to Python — which has the same latent bug — but the fakes
+  returned `clientState` so only a live run exposed it.
+
 **Fixed (2026-07-14, part 2):**
 - **Pending-retry sets** — the listener now keeps three durable sets
   (`.graph_pending_add` / `_update` / `_removes`, alongside the delta link) via
@@ -187,7 +196,10 @@ memories.
   storage — no datastore dependency at single-tenant scale. Still open: the
   **activity log** stays in-memory (observability only — deferred, §6), and a
   *shared* datastore is only needed if we later want **HA / >1 machine** (a
-  volume binds to a single machine).
+  volume binds to a single machine). **✅ verified live (2026-07-15):** deployed
+  to Fly, confirmed the nonroot process writes `/data`, the volume persists +
+  reattaches across a machine restart, and a full end-to-end sync ran (8 files
+  SharePoint → Goodmem, all COMPLETED, processing-status polling working).
 - **Full-sync memory:** startup/refresh loads the whole drive into maps —
   stream/paginate and bound memory for large tenants.
 
@@ -209,7 +221,8 @@ memories.
   via the pending sets, but with **no cap / dead-letter** yet (they loop
   indefinitely, matching Python).
 - **Subscription lifecycle:** ⏳ **partial** — renew-before-expiry loop and
-  recreate-on-404 (`EnsureSubscription`) exist; alerting on renewal failure does not.
+  recreate-on-missing (`EnsureSubscription`) exist, and it now de-dupes correctly
+  on `resource`+`notificationUrl` (§0); alerting on renewal failure does not.
 
 ---
 

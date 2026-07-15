@@ -76,8 +76,12 @@ func (c *Client) EnsureSubscription(notificationURL, clientState string, expirat
 	if err != nil {
 		return nil, err
 	}
+	// Match on resource + notificationUrl. NOT clientState: Microsoft Graph omits
+	// clientState from GET /subscriptions responses (it's a secret), so matching on
+	// it always fails and every restart/renewal would create a duplicate
+	// subscription. notificationUrl is returned and is unique per deployment.
 	for _, s := range subs {
-		if s.Resource == resource && s.ClientState == clientState {
+		if s.Resource == resource && s.NotificationURL == notificationURL {
 			return c.RenewSubscription(s.ID, expiration)
 		}
 	}
