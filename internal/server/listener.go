@@ -28,6 +28,7 @@ type Listener struct {
 	ClientState       string
 	NotificationURL   string
 	SubMinutes        int
+	FullSyncMinutes   int // periodic safety full-sync interval; <= 0 disables it
 	Port              string
 	DeltaPath         string // file holding the Graph delta link
 	ExtractPageImages bool   // hint Goodmem to extract page images
@@ -81,8 +82,9 @@ func (l *Listener) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	go l.startup()             // full sync + delta bootstrap + create subscription
-	go l.subscriptionLoop(ctx) // periodic renewal
+	go l.startup()                 // full sync + delta bootstrap + create subscription
+	go l.subscriptionLoop(ctx)     // periodic renewal
+	go l.periodicFullSyncLoop(ctx) // periodic safety full-sync (repairs missed deltas)
 
 	srv := &http.Server{Handler: l.server.Handler()}
 	go func() {
@@ -101,24 +103,51 @@ func (l *Listener) Run(ctx context.Context) error {
 // startup runs the boot-time full sync, persists a fresh delta link, then
 // creates/renews the subscription (after the server is listening).
 func (l *Listener) startup() {
-	l.syncMu.Lock()
-	l.server.Log("info", "[startup] full sync starting")
-	if res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry}); err != nil {
-		l.server.Log("error", "[startup] full sync: "+err.Error())
-	} else {
-		l.server.Log("info", fmt.Sprintf("[startup] full sync done: +%d ~%d -%d (skipped %d)", res.Added, res.Updated, res.Deleted, res.Skipped))
-	}
-	if _, link, err := l.GC.DriveDelta(l.driveID, "", true); err == nil && link != "" {
-		if err := l.delta.save(link); err == nil {
-			l.server.Log("info", "[startup] delta link saved")
-		}
-	}
-	l.syncMu.Unlock()
-
+	l.fullSyncLocked("startup")
 	if sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes); err != nil {
 		l.server.Log("error", "subscription: "+err.Error())
 	} else {
 		l.server.Log("info", "subscription ready (expires "+sub.ExpirationDateTime+")")
+	}
+}
+
+// fullSyncLocked runs a full sync and re-bootstraps the delta link, serialized
+// against other syncs. tag labels the activity log ("startup" / "periodic").
+func (l *Listener) fullSyncLocked(tag string) {
+	l.syncMu.Lock()
+	defer l.syncMu.Unlock()
+	l.server.Log("info", "["+tag+"] full sync starting")
+	if res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry}); err != nil {
+		l.server.Log("error", "["+tag+"] full sync: "+err.Error())
+	} else {
+		l.server.Log("info", fmt.Sprintf("[%s] full sync done: +%d ~%d -%d (skipped %d)", tag, res.Added, res.Updated, res.Deleted, res.Skipped))
+	}
+	if _, link, err := l.GC.DriveDelta(l.driveID, "", true); err == nil && link != "" {
+		if err := l.delta.save(link); err == nil {
+			l.server.Log("info", "["+tag+"] delta link saved")
+		}
+	}
+}
+
+// periodicFullSyncLoop runs a safety full sync every FullSyncMinutes to reconcile
+// anything the event-triggered deltas missed (dropped/undelivered notifications,
+// or a FAILED-status memory whose timestamp still matches). Python ran this on
+// each subscription renewal; the Go port previously had no periodic reconcile —
+// a Graph delta 410 is opportunistic, not a schedule, so it is not a substitute.
+// FullSyncMinutes <= 0 disables the loop.
+func (l *Listener) periodicFullSyncLoop(ctx context.Context) {
+	if l.FullSyncMinutes <= 0 {
+		return
+	}
+	t := time.NewTicker(time.Duration(l.FullSyncMinutes) * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.fullSyncLocked("periodic")
+		}
 	}
 }
 

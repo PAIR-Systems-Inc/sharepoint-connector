@@ -48,6 +48,21 @@ equivalent.)
   returned). Faithful to Python — which has the same latent bug — but the fakes
   returned `clientState` so only a live run exposed it.
 
+**Fixed (2026-07-20):**
+- **Periodic safety full-sync (a finding this audit had itself missed)** — Python
+  ran `force_full_sync` on **every subscription renewal** (`listener.py:1408`)
+  *and* on **OAuth token refresh** (`listener.py:1778`). The Go port wired
+  **neither** (`subscriptionLoop` only renewed; `OnTokenRefresh` fired but the
+  listener ignored it), so the only full syncs were **startup** and the
+  **opportunistic 410 delta-token fallback** — no *reliable* periodic reconcile
+  (a Graph delta token can stay valid for days/weeks, so 410 is not a schedule).
+  A dropped or undelivered webhook notification, or a `FAILED`-status memory whose
+  timestamp still matches, could therefore go unrepaired until a restart. Added a
+  `periodicFullSyncLoop` (`GRAPH_FULL_SYNC_MINUTES`, default = the
+  subscription-renewal cadence ≈ half the subscription lifetime; `0` disables).
+  Chose a single dedicated interval over Python's two triggers — the hourly
+  OAuth-refresh full sync is heavier than needed at scale.
+
 **Fixed (2026-07-14, part 2):**
 - **Pending-retry sets** — the listener now keeps three durable sets
   (`.graph_pending_add` / `_update` / `_removes`, alongside the delta link) via

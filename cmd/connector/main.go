@@ -136,6 +136,9 @@ func runServe(args []string) error {
 	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "5000")
 	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
 	subMin := atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault)
+	// Periodic safety full-sync: defaults to the subscription-renewal cadence
+	// (~half the subscription lifetime). Set GRAPH_FULL_SYNC_MINUTES=0 to disable.
+	fullSyncMin := atoiOr(os.Getenv("GRAPH_FULL_SYNC_MINUTES"), max(subMin/2, 20))
 
 	l := &server.Listener{
 		GC:                gc,
@@ -144,6 +147,7 @@ func runServe(args []string) error {
 		ClientState:       cfg.GraphClientState,
 		NotificationURL:   cfg.GraphNotificationURL,
 		SubMinutes:        subMin,
+		FullSyncMinutes:   fullSyncMin,
 		Port:              port,
 		DeltaPath:         deltaPath,
 		ExtractPageImages: cfg.ExtractPageImages,

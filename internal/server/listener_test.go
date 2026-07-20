@@ -1,9 +1,24 @@
 package server
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// TestPeriodicFullSyncDisabled: FullSyncMinutes <= 0 disables the loop, so it
+// returns immediately instead of ticking.
+func TestPeriodicFullSyncDisabled(t *testing.T) {
+	l := &Listener{FullSyncMinutes: 0}
+	done := make(chan struct{})
+	go func() { l.periodicFullSyncLoop(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("periodicFullSyncLoop should return immediately when disabled")
+	}
+}
 
 func TestDeltaStore(t *testing.T) {
 	d := deltaStore{path: filepath.Join(t.TempDir(), "delta")}
