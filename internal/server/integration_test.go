@@ -84,6 +84,29 @@ func TestIntegration_ListenerMetrics(t *testing.T) {
 		}
 	}
 
+	// GET /syncs (SQLite-backed) returns the per-file records from the startup
+	// sync — two successful adds, zero failures.
+	if resp, err := http.Get(base + "/syncs"); err != nil || resp.StatusCode != http.StatusOK {
+		t.Errorf("syncs: err=%v status=%v", err, statusOf(resp))
+	} else {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		got := string(b)
+		if n := strings.Count(got, `"op":"add"`); n != 2 {
+			t.Errorf("/syncs add records = %d, want 2:\n%s", n, got)
+		}
+		if !strings.Contains(got, `"status":"success"`) {
+			t.Errorf("/syncs missing a success record:\n%s", got)
+		}
+	}
+	if resp, err := http.Get(base + "/syncs?status=failure"); err == nil {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if strings.Contains(string(b), `"file_id"`) {
+			t.Errorf("/syncs?status=failure should be empty, got: %s", b)
+		}
+	}
+
 	// The same real server answers /healthz and /activity.
 	if resp, err := http.Get(base + "/healthz"); err != nil || resp.StatusCode != http.StatusOK {
 		t.Errorf("healthz: err=%v status=%v", err, statusOf(resp))

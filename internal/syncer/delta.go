@@ -84,12 +84,15 @@ func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID
 	}
 
 	for _, fid := range removeIDs {
-		err := gm.Memories().Delete(ctx, memid.FromFileID(fid))
+		uuid := memid.FromFileID(fid)
+		err := gm.Memories().Delete(ctx, uuid)
 		ok := err == nil || isNotFound(err)
 		if ok {
 			res.Deleted++
+			opts.emit(SyncEvent{FileID: fid, MemoryID: uuid, SpaceID: spaceID, Op: "delete", Status: "success"})
 		} else {
 			res.Errors = append(res.Errors, fmt.Sprintf("delete %s: %v", fid, err))
+			opts.emit(SyncEvent{FileID: fid, MemoryID: uuid, SpaceID: spaceID, Op: "delete", Status: "failure", Message: err.Error()})
 		}
 		opts.Retry.recordRemove(fid, ok)
 	}

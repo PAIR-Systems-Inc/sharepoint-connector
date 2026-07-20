@@ -8,13 +8,22 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
 )
 
 // Notifier is invoked (asynchronously) when a validated change notification
 // arrives, carrying the number of changes reported.
 type Notifier func(count int)
+
+// SyncHistory provides recent sync records for the GET /syncs endpoint (the
+// SQLite store implements it). nil = the endpoint reports "not enabled".
+type SyncHistory interface {
+	Recent(limit int, status string) ([]syncer.SyncRecord, error)
+}
 
 // Server holds the webhook HTTP surface and an in-memory activity log.
 // (Durable state — delta cursor, pending sets, persisted activity — is a
@@ -27,6 +36,9 @@ type Server struct {
 
 	// Metrics is exposed at GET /metrics (Prometheus text format).
 	Metrics *Metrics
+
+	// History, if set, backs GET /syncs (durable sync-history query).
+	History SyncHistory
 
 	mu       sync.Mutex
 	activity []Event
@@ -56,7 +68,29 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		s.Metrics.WritePrometheus(w)
 	})
+	mux.HandleFunc("/syncs", s.handleSyncs)
 	return mux
+}
+
+// handleSyncs serves the durable sync history as JSON:
+//
+//	GET /syncs?limit=100&status=failure
+func (s *Server) handleSyncs(w http.ResponseWriter, r *http.Request) {
+	if s.History == nil {
+		http.Error(w, "sync history not enabled", http.StatusNotFound)
+		return
+	}
+	limit := 100
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
+		limit = v
+	}
+	recs, err := s.History.Recent(limit, r.URL.Query().Get("status"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"syncs": recs})
 }
 
 // graphNotification is the subset of a Graph change-notification payload we read.

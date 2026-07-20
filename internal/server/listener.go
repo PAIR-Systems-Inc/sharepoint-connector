@@ -14,6 +14,7 @@ import (
 	"fury.io/pairsys/goodmem"
 
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
+	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/store"
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
 )
 
@@ -33,12 +34,20 @@ type Listener struct {
 	DeltaPath         string // file holding the Graph delta link
 	ExtractPageImages bool   // hint Goodmem to extract page images
 
-	driveID string
-	delta   deltaStore
-	retry   *syncer.Retrier
-	server  *Server
-	baseCtx context.Context
-	syncMu  sync.Mutex // serialize full/delta syncs
+	driveID   string
+	delta     deltaStore
+	retry     *syncer.Retrier
+	history   *store.Store
+	eventSink syncer.EventSink
+	server    *Server
+	baseCtx   context.Context
+	syncMu    sync.Mutex // serialize full/delta syncs
+}
+
+// opts builds the sync Options for this listener (durable retry, page images,
+// and the sync-history sink).
+func (l *Listener) opts() syncer.Options {
+	return syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry, Sink: l.eventSink}
 }
 
 // Run binds the HTTP server and blocks until ctx is cancelled.
@@ -55,6 +64,25 @@ func (l *Listener) Run(ctx context.Context) error {
 	l.server = New(l.ClientState, func(int) { l.onNotification() })
 	l.server.Metrics.SetPendingFn(l.retry.Counts)
 	l.server.Log("info", "durable state dir: "+stateDir+" (delta cursor + pending-retry sets)")
+
+	// Durable, queryable sync history (SQLite on the same volume) → GET /syncs.
+	// Non-fatal: on failure the listener runs without history.
+	if st, err := store.Open(filepath.Join(stateDir, "sync_history.db")); err != nil {
+		l.server.Log("error", "sync-history disabled: "+err.Error())
+	} else {
+		l.history = st
+		l.server.History = st
+		l.eventSink = func(e syncer.SyncEvent) {
+			if err := st.Record(e); err != nil {
+				l.server.Log("error", "sync-history record: "+err.Error())
+			}
+		}
+		defer func() {
+			if l.history != nil {
+				_ = l.history.Close()
+			}
+		}()
+	}
 
 	// Surface Graph throttling/backoff in the activity log + metrics.
 	l.GC.OnThrottle = func(status, attempt int, retryAfter time.Duration) {
@@ -121,7 +149,7 @@ func (l *Listener) fullSyncLocked(tag string) {
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
 	l.server.Log("info", "["+tag+"] full sync starting")
-	res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry})
+	res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, l.opts())
 	if err != nil {
 		l.server.Log("error", "["+tag+"] full sync: "+err.Error())
 	} else {
@@ -184,10 +212,10 @@ func (l *Listener) onNotification() {
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
 	l.server.Log("info", "[delta] sync starting")
-	newLink, res, err := syncer.RunDelta(l.baseCtx, l.GC, l.GM, l.SpaceID, l.driveID, l.delta.load(), syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry})
+	newLink, res, err := syncer.RunDelta(l.baseCtx, l.GC, l.GM, l.SpaceID, l.driveID, l.delta.load(), l.opts())
 	if err == syncer.ErrDeltaExpired {
 		l.server.Log("info", "[delta] token expired; running full sync")
-		fres, ferr := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry})
+		fres, ferr := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, l.opts())
 		l.server.Metrics.RecordSync("full", fres)
 		if ferr != nil {
 			l.server.Log("error", "[delta] fallback full sync: "+ferr.Error())

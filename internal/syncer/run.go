@@ -29,10 +29,18 @@ type Result struct {
 
 // Options carries cross-cutting sync settings shared by the full and delta paths.
 type Options struct {
-	FolderPath        string   // scope the full-sync listing to this folder; "" = whole drive
-	ExtractPageImages bool     // hint Goodmem to extract page images (e.g. PDF page screenshots)
-	DryRun            bool     // compute the plan without mutating Goodmem (full sync only)
-	Retry             *Retrier // listener durable retry + status polling; nil = one-shot CLI (no pending sets, no polling)
+	FolderPath        string    // scope the full-sync listing to this folder; "" = whole drive
+	ExtractPageImages bool      // hint Goodmem to extract page images (e.g. PDF page screenshots)
+	DryRun            bool      // compute the plan without mutating Goodmem (full sync only)
+	Retry             *Retrier  // listener durable retry + status polling; nil = one-shot CLI (no pending sets, no polling)
+	Sink              EventSink // per-item outcome sink for durable sync history; nil = discard
+}
+
+// emit sends a per-item sync outcome to the sink, if one is set.
+func (o Options) emit(e SyncEvent) {
+	if o.Sink != nil {
+		o.Sink(e)
+	}
 }
 
 // RunFull performs a one-shot full sync from a SharePoint site to a Goodmem
@@ -76,9 +84,11 @@ func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID 
 	for _, uuid := range plan.Delete {
 		if err := gm.Memories().Delete(ctx, uuid); err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("delete %s: %v", uuid, err))
+			opts.emit(SyncEvent{MemoryID: uuid, SpaceID: spaceID, Op: "delete", Status: "failure", Message: err.Error()})
 			continue
 		}
 		res.Deleted++
+		opts.emit(SyncEvent{MemoryID: uuid, SpaceID: spaceID, Op: "delete", Status: "success"})
 	}
 
 	// Ingest adds and updates (update = delete-then-create with the same memoryId).
@@ -105,27 +115,39 @@ func refuseMassDelete(nFiles, nMemories int) bool {
 // ingest downloads a file and (re-)creates its memory. Unsupported types and
 // files without a download URL are skipped (mirroring sync_once.py).
 func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, f graph.FileInfo, isUpdate bool, opts Options) ingestResult {
-	if !IsMimeSupported(f.MimeType) || f.DownloadURL == "" {
-		res.Skipped++
-		return resSkipped
+	op := "add"
+	if isUpdate {
+		op = "update"
 	}
 	uuid := memid.FromFileID(f.ID)
+	emit := func(status, msg string) {
+		opts.emit(SyncEvent{FileID: f.ID, FileName: f.Name, MemoryID: uuid, SpaceID: spaceID, Op: op, Status: status, Message: msg})
+	}
+
+	if !IsMimeSupported(f.MimeType) || f.DownloadURL == "" {
+		res.Skipped++
+		emit("skipped", "unsupported MIME or no download URL")
+		return resSkipped
+	}
 	if isUpdate {
 		// A 404 means the memory is already gone; treat it as an add and fall
 		// through rather than aborting the update (matching listener.py).
 		if err := gm.Memories().Delete(ctx, uuid); err != nil && !isNotFound(err) {
 			res.Errors = append(res.Errors, fmt.Sprintf("pre-update delete %s: %v", f.Name, err))
+			emit("failure", "pre-update delete: "+err.Error())
 			return resTransient
 		}
 	}
 	content, err := gc.Download(f.DownloadURL)
 	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("download %s: %v", f.Name, err))
+		emit("failure", "download: "+err.Error())
 		return resTransient
 	}
 	mem, err := createMemory(ctx, gm, spaceID, f, content, opts.ExtractPageImages)
 	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: %v", f.Name, err))
+		emit("failure", "create: "+err.Error())
 		return resTransient
 	}
 
@@ -144,11 +166,13 @@ func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Cli
 		switch status {
 		case "FAILED":
 			res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: Goodmem processing FAILED", f.Name))
+			emit("failure", "Goodmem processing FAILED")
 			return resFailedProcessing
 		case "COMPLETED":
 			// confirmed
 		default: // still PENDING after the poll timeout
 			res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: Goodmem processing still pending (timeout)", f.Name))
+			emit("failure", "Goodmem processing pending (timeout)")
 			return resTransient
 		}
 	}
@@ -158,6 +182,7 @@ func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Cli
 	} else {
 		res.Added++
 	}
+	emit("success", "")
 	return resOK
 }
 

@@ -257,9 +257,13 @@ memories.
   throttle storms, queue backlog, auth/token failures — ⏳ deferred (wire in
   Prometheus/Alertmanager off the `/metrics` above).
 - `/healthz` (liveness) ✅ done; `/readyz` (readiness) ⏳ deferred.
-- **Durable, queryable sync history** (SQLite on `/data`, exposed via an
-  endpoint — @amin3141's ask): ⏳ scoped, pending a go/no-go. Purely operator
-  visibility now that the periodic full-sync (§0) covers correctness.
+- **Durable, queryable sync history** (@amin3141's ask): ✅ **done** — a
+  SQLite log (`internal/store`, pure-Go `modernc.org/sqlite` so it keeps the
+  `CGO_ENABLED=0` distroless build) on the `/data` volume records every per-item
+  outcome (file id/name, memory id, **space**, op, status, message, timestamp),
+  served at `GET /syncs?limit=&status=`. Restores the per-file `[Done]/[Failed]`
+  detail Python had. Purely operator visibility — the periodic full-sync (§0)
+  covers correctness.
 
 ---
 
