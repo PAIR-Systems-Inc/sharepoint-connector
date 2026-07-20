@@ -243,18 +243,23 @@ memories.
 
 ## 6. Observability
 
-> **Deferred (2026-07-14).** Not planned for the current push. `/activity` +
-> `/healthz` are sufficient for now; revisit when scale/operational needs grow.
-> The `OnThrottle` hook (§5) is already in place to feed metrics when we return.
+> **Partially un-parked (2026-07-20)** after @amin3141's review: a Prometheus
+> `/metrics` endpoint is now in. Structured logging, alerting, and `/readyz`
+> remain deferred until scale/ops needs grow.
 
-- Replace the in-memory `/activity` log + `watch_listener.py` polling with
-  **structured logging** (JSON) and **metrics** (sync latency, files
-  added/updated/deleted, failures, throttle events, subscription-renewal
-  health, queue depth) — Prometheus/OpenTelemetry.
+- **Prometheus `/metrics`:** ✅ **done** — `GET /metrics` (hand-rolled text
+  exposition, no dep) exposes files added/updated/deleted/skipped, sync errors,
+  full/delta sync counts, Graph throttle events (via the `OnThrottle` hook),
+  subscription-renewal success/failure, last-sync timestamp, and pending-retry
+  queue depth. Replaces the ad-hoc `watch`/`/activity` polling for monitoring.
+- **Structured logging** (JSON via `slog`) — ⏳ deferred.
 - **Alerting** on: subscription renewal failure, sustained sync failures,
-  throttle storms, queue backlog, auth/token failures.
-- Keep a lightweight `/activity` (now backed by the datastore) for humans; add
-  `/healthz` (liveness) and `/readyz` (readiness).
+  throttle storms, queue backlog, auth/token failures — ⏳ deferred (wire in
+  Prometheus/Alertmanager off the `/metrics` above).
+- `/healthz` (liveness) ✅ done; `/readyz` (readiness) ⏳ deferred.
+- **Durable, queryable sync history** (SQLite on `/data`, exposed via an
+  endpoint — @amin3141's ask): ⏳ scoped, pending a go/no-go. Purely operator
+  visibility now that the periodic full-sync (§0) covers correctness.
 
 ---
 
@@ -306,7 +311,7 @@ Phases here are the "tiers" — **Phase/Tier 1 is the Go port + engine tests** (
 | **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) | ✅ **Served its purpose** — the module-by-module audit (§0) pinned behavior and the integration tests are now the living spec; a codified oracle suite isn't needed (Python is being retired, not maintained) |
 | **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, port validated vs Python, shadow-run then cutover | ✅ **Code complete** — binary + packages done, port-fidelity gaps fixed (§0), unit + end-to-end integration tests green (§3). Only the operational **shadow-run → cutover** (retire Python) remains; no ongoing Python-diff suite needed |
 | **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) | ⏳ **Mostly done** — throttling/backoff ✅, pending-retry ✅, durable state on a volume ✅ (single-tenant); worker queue + HA (>1 instance) pending — both effectively YAGNI for one site per cluster |
-| **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Partial** — CI gate ✅ + distroless image ✅; observability **deferred** (§6); signed image/SBOM pending |
+| **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Partial** — CI gate ✅, distroless image ✅, `/healthz` ✅, Prometheus `/metrics` ✅ (§6); structured logs / alerting / `/readyz` / signed image still pending |
 | **4. Hardening & ops** | Productization | Secret/scope tightening, binary hardening (`-s -w`/garble), multi-tenant onboarding automation, runbooks, backups | ❌ **Not started** |
 
 **Top 3 if nothing else:** (1) tests around the sync engine, (2) the Go

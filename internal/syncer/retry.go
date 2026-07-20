@@ -157,6 +157,15 @@ func (r *Retrier) loadRemove() map[string]bool {
 	return r.load(r.removePath)
 }
 
+// Counts returns the number of file IDs currently queued in the pending add,
+// update, and remove sets (queue depth, for metrics). Nil-safe.
+func (r *Retrier) Counts() (add, update, remove int) {
+	if r == nil {
+		return 0, 0, 0
+	}
+	return len(r.loadAdd()), len(r.loadUpdate()), len(r.loadRemove())
+}
+
 // --- outcome → pending-set bookkeeping (all nil-safe) ---
 
 func (r *Retrier) recordAdd(fileID string, out ingestResult) {

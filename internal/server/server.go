@@ -25,6 +25,9 @@ type Server struct {
 	clientState string
 	onNotify    Notifier
 
+	// Metrics is exposed at GET /metrics (Prometheus text format).
+	Metrics *Metrics
+
 	mu       sync.Mutex
 	activity []Event
 	maxLog   int
@@ -40,15 +43,19 @@ type Event struct {
 // New returns a Server. onNotify is called (in a goroutine) for each validated
 // notification; pass nil to only record activity.
 func New(clientState string, onNotify Notifier) *Server {
-	return &Server{clientState: clientState, onNotify: onNotify, maxLog: 500}
+	return &Server{clientState: clientState, onNotify: onNotify, maxLog: 500, Metrics: NewMetrics()}
 }
 
-// Handler returns the HTTP routes: the Graph webhook plus health/activity.
+// Handler returns the HTTP routes: the Graph webhook, health, activity, metrics.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sync/webhook", s.handleWebhook)
 	mux.HandleFunc("/activity", s.handleActivity)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		s.Metrics.WritePrometheus(w)
+	})
 	return mux
 }
 

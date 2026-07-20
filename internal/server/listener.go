@@ -53,10 +53,12 @@ func (l *Listener) Run(ctx context.Context) error {
 	}
 	l.retry = syncer.NewRetrier(stateDir)
 	l.server = New(l.ClientState, func(int) { l.onNotification() })
+	l.server.Metrics.SetPendingFn(l.retry.Counts)
 	l.server.Log("info", "durable state dir: "+stateDir+" (delta cursor + pending-retry sets)")
 
-	// Surface Graph throttling/backoff in the activity log for observability.
+	// Surface Graph throttling/backoff in the activity log + metrics.
 	l.GC.OnThrottle = func(status, attempt int, retryAfter time.Duration) {
+		l.server.Metrics.RecordThrottle()
 		msg := fmt.Sprintf("[throttle] Graph status=%d; backing off before retry %d", status, attempt)
 		if retryAfter > 0 {
 			msg += fmt.Sprintf(" (Retry-After %s)", retryAfter)
@@ -104,7 +106,9 @@ func (l *Listener) Run(ctx context.Context) error {
 // creates/renews the subscription (after the server is listening).
 func (l *Listener) startup() {
 	l.fullSyncLocked("startup")
-	if sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes); err != nil {
+	sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes)
+	l.server.Metrics.RecordRenewal(err == nil)
+	if err != nil {
 		l.server.Log("error", "subscription: "+err.Error())
 	} else {
 		l.server.Log("info", "subscription ready (expires "+sub.ExpirationDateTime+")")
@@ -117,11 +121,13 @@ func (l *Listener) fullSyncLocked(tag string) {
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
 	l.server.Log("info", "["+tag+"] full sync starting")
-	if res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry}); err != nil {
+	res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry})
+	if err != nil {
 		l.server.Log("error", "["+tag+"] full sync: "+err.Error())
 	} else {
 		l.server.Log("info", fmt.Sprintf("[%s] full sync done: +%d ~%d -%d (skipped %d)", tag, res.Added, res.Updated, res.Deleted, res.Skipped))
 	}
+	l.server.Metrics.RecordSync("full", res)
 	if _, link, err := l.GC.DriveDelta(l.driveID, "", true); err == nil && link != "" {
 		if err := l.delta.save(link); err == nil {
 			l.server.Log("info", "["+tag+"] delta link saved")
@@ -161,7 +167,9 @@ func (l *Listener) subscriptionLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes); err != nil {
+			sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes)
+			l.server.Metrics.RecordRenewal(err == nil)
+			if err != nil {
 				l.server.Log("error", "subscription renew: "+err.Error())
 			} else {
 				l.server.Log("info", "subscription renewed (expires "+sub.ExpirationDateTime+")")
@@ -179,7 +187,9 @@ func (l *Listener) onNotification() {
 	newLink, res, err := syncer.RunDelta(l.baseCtx, l.GC, l.GM, l.SpaceID, l.driveID, l.delta.load(), syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry})
 	if err == syncer.ErrDeltaExpired {
 		l.server.Log("info", "[delta] token expired; running full sync")
-		if _, ferr := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry}); ferr != nil {
+		fres, ferr := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry})
+		l.server.Metrics.RecordSync("full", fres)
+		if ferr != nil {
 			l.server.Log("error", "[delta] fallback full sync: "+ferr.Error())
 		}
 		if _, link, e := l.GC.DriveDelta(l.driveID, "", true); e == nil && link != "" {
@@ -191,6 +201,7 @@ func (l *Listener) onNotification() {
 		l.server.Log("error", "[delta] sync: "+err.Error())
 		return
 	}
+	l.server.Metrics.RecordSync("delta", res)
 	if newLink != "" {
 		_ = l.delta.save(newLink)
 	}
