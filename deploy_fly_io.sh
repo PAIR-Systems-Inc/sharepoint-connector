@@ -303,7 +303,7 @@ do_listener() {
   echo ""
 
   echo "App is at: https://$name.fly.dev"
-  echo "Listener creates the Graph subscription on startup if none exists. Watch: python watch_listener.py https://$name.fly.dev"
+  echo "Listener creates the Graph subscription on startup if none exists. Watch: connector watch https://$name.fly.dev"
 }
 
 # --- Run by mode ---
