@@ -132,9 +132,10 @@ Replace `listener.py` + `sync_once.py` with a single binary (e.g. `connector`):
   `msgraph-sdk-go`, or plain REST to keep the surface small), `goodmem/`
   (Goodmem REST client — port of `goodmem_client.py`), `sync/` (the diff /
   conflict-resolution / apply engine — the valuable IP), `config/`, `store/`.
-- **Python retained only as a throwaway test oracle** during the port (§2) —
-  differential-tested against the Go, then deleted at cutover. No Python ships
-  in the product; nothing stays mixed long-term.
+- **Python kept only as a historical reference** — never deployed, **not a
+  production fallback or ongoing safety net** (decided 2026-07-22; see §2). It
+  served as a throwaway oracle during the port and stays in git for reference;
+  no Python ships in the product and nothing stays mixed long-term.
 - **Stays as-is:** `deploy_fly_io.sh` (bash deploy glue calling the `fly` CLI —
   not application code; optionally folded into `connector deploy` later),
   templates, docs.

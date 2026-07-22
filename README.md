@@ -59,7 +59,7 @@ sharepoint/
 └── docs/                 # usage.md, tech_details.md, permission.md, PRODUCTIONIZATION.md, architecture diagram.
 ```
 
-> **Note:** the Python files (`sharepoint_client.py`, `goodmem_client.py`, `sync_once.py`, `listener.py`, `watch_listener.py`) are the original proof-of-concept, retained only as a test oracle during the Go migration and removed at cutover. Use the `connector` binary, not the Python scripts.
+> **Note:** the Python files (`sharepoint_client.py`, `goodmem_client.py`, `sync_once.py`, `listener.py`, `watch_listener.py`) are the original proof-of-concept, kept **only as a historical reference**. They are **never deployed** and are **not a production fallback or safety net** — the Go `connector` binary is the sole production system. Use the binary, not the Python scripts.
 
 ## Roadmap
 
