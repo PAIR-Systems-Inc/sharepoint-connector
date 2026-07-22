@@ -1,134 +1,161 @@
 # Usage
 
-How to sync SharePoint to Goodmem, deploy the event-triggered listener to Fly.io, and watch sync activity.
+How to sync SharePoint to Goodmem with the **`connector`** binary, deploy the
+event-triggered listener to Fly.io, and monitor sync activity.
 
-Before you start, set up credentials as described in [README.md](../README.md#permissions-and-credentials). 
+Before you start, set up credentials as described in
+[README.md](../README.md#getting-started). Config lives in `.env` — copy it from
+[`.env.example`](../.env.example), which documents every variable.
 
-## Manual/periodic sync
+## The `connector` binary
 
-To sync your SharePoint drive to Goodmem once, run this command:
+The connector is a single compiled Go binary with subcommands (it replaces the
+Python proof-of-concept). Build it from source:
 
 ```bash
-python sync_once.py
+go build -o connector ./cmd/connector
+./connector help
 ```
 
-Use `--env-file` to load a specific env file; otherwise `.env` is used.
+| Subcommand | What it does |
+|---|---|
+| `connector sync-once` | One-time full sync SharePoint → Goodmem. Flags: `--env-file PATH`, `--dry-run` (plan only, no changes). |
+| `connector serve` | Run the webhook listener + sync engine (this is what gets deployed). Flag: `--env-file PATH`. |
+| `connector create-subscription` | Create or renew the Graph change subscription. Flag: `--env-file PATH`. |
+| `connector watch [-n SECS] <url>` | Tail a running listener's activity log locally. |
 
-**Example output:**
+By default each command loads `.env` if present; `--env-file` overrides.
+
+## Manual / periodic sync
+
+Sync the whole SharePoint drive to Goodmem once:
+
+```bash
+./connector sync-once            # uses .env
+./connector sync-once --dry-run  # show the add/update/delete plan without applying
 ```
-Authenticating with Microsoft Graph API... ✓ Success.
-Connecting to site... ✓ Connected.
-Fetching files from SharePoint... ✓ Found 12 file(s).
-Goodmem: Looking up space 'SharePoint_MyTenant_MySite'... Found. Using existing space.
-Goodmem: Listing memories... Found 8.
-Goodmem: Deleting memory for removed file: old_doc.pdf
-Goodmem: Ingesting 4 file(s) (1.2 MB total)...
-[====================>                    ] 512.0 KB / 1.2 MB
-Sync complete.
-```
 
-## Event-triggered auto sync
+Scope a one-time sync to a single folder with `SHAREPOINT_FOLDER_PATH` (see
+`.env.example`). Run it on demand or on a schedule (cron).
 
-This approach requires a listener between your SharePoint drive and Goodmem. The listener receives change notifications from Microsoft and syncs them to Goodmem. 
+## Event-triggered auto sync (the listener)
 
-For Microsoft Graph API to talk to the listener, the listener **must be deployed to a public internet and set to use HTTPS (SSL/TLS)**. We provide a script `./deploy_fly_io.sh` to deploy the listener to Fly.io. It has many modes and options. Run `./deploy_fly_io.sh --help` to see them all. It has two major modes:
-* **Deploy Listener only** — if Goodmem is already setup (e.g. elsewhere or you deployed it earlier) and configured in `.env`, you only deploy the Listener. See [Deploy Listener only](#deploy-listener-only-goodmem-already-setup).
-* **Deploy both Goodmem and Listener** — if you want to deploy both the Listener and provision a new Goodmem instance to Fly.io in one go, see [Hands-free deployment of both Goodmem and Listener](#hands-free-deployment-of-both-goodmem-and-listener). This approach requires you to have a valid `OPENAI_API_KEY` in your `.env` file, as it creates a `text-embedding-3-small` embedder on the created Goodmem instance. 
+A long-running listener (`connector serve`) receives Microsoft Graph change
+notifications and syncs the delta to Goodmem. Graph requires it to be
+**publicly reachable over HTTPS/TLS**, so it must be deployed. `./deploy_fly_io.sh`
+is the supported way to stand it up on Fly.io — it builds the Go binary into a
+distroless image (via `Dockerfile`) and ships it. Run `./deploy_fly_io.sh --help`
+for all modes; the two main ones:
 
-### Deploy Listener only (Goodmem already setup)
+### Deploy the listener only (Goodmem already set up)
 
-If Goodmem is already setup (e.g. elsewhere or you deployed it earlier), you only deploy the Listener.
-
-From the [Environment variables](../README.md#environment-variables) section, set the **Azure & SharePoint** and **Goodmem (A)** groups, plus `FLY_CLUSTER` (optionally `FLY_ORG` / `FLY_REGION`). The deploy script generates `GRAPH_CLIENT_STATE` and writes `GRAPH_NOTIFICATION_URL` for you. Then run:
+Set the **Azure & SharePoint** and **Goodmem (A)** groups in `.env`, plus
+`FLY_CLUSTER` (optionally `FLY_ORG` / `FLY_REGION`). The deploy script generates
+`GRAPH_CLIENT_STATE` and writes `GRAPH_NOTIFICATION_URL` for you. Then:
 
 ```bash
 ./deploy_fly_io.sh
 ```
 
-The step-by-step internals are in [tech_details.md](tech_details.md#deployment-deploy_fly_iosh).
+The container runs `connector serve`. On startup the listener does a full sync,
+bootstraps the delta cursor, and creates the Graph subscription. Step-by-step
+internals: [tech_details.md](tech_details.md#deployment-deploy_fly_iosh).
 
-**Example output** (trimmed):
-```
-=== Deploying SharePoint listener ===
-App name: sharepoint-joint-listener
-...
-Set GRAPH_NOTIFICATION_URL=https://sharepoint-joint-listener.fly.dev/sync/webhook in .env
-Generated a random GRAPH_CLIENT_STATE in .env
-Deploying (single machine: --ha=false, region: sjc)...
-...
-App is at: https://sharepoint-joint-listener.fly.dev
-Listener creates the Graph subscription on startup if none exists. Watch: python watch_listener.py https://sharepoint-joint-listener.fly.dev
-```
+### Hands-free: deploy Goodmem + listener together
 
-### Hands-free deployment of both Goodmem and Listener
-
-To stand up a new Goodmem **and** the listener in one go, use `--hands-free`. It provisions Goodmem on Fly.io and creates a `text-embedding-3-small` embedder (so it needs `OPENAI_API_KEY`; contact us if you need a different embedder).
-
-From the [Environment variables](../README.md#environment-variables) section, set the **Azure & SharePoint** group, plus `FLY_CLUSTER` (optionally `FLY_ORG` / `FLY_REGION`) and `OPENAI_API_KEY`. Leave the **Goodmem (A)** group blank — the script provisions Goodmem and also generates `GRAPH_CLIENT_STATE` / writes `GRAPH_NOTIFICATION_URL`. Then run:
+`--hands-free` also provisions a fresh Goodmem server on Fly.io and creates a
+`text-embedding-3-small` embedder (so it needs `OPENAI_API_KEY`). Leave the
+**Goodmem (A)** group blank; set **Azure & SharePoint**, `FLY_CLUSTER`, and
+`OPENAI_API_KEY`. Then:
 
 ```bash
 ./deploy_fly_io.sh --hands-free
 ```
 
-This runs a Goodmem phase, then the same listener deploy as above. Full step list: [tech_details.md](tech_details.md#deployment-deploy_fly_iosh).
+## HTTP endpoints
 
-**Example output** (trimmed):
-```
-=== Deploying Goodmem (get.goodmem.ai/flyio) ===
-Goodmem app name: sharepoint-joint-goodmem
-...
-Set GOODMEM_BASE_URL=https://sharepoint-joint-goodmem.fly.dev in .env
-Goodmem deploy finished.
+The listener (`connector serve`) exposes:
 
-=== Deploying SharePoint listener ===
-...
-App is at: https://sharepoint-joint-listener.fly.dev
-```
+| Endpoint | Purpose |
+|---|---|
+| `POST /sync/webhook` | Microsoft Graph change notifications (validation handshake + `clientState` check). |
+| `GET /healthz` | Liveness probe (always `200` once the server is up). |
+| `GET /readyz` | Readiness probe — `200` only after the startup full sync completed **and** the Graph subscription is ensured; `503` until then. Point your load balancer / platform health check here so traffic isn't routed to a listener that never subscribed. |
+| `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta sync counts, Graph throttle events, subscription-renewal health, last-sync time, pending-retry queue depth, and `sharepoint_pending_dead` (items parked after exhausting retries — alert on this). Point Prometheus/Grafana here. |
+| `GET /syncs` | **Durable sync history** (SQLite): one JSON record per item — `file_id`, `file_name`, `memory_id`, `space_id`, `op`, `status`, `message`, `ts`. `status` is `success`, `failure`, `skipped`, or `dead` (parked — see below). Query params: `?limit=100&status=failure`. Great for "did file X sync, and why did it fail?". |
+| `GET /activity` | In-memory recent-events log (what `connector watch` polls). |
 
-### Watch Listener Activity (optional)
+## Monitoring
 
-This step is **optional** — the listener syncs on its own whether or not you watch it. `watch_listener.py` just lets you observe the listener's activity (notifications received, sync plan, per-file syncing/synced/failed). Run it locally; use the same env file as your cluster so the watcher resolves the listener URL.
+- **Metrics / dashboards:** scrape `GET /metrics` with Prometheus. This
+  supersedes the old manual watch loop.
+- **Alerting:** a recommended Prometheus rules file ships at
+  [`deploy/alerts.yml`](../deploy/alerts.yml) — load it into Prometheus
+  (`rule_files:`) and point it at Alertmanager. It covers the otherwise-silent
+  failure modes: listener down, parked (dead-lettered) files, subscription-renewal
+  failures, retry backlog, sync errors, throttle storms, and a stale-sync alert
+  (tune its threshold above `GRAPH_FULL_SYNC_MINUTES`).
+- **Structured logs:** the listener emits JSON logs to stderr (Fly captures them;
+  ship them anywhere). Control with `LOG_LEVEL` (debug|info|warn|error, default
+  info) and `LOG_FORMAT` (json|text, default json). The in-memory `/activity`
+  ring buffer remains for quick local tailing.
+- **Debugging a specific file:** `curl "https://<listener>/syncs?status=failure"`
+  (or `?status=dead` for parked files).
+- **Live tail (optional):** `./connector watch https://<listener>` prints new
+  activity events as they happen. The listener syncs with or without it.
 
-**Run:**
-```bash
-python watch_listener.py -n 0.5 # use the GRAPH_NOTIFICATION_URL from .env
-# Or pass the listener URL directly:
-python watch_listener.py -n 0.5 https://sharepoint-joint-listener.fly.dev
-```
+## Scope & limits
 
-**Under the hood:** Polls `GET <listener_base>/activity?since=<id>` at the given interval. Prints new events as `[category] message` lines with a local timestamp: `[Graph Webhook] Received N change(s)`, the `[info] Full/Delta Sync (SharePoint → Goodmem): Started/Done` markers, the `To Add` / `To Update` / `To Remove` plan tree, per-file `[Add]/[Update]/[Remove] <path> (<file_id>) : Started` then `: Done`/`: Failed`, plus `[Graph Webhook] Subscribing/Subscribed/Renewing/Renewed` and `[oauth2]` token events. When idle, a single refreshing "no new activity (listener reachable)" line.
+Know these before pointing the listener at a site:
 
-**Example output:**
-```
-Watching listener activity at https://sharepoint-joint-listener.fly.dev/activity (interval: 0.5s)
-(Ctrl+C to stop)
+- **First document library only.** The listener syncs and subscribes to the
+  site's **first** drive (document library). A site with multiple libraries only
+  has its first one covered.
+- **The listener always syncs the whole drive.** `SHAREPOINT_FOLDER_PATH` scopes
+  a one-time `sync-once` to a folder, but the **listener ignores it** and syncs
+  the entire drive. It logs a warning at startup if the variable is set.
+  ⚠️ **Trap:** if you run a folder-scoped `sync-once` into a space and then start
+  the listener against that same space, the listener's startup full sync ingests
+  the *entire* drive into it. Use a dedicated space for the listener.
+- **Safety knobs** (all in [`.env.example`](../.env.example)): `SHAREPOINT_MAX_FILE_MB`
+  skips oversized files (default 100 MB); `GRAPH_MAX_DELETE_RATIO` refuses a full
+  sync that would delete an implausible share of memories (default 0.5, a guard
+  against a partial listing); `GRAPH_MAX_ITEM_ATTEMPTS` parks a permanently-failing
+  file after N tries (default 10) instead of retrying it forever;
+  `SYNC_HISTORY_RETENTION_DAYS` prunes old `/syncs` rows (default 90).
 
-Connected to listener. Waiting for activity...
+## Operations
 
-  2026-02-02 01:19:33  [Graph Webhook] Received 1 change(s)
-  2026-02-02 01:19:34  [info] Delta Sync (SharePoint → Goodmem): Started
-  2026-02-02 01:19:34  To Add
-  2026-02-02 01:19:34    (none)
-  2026-02-02 01:19:34  To Update
-  2026-02-02 01:19:34    Project/
-  2026-02-02 01:19:34      docs/
-  2026-02-02 01:19:34        └── Goodmem_just_works.docx
-  2026-02-02 01:19:34  To Remove
-  2026-02-02 01:19:34    (none)
-  2026-02-02 01:19:45  [Update] Project/docs/Goodmem_just_works.docx (01DSLNGZ2OAHMTF4SKE5BYGBMAYG6X6HMV) : Started
-  2026-02-02 01:19:46  [Update] Project/docs/Goodmem_just_works.docx (01DSLNGZ2OAHMTF4SKE5BYGBMAYG6X6HMV) : Done
-  2026-02-02 01:19:46  [info] Delta Sync (SharePoint → Goodmem): Done
-  2026-02-02 01:19:48  — no new activity (listener reachable)
-```
-
-
-**Renew subscription manually** (e.g. before expiry, or if it failed during deploy): `python listener.py create-subscription` (uses `.env`). The script will PATCH the existing subscription instead of creating a duplicate.
-
-### Maintainance tasks
-
-**Restarting a suspended listener:** If Fly.io suspends the app when idle, start the machine (not `fly apps resume`):
-```bash
-fly machine start $(fly machine list -a sharepoint-joint-listener 2>/dev/null | awk '/^[0-9a-f]{14}/ {print $1; exit}') -a sharepoint-joint-listener
-```
-
-**Manual deployment (alternative):** Generate the Fly config with `./deploy_fly_io.sh --generate-only [--org ORG] [--region R]`, then create the Fly app with `fly launch --no-deploy --name YOUR_LISTENER_APP --config fly_io.toml`, set `GRAPH_NOTIFICATION_URL=https://YOUR_LISTENER_APP.fly.dev/sync/webhook` in `.env`, run `fly secrets import < .env`, then `fly deploy`. The listener stays up for webhooks (`auto_stop_machines = 'off'`, `min_machines_running = 1`).
+- **Durable state.** The delta cursor, pending-retry sets, and the sync-history
+  SQLite DB live under `GRAPH_DELTA_TOKEN_FILE`'s directory — on Fly that's the
+  persistent `/data` volume (created by the deploy script), so they survive
+  restarts. Locally they default to the working directory.
+- **Periodic safety full-sync.** Beyond deltas, the listener runs a full
+  reconcile every `GRAPH_FULL_SYNC_MINUTES` (default = half the subscription
+  lifetime; `0` disables) to repair anything a missed notification dropped.
+- **Parked (dead-lettered) files.** A file that keeps failing (oversized once the
+  cap is raised, corrupt, or one Goodmem always marks FAILED) is parked after
+  `GRAPH_MAX_ITEM_ATTEMPTS` tries instead of being re-downloaded every sync. It
+  shows up in `GET /syncs?status=dead` and the `sharepoint_pending_dead` gauge —
+  alert on that gauge, investigate the file, and re-uploading/editing it in
+  SharePoint queues a fresh attempt.
+- **Shutdown.** On SIGTERM the listener stops accepting work and exits; an
+  in-flight Graph call may still be sleeping between retries (bounded to a couple
+  of minutes), so shutdown can briefly wait on it — process exit is the backstop.
+  This is safe: the delta cursor is saved only *after* a sync's changes are
+  applied and re-ingestion is idempotent, so a mid-sync kill is recoverable.
+- **Renew the subscription manually** (e.g. after a failed deploy):
+  `./connector create-subscription` — it renews the existing subscription
+  instead of creating a duplicate.
+- **Restart a suspended listener.** If Fly suspends the app when idle, start the
+  machine (not `fly apps resume`):
+  ```bash
+  fly machine start $(fly machine list -a <FLY_CLUSTER>-listener 2>/dev/null | awk '/^[0-9a-f]{14}/ {print $1; exit}') -a <FLY_CLUSTER>-listener
+  ```
+- **Manual deployment (alternative to the script).** Generate the Fly config
+  with `./deploy_fly_io.sh --generate-only [--org ORG] [--region R]`, then
+  `fly launch --no-deploy --name YOUR_LISTENER_APP --config fly_io.toml`, set
+  `GRAPH_NOTIFICATION_URL=https://YOUR_LISTENER_APP.fly.dev/sync/webhook` in
+  `.env`, `fly secrets import < .env`, and `fly deploy`. The listener stays up
+  for webhooks (`auto_stop_machines = 'off'`, `min_machines_running = 1`) and
+  mounts the `/data` volume for durable state.

@@ -12,6 +12,13 @@ primary_region = '{{PRIMARY_REGION}}'
 [env]
   PORT = "8080"
 
+# Durable state: the delta cursor and pending-retry sets live on this volume so
+# they survive restarts/redeploys. Single machine (min_machines_running = 1),
+# so one volume in the primary region. deploy_fly_io.sh creates it if missing.
+[mounts]
+  source = "sharepoint_state"
+  destination = "/data"
+
 [http_service]
   internal_port = 8080
   force_https = true
