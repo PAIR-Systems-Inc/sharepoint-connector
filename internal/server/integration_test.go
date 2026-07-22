@@ -111,6 +111,23 @@ func TestIntegration_ListenerMetrics(t *testing.T) {
 	if resp, err := http.Get(base + "/healthz"); err != nil || resp.StatusCode != http.StatusOK {
 		t.Errorf("healthz: err=%v status=%v", err, statusOf(resp))
 	}
+
+	// /readyz flips to 200 once the startup full sync + subscription are done
+	// (the fake now serves /subscriptions). Poll briefly for readiness.
+	ready := false
+	for i := 0; i < 40; i++ {
+		if resp, err := http.Get(base + "/readyz"); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !ready {
+		t.Error("/readyz never returned 200 after startup sync + subscription")
+	}
 	if resp, err := http.Get(base + "/activity"); err != nil || resp.StatusCode != http.StatusOK {
 		t.Errorf("activity: err=%v status=%v", err, statusOf(resp))
 	} else {

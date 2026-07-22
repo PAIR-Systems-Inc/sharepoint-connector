@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -120,6 +121,7 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	configureLogging() // structured logs to stderr (Fly logs / shippers)
 	if strings.TrimSpace(cfg.GraphClientState) == "" {
 		return errors.New("GRAPH_CLIENT_STATE is required for serve")
 	}
@@ -279,6 +281,29 @@ func floatOr(s string, def float64) float64 {
 		return f
 	}
 	return def
+}
+
+// configureLogging installs the process-wide structured logger for the listener,
+// honoring LOG_LEVEL (debug|info|warn|error, default info) and LOG_FORMAT
+// (json|text, default json). JSON suits log shippers; text is friendlier locally.
+func configureLogging() {
+	level := slog.LevelInfo
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "text") {
+		h = slog.NewTextHandler(os.Stderr, opts)
+	} else {
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h))
 }
 
 func usage(w *os.File) {

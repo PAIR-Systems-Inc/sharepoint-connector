@@ -143,12 +143,28 @@ Replace `listener.py` + `sync_once.py` with a single binary (e.g. `connector`):
 
 ## 2. Port strategy (de-risk the rewrite)
 
-> **Status (2026-07-14):** steps 1–3 are effectively done — behavior was pinned
+> **Status (2026-07-22):** steps 1–3 are effectively done — behavior was pinned
 > by the §0 audit, the port is complete, and the sync engine now has unit +
 > end-to-end integration tests (the living spec). Step 1/3's *Python-side*
 > characterization/differential tests were port-time scaffolding and are **not**
-> being built as a maintained suite (Python is being retired). Only step 4
-> (shadow-run → cutover, retire Python) remains.
+> being built as a maintained suite. Only step 4 (shadow-run → cutover) remains.
+>
+> **Cutover model (decided 2026-07-22).** Python is **not** an ongoing safety net
+> and is **never deployed** — it stays in the repo purely as a historical
+> reference (git). Go is the only production system. So the shadow-run is a
+> pre-prod validation of the **Go** listener, not a live Python-vs-Go parallel:
+>
+> - **Shadow-run:** run the Go listener against a real (or representative)
+>   SharePoint site for a validation window before the first tenant goes live.
+>   Pass criteria: every file reaches `COMPLETED` in `GET /syncs` with no
+>   unexpected deletes and `sharepoint_pending_dead == 0`; spot-check retrieval
+>   quality in the Go-managed space; optionally a one-time offline reference diff
+>   (`sync-once --dry-run` plan vs. the Python `sync_once.py` plan on the same
+>   fixture) as a final sanity check — Python used as a throwaway oracle for that
+>   single comparison, not as a running system.
+> - **Cutover:** the first real tenant's production Goodmem space goes live on the
+>   Go listener. No Python removal step is needed (it was never in prod); it
+>   simply stops being referenced as an oracle.
 
 The sync engine is intricate and currently **effectively untested** — porting it
 blind would be dangerous. Sequence:
@@ -243,20 +259,26 @@ memories.
 
 ## 6. Observability
 
-> **Partially un-parked (2026-07-20)** after @amin3141's review: a Prometheus
-> `/metrics` endpoint is now in. Structured logging, alerting, and `/readyz`
-> remain deferred until scale/ops needs grow.
+> **Un-parked (2026-07-22)** after @amin3141's two reviews: metrics, structured
+> logging, alerting, and `/readyz` are now all in. Only a signed image / SBOM
+> remains from this section.
 
 - **Prometheus `/metrics`:** ✅ **done** — `GET /metrics` (hand-rolled text
   exposition, no dep) exposes files added/updated/deleted/skipped, sync errors,
   full/delta sync counts, Graph throttle events (via the `OnThrottle` hook),
-  subscription-renewal success/failure, last-sync timestamp, and pending-retry
-  queue depth. Replaces the ad-hoc `watch`/`/activity` polling for monitoring.
-- **Structured logging** (JSON via `slog`) — ⏳ deferred.
-- **Alerting** on: subscription renewal failure, sustained sync failures,
-  throttle storms, queue backlog, auth/token failures — ⏳ deferred (wire in
-  Prometheus/Alertmanager off the `/metrics` above).
-- `/healthz` (liveness) ✅ done; `/readyz` (readiness) ⏳ deferred.
+  subscription-renewal success/failure, last-sync timestamp, pending-retry
+  queue depth, and `sharepoint_pending_dead` (parked items). Replaces the ad-hoc
+  `watch`/`/activity` polling for monitoring.
+- **Structured logging** (JSON via `slog`) — ✅ **done** — the listener emits
+  structured logs to stderr alongside the `/activity` ring; `LOG_LEVEL` /
+  `LOG_FORMAT` control verbosity and json-vs-text. (Native Go; the Python PoC had
+  no structured logging — an improvement, not a port.)
+- **Alerting** — ✅ **done** — a recommended Alertmanager rules file ships at
+  [`deploy/alerts.yml`](deploy/alerts.yml) covering listener-down, dead-letter,
+  renewal failure, retry backlog, sync errors, throttle storms, and stale-sync.
+  Wiring to a Prometheus/Alertmanager stack remains per-deployment.
+- `/healthz` (liveness) ✅ done; `/readyz` (readiness) ✅ **done** — `200` only
+  after the startup full sync completed and the subscription is ensured.
 - **Durable, queryable sync history** (@amin3141's ask): ✅ **done** — a
   SQLite log (`internal/store`, pure-Go `modernc.org/sqlite` so it keeps the
   `CGO_ENABLED=0` distroless build) on the `/data` volume records every per-item
@@ -315,7 +337,7 @@ Phases here are the "tiers" — **Phase/Tier 1 is the Go port + engine tests** (
 | **0. Pin behavior** | De-risk the port | Characterization tests against the Python engine (the oracle) | ✅ **Served its purpose** — the module-by-module audit (§0) pinned behavior and the integration tests are now the living spec; a codified oracle suite isn't needed (Python is being retired, not maintained) |
 | **1. Go port** | Source protection + typing | `connector` binary (`serve`/`sync-once`), Go `graph`/`goodmem`/`syncer` packages, port validated vs Python, shadow-run then cutover | ✅ **Code complete** — binary + packages done, port-fidelity gaps fixed (§0), unit + end-to-end integration tests green (§3). Only the operational **shadow-run → cutover** (retire Python) remains; no ongoing Python-diff suite needed |
 | **2. Durability & resilience** | Kill SPOF / data-loss risk | Datastore-backed state + queue/workers, Graph throttling/backoff, HA (>1 instance) | ⏳ **Mostly done** — throttling/backoff ✅, pending-retry ✅, durable state on a volume ✅ (single-tenant); worker queue + HA (>1 instance) pending — both effectively YAGNI for one site per cluster |
-| **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Partial** — CI gate ✅, distroless image ✅, `/healthz` ✅, Prometheus `/metrics` ✅ (§6); structured logs / alerting / `/readyz` / signed image still pending |
+| **3. Observability & CI/CD** | Operable & safe to change | Structured logs + metrics + alerts, health probes, full CI (test/lint/scan), minimal signed image | ⏳ **Nearly complete** — CI gate ✅, distroless image ✅, `/healthz` ✅, `/readyz` ✅, Prometheus `/metrics` ✅, structured logs (`slog`) ✅, recommended alert rules ✅, durable `/syncs` ✅ (§6); only a **signed image / SBOM** still pending |
 | **4. Hardening & ops** | Productization | Secret/scope tightening, binary hardening (`-s -w`/garble), multi-tenant onboarding automation, runbooks, backups | ❌ **Not started** |
 
 **Top 3 if nothing else:** (1) tests around the sync engine, (2) the Go

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fury.io/pairsys/goodmem"
@@ -48,6 +49,7 @@ type Listener struct {
 	baseCtx   context.Context
 	syncMu    sync.Mutex    // serialize full/delta syncs
 	notify    chan struct{} // 1-buffered: coalesces notification bursts into one delta run
+	ready     atomic.Bool   // true once the startup full sync + subscription are done (GET /readyz)
 }
 
 // opts builds the sync Options for this listener (durable retry, page images,
@@ -76,6 +78,7 @@ func (l *Listener) Run(ctx context.Context) error {
 	l.notify = make(chan struct{}, 1)
 	l.server = New(l.ClientState, func(int) { l.signal() })
 	l.server.Metrics.SetPendingFn(l.retry.Counts)
+	l.server.SetReadyFn(l.ready.Load)
 	l.server.Log("info", "durable state dir: "+stateDir+" (delta cursor + pending-retry sets)")
 	if l.IgnoredFolderPath != "" {
 		l.server.Log("warn", "SHAREPOINT_FOLDER_PATH="+l.IgnoredFolderPath+" is ignored by the listener; it syncs the whole drive (folder scoping applies only to sync-once)")
@@ -161,6 +164,7 @@ func (l *Listener) startup() {
 		l.server.Log("error", "subscription: "+err.Error())
 	} else {
 		l.server.Log("info", "subscription ready (expires "+sub.ExpirationDateTime+")")
+		l.ready.Store(true) // startup full sync done + subscription ensured → serve /readyz 200
 	}
 }
 
@@ -246,6 +250,7 @@ func (l *Listener) subscriptionLoop(ctx context.Context) {
 				}
 			} else {
 				l.server.Log("info", "subscription renewed (expires "+sub.ExpirationDateTime+")")
+				l.ready.Store(true) // recovered if the startup subscription had failed
 				retry = retryMin
 				t.Reset(normal)
 			}

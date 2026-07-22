@@ -266,6 +266,12 @@ func (g *Graph) Handler() http.Handler {
 		case p == "/sites/site1/drives":
 			fmt.Fprint(w, `{"value":[{"id":"drive1","name":"Docs"}]}`)
 
+		case p == "/subscriptions" && r.Method == http.MethodGet:
+			fmt.Fprint(w, `{"value":[]}`) // no existing subscriptions → EnsureSubscription creates one
+
+		case p == "/subscriptions" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"id":"sub-1","resource":"sites/site1/drives/drive1/root","expirationDateTime":"2099-01-01T00:00:00.000Z"}`)
+
 		case strings.HasPrefix(p, "/download/"):
 			id := strings.TrimPrefix(p, "/download/")
 			if f := g.files[id]; f != nil {

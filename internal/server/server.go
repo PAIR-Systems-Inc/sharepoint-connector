@@ -5,8 +5,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -40,6 +42,12 @@ type Server struct {
 	// History, if set, backs GET /syncs (durable sync-history query).
 	History SyncHistory
 
+	// readyFn reports readiness for GET /readyz (nil = always ready).
+	readyFn func() bool
+
+	// logger emits structured logs (in addition to the in-memory /activity ring).
+	logger *slog.Logger
+
 	mu       sync.Mutex
 	activity []Event
 	maxLog   int
@@ -55,8 +63,13 @@ type Event struct {
 // New returns a Server. onNotify is called (in a goroutine) for each validated
 // notification; pass nil to only record activity.
 func New(clientState string, onNotify Notifier) *Server {
-	return &Server{clientState: clientState, onNotify: onNotify, maxLog: 500, Metrics: NewMetrics()}
+	return &Server{clientState: clientState, onNotify: onNotify, maxLog: 500, Metrics: NewMetrics(), logger: slog.Default()}
 }
+
+// SetReadyFn registers a readiness predicate for GET /readyz. Until it returns
+// true (e.g. the startup sync completed and the subscription is ensured),
+// /readyz answers 503 so a load balancer won't route to a not-yet-ready listener.
+func (s *Server) SetReadyFn(fn func() bool) { s.readyFn = fn }
 
 // Handler returns the HTTP routes: the Graph webhook, health, activity, metrics.
 func (s *Server) Handler() http.Handler {
@@ -64,6 +77,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sync/webhook", s.handleWebhook)
 	mux.HandleFunc("/activity", s.handleActivity)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if s.readyFn == nil || s.readyFn() {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Error(w, "not ready: startup sync/subscription not complete", http.StatusServiceUnavailable)
+	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		s.Metrics.WritePrometheus(w)
@@ -154,9 +174,26 @@ func (s *Server) Log(typ, msg string) { s.log(typ, msg) }
 
 func (s *Server) log(typ, msg string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.activity = append(s.activity, Event{TS: time.Now().UTC(), Type: typ, Message: msg})
 	if len(s.activity) > s.maxLog {
 		s.activity = s.activity[len(s.activity)-s.maxLog:]
+	}
+	s.mu.Unlock()
+	// Also emit a structured log so operational events reach stdout/stderr (Fly
+	// logs, log shippers), not only the in-memory /activity ring.
+	if s.logger != nil {
+		s.logger.Log(context.Background(), levelForType(typ), msg, "event", typ)
+	}
+}
+
+// levelForType maps an activity event type to an slog level.
+func levelForType(typ string) slog.Level {
+	switch typ {
+	case "error":
+		return slog.LevelError
+	case "warn", "rejected":
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
 	}
 }
