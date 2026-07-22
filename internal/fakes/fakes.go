@@ -135,6 +135,7 @@ func (f *Goodmem) Handler() http.Handler {
 // File is a fake SharePoint drive file. Parent "" = drive root, else a folder name.
 type File struct {
 	ID, Name, Mime, Modified, Content, Parent string
+	Size                                      int64 // reported drive size; 0 = len(Content)
 }
 
 // Delta is one scripted delta item (a change, or a deletion).
@@ -192,10 +193,15 @@ func (g *Graph) DeltaLink() string {
 }
 
 func (g *Graph) fileJSON(f *File) map[string]any {
+	size := f.Size
+	if size == 0 {
+		size = int64(len(f.Content))
+	}
 	return map[string]any{
 		"id":                           f.ID,
 		"name":                         f.Name,
 		"lastModifiedDateTime":         f.Modified,
+		"size":                         size,
 		"@microsoft.graph.downloadUrl": g.base + "/download/" + f.ID,
 		"file":                         map[string]any{"mimeType": f.Mime},
 	}

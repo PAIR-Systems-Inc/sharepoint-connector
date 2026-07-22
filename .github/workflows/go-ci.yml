@@ -18,10 +18,11 @@ concurrency:
 
 env:
   # The Goodmem SDK is served from the pairsys Gemfury proxy (public-read).
-  # GOSUMDB=off because that private module is not in the public checksum DB;
-  # GOTOOLCHAIN=local pins the setup-go toolchain (no auto-upgrade downloads).
+  # GONOSUMDB scopes the checksum-DB bypass to that one module (it isn't in the
+  # public sum DB) so every other dependency stays verified; GOTOOLCHAIN=local
+  # pins the setup-go toolchain (no auto-upgrade downloads).
   GOPROXY: https://go-proxy.fury.io/pairsys/,https://proxy.golang.org,direct
-  GOSUMDB: "off"
+  GONOSUMDB: "fury.io/*"
   GOTOOLCHAIN: local
 
 jobs:

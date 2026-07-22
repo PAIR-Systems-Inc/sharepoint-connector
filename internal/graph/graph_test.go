@@ -51,6 +51,44 @@ func TestFormatFileInfo(t *testing.T) {
 
 // TestGetSiteID_401Retry verifies the client-credentials flow and the
 // re-authenticate-once-on-401 retry (ported from _request in the Python).
+// TestListFilesFolderErrorPropagates: a failure listing a subfolder must abort
+// the whole listing (returning an error), not silently drop that subtree — which
+// would later be diffed as orphaned memories and mass-deleted.
+func TestListFilesFolderErrorPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		switch {
+		case strings.HasSuffix(p, "/oauth2/v2.0/token"):
+			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
+		case strings.HasSuffix(p, "/root/children"):
+			// One file at the root plus one subfolder to descend into.
+			fmt.Fprint(w, `{"value":[
+				{"id":"f1","name":"top.pdf","file":{"mimeType":"application/pdf"},"@microsoft.graph.downloadUrl":"http://x/f1"},
+				{"id":"sub","name":"Sub","folder":{"childCount":3}}
+			]}`)
+		case strings.HasSuffix(p, "/items/sub/children"):
+			// The subfolder listing fails transiently (e.g. a 429/5xx storm).
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":{"code":"serverError"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient("cid", "tid", "secret", "https://contoso.sharepoint.com/sites/Test",
+		WithBaseURLs(srv.URL, srv.URL))
+	c.maxRetries = 0 // fail fast, no backoff sleeps
+
+	files, err := c.ListFiles("drive1", "", true, "site1")
+	if err == nil {
+		t.Fatalf("expected an error when a subfolder listing fails; got %d files and nil error", len(files))
+	}
+	if !strings.Contains(err.Error(), "Sub") {
+		t.Errorf("error should name the failing folder, got: %v", err)
+	}
+}
+
 func TestGetSiteID_401Retry(t *testing.T) {
 	var tokenCalls, siteCalls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

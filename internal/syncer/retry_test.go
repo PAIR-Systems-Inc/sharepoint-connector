@@ -13,61 +13,68 @@ import (
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
 )
 
+// pending reports whether id is present in a pending set (attempt count ignored).
+func pending(set map[string]int, id string) bool {
+	_, ok := set[id]
+	return ok
+}
+
 // TestRetrierPendingSets covers the outcome → pending-set state machine and
 // persistence across Retrier instances.
 func TestRetrierPendingSets(t *testing.T) {
 	dir := t.TempDir()
-	r := NewRetrier(dir)
+	r := NewRetrier(dir, 0) // default max attempts
 
 	// Transient add failure queues a retry-as-add; a later success clears it.
 	r.recordAdd("f1", resTransient)
-	if !r.loadAdd()["f1"] {
+	if !pending(r.loadAdd(), "f1") {
 		t.Fatal("f1 should be pending-add after transient failure")
 	}
 	r.recordAdd("f1", resOK)
-	if r.loadAdd()["f1"] {
+	if pending(r.loadAdd(), "f1") {
 		t.Fatal("f1 should be cleared after success")
 	}
 
 	// A create that came back FAILED re-queues as an UPDATE (delete-then-add),
 	// not a plain add.
 	r.recordAdd("f2", resFailedProcessing)
-	if r.loadAdd()["f2"] {
+	if pending(r.loadAdd(), "f2") {
 		t.Error("f2 should not be pending-add")
 	}
-	if !r.loadUpdate()["f2"] {
+	if !pending(r.loadUpdate(), "f2") {
 		t.Error("f2 should be pending-update after FAILED processing")
 	}
 
 	// Update failure queues pending-update; success clears it.
 	r.recordUpdate("f3", resTransient)
-	if !r.loadUpdate()["f3"] {
+	if !pending(r.loadUpdate(), "f3") {
 		t.Fatal("f3 should be pending-update")
 	}
 	r.recordUpdate("f3", resOK)
-	if r.loadUpdate()["f3"] {
+	if pending(r.loadUpdate(), "f3") {
 		t.Fatal("f3 should be cleared")
 	}
 
 	// Remove failure/success.
 	r.recordRemove("f4", false)
-	if !r.loadRemove()["f4"] {
+	if !pending(r.loadRemove(), "f4") {
 		t.Fatal("f4 should be pending-remove after failure")
 	}
 	r.recordRemove("f4", true)
-	if r.loadRemove()["f4"] {
+	if pending(r.loadRemove(), "f4") {
 		t.Fatal("f4 should be cleared after success")
 	}
 
-	// Skipped is a no-op (never queued).
+	// Skipped clears any pending entry (permanent skip: unsupported/oversized).
+	r.recordAdd("f6", resTransient)
 	r.recordAdd("f6", resSkipped)
-	if r.loadAdd()["f6"] {
-		t.Error("skipped item must not be queued")
+	if pending(r.loadAdd(), "f6") {
+		t.Error("skipped item must be discarded from pending-add")
 	}
 
 	// Persistence: a fresh Retrier on the same dir sees the surviving entry.
 	r.recordAdd("f5", resTransient)
-	if !NewRetrier(dir).loadAdd()["f5"] {
+	if !pending(NewRetrier(dir, 0).loadAdd(), "f5") {
 		t.Fatal("pending-add did not persist across Retrier instances")
 	}
 
@@ -78,6 +85,45 @@ func TestRetrierPendingSets(t *testing.T) {
 	rn.recordRemove("x", false)
 	if rn.loadAdd() != nil {
 		t.Error("nil Retrier loadAdd should be nil")
+	}
+}
+
+// TestDeadLetter verifies an item is parked after maxAttempts transient failures
+// (removed from the pending set, added to the dead set, one event emitted), and
+// that a later success revives it out of the dead set.
+func TestDeadLetter(t *testing.T) {
+	dir := t.TempDir()
+	var events []SyncEvent
+	r := NewRetrier(dir, 3)
+	r.Sink = func(e SyncEvent) { events = append(events, e) }
+
+	// Three transient failures: attempts 1, 2, then park on 3.
+	r.recordAdd("bad", resTransient)
+	r.recordAdd("bad", resTransient)
+	if !pending(r.loadAdd(), "bad") {
+		t.Fatal("bad should still be pending after 2 attempts")
+	}
+	if got := r.loadAdd()["bad"]; got != 2 {
+		t.Fatalf("attempt count = %d, want 2", got)
+	}
+	r.recordAdd("bad", resTransient) // 3rd attempt → dead-letter
+
+	if pending(r.loadAdd(), "bad") {
+		t.Error("bad should be removed from pending-add once parked")
+	}
+	_, _, _, dead := r.Counts()
+	if dead != 1 {
+		t.Errorf("dead count = %d, want 1", dead)
+	}
+	if len(events) != 1 || events[0].Status != "dead" || events[0].FileID != "bad" {
+		t.Errorf("expected one dead-letter event for 'bad', got %+v", events)
+	}
+
+	// The file starts working again (e.g. after an edit): a success clears it from
+	// the dead set too.
+	r.recordAdd("bad", resOK)
+	if _, _, _, dead := r.Counts(); dead != 0 {
+		t.Errorf("dead count after revival = %d, want 0", dead)
 	}
 }
 
@@ -113,7 +159,7 @@ func TestPollStatus(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := NewRetrier(t.TempDir())
+			r := NewRetrier(t.TempDir(), 0)
 			r.pollMaxAttempts = tc.maxAttempts
 			r.sleep = func(context.Context, time.Duration) {} // no real waiting
 			if got := r.pollStatus(context.Background(), gmc, "mem-1"); got != tc.want {
@@ -140,12 +186,12 @@ func TestMergeAndConflicts(t *testing.T) {
 		},
 	}
 	dir := t.TempDir()
-	r := NewRetrier(dir)
+	r := NewRetrier(dir, 0)
 	// Seed pending sets: an add that still exists, an add that's 404-gone, and a
 	// remove that conflicts with a live delta add of the same file.
-	r.addAdd("keep")
-	r.addAdd("gone")
-	r.addRemove("conflict")
+	r.recordAdd("keep", resTransient)
+	r.recordAdd("gone", resTransient)
+	r.recordRemove("conflict", false)
 
 	deltaAdd := []graph.FileInfo{{ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadURL: "http://x/c"}}
 	adds, updates, removes := r.merge(getter, "drive1", deltaAdd, nil, nil)
@@ -157,10 +203,10 @@ func TestMergeAndConflicts(t *testing.T) {
 	if hasFileID(adds, "gone") {
 		t.Error("'gone' (404) must not be added")
 	}
-	if r.loadAdd()["gone"] {
+	if pending(r.loadAdd(), "gone") {
 		t.Error("'gone' should be discarded from pending-add")
 	}
-	if !r.loadAdd()["keep"] {
+	if !pending(r.loadAdd(), "keep") {
 		t.Error("'keep' should remain pending until its ingest succeeds")
 	}
 	// Conflict: 'conflict' is a live add AND a pending remove → file exists, so
@@ -168,7 +214,7 @@ func TestMergeAndConflicts(t *testing.T) {
 	if containsStr(removes, "conflict") {
 		t.Error("'conflict' should be removed from the remove list (file exists)")
 	}
-	if r.loadRemove()["conflict"] {
+	if pending(r.loadRemove(), "conflict") {
 		t.Error("pending-remove for 'conflict' should be discarded")
 	}
 	if !hasFileID(adds, "conflict") {

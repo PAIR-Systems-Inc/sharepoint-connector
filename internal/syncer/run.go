@@ -32,6 +32,8 @@ type Options struct {
 	FolderPath        string    // scope the full-sync listing to this folder; "" = whole drive
 	ExtractPageImages bool      // hint Goodmem to extract page images (e.g. PDF page screenshots)
 	DryRun            bool      // compute the plan without mutating Goodmem (full sync only)
+	MaxFileBytes      int64     // skip files larger than this before downloading (0 = no cap)
+	MaxDeleteRatio    float64   // refuse a full sync deleting > this fraction of memories (0 = disabled)
 	Retry             *Retrier  // listener durable retry + status polling; nil = one-shot CLI (no pending sets, no polling)
 	Sink              EventSink // per-item outcome sink for durable sync history; nil = discard
 }
@@ -67,12 +69,13 @@ func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID 
 		return res, nil
 	}
 
-	// Guard: if SharePoint returned zero files but Goodmem has memories, this is
-	// almost always a transient Graph/auth failure (e.g. an expired token mid-run),
-	// not a genuinely empty site — and applying the plan would delete every
-	// memory. Refuse, matching listener.py's mass-delete guard.
-	if refuseMassDelete(len(files), len(memIDs)) {
-		return res, fmt.Errorf("refusing to apply: SharePoint returned 0 files but Goodmem has %d memories (likely a transient Graph/auth failure); skipping to avoid deleting everything", len(memIDs))
+	// Guard against a partial/failed listing wiping memories: refuse the apply if
+	// SharePoint returned zero files while Goodmem is non-empty (a transient
+	// Graph/auth failure), or if the plan would delete an implausibly large share
+	// of the space (a listing that silently dropped a subtree). Either way the
+	// next successful sync applies the real change.
+	if reason := refuseMassDelete(len(files), len(memIDs), len(plan.Delete), opts.MaxDeleteRatio); reason != "" {
+		return res, fmt.Errorf("refusing to apply full sync: %s", reason)
 	}
 
 	byID := make(map[string]graph.FileInfo, len(files))
@@ -105,11 +108,29 @@ func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID 
 	return res, nil
 }
 
-// refuseMassDelete reports whether a full-sync apply should be refused because
-// SharePoint returned no files while Goodmem has memories — a likely transient
-// Graph/auth failure that would otherwise delete every memory.
-func refuseMassDelete(nFiles, nMemories int) bool {
-	return nFiles == 0 && nMemories > 0
+// massDeleteFloor is the number of deletes always allowed regardless of ratio,
+// so small spaces (where a legitimate change can be a large fraction) are not
+// blocked by the proportional guard.
+const massDeleteFloor = 10
+
+// refuseMassDelete returns a non-empty reason when a full-sync apply should be
+// refused as a likely-transient anomaly rather than a genuine change:
+//
+//   - zero files listed while Goodmem is non-empty — a transient Graph/auth
+//     failure that would otherwise delete every memory; or
+//   - the plan would delete more than maxDeleteRatio of all memories (and more
+//     than massDeleteFloor) — a listing that silently dropped a subtree.
+//
+// maxDeleteRatio <= 0 disables the proportional check. Set it to 1 (or higher)
+// to allow a genuinely large deletion through.
+func refuseMassDelete(nFiles, nMemories, nDelete int, maxDeleteRatio float64) string {
+	if nFiles == 0 && nMemories > 0 {
+		return fmt.Sprintf("SharePoint returned 0 files but Goodmem has %d memories (likely a transient Graph/auth failure); skipping to avoid deleting everything", nMemories)
+	}
+	if maxDeleteRatio > 0 && nDelete > massDeleteFloor && float64(nDelete) > maxDeleteRatio*float64(nMemories) {
+		return fmt.Sprintf("plan would delete %d of %d memories (>%.0f%%); refusing as a likely partial listing — raise GRAPH_MAX_DELETE_RATIO (e.g. 1) to override", nDelete, nMemories, maxDeleteRatio*100)
+	}
+	return ""
 }
 
 // ingest downloads a file and (re-)creates its memory. Unsupported types and
@@ -127,6 +148,14 @@ func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Cli
 	if !IsMimeSupported(f.MimeType) || f.DownloadURL == "" {
 		res.Skipped++
 		emit("skipped", "unsupported MIME or no download URL")
+		return resSkipped
+	}
+	// Skip oversized files before downloading — Download buffers the whole file in
+	// memory, so a multi-hundred-MB file would OOM a small VM. Recorded as skipped
+	// (not queued for retry) so it does not loop forever in the pending set.
+	if opts.MaxFileBytes > 0 && f.Size > opts.MaxFileBytes {
+		res.Skipped++
+		emit("skipped", fmt.Sprintf("file size %.1f MB exceeds cap %.1f MB", float64(f.Size)/1e6, float64(opts.MaxFileBytes)/1e6))
 		return resSkipped
 	}
 	if isUpdate {

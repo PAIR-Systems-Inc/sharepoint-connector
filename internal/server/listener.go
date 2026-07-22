@@ -31,8 +31,13 @@ type Listener struct {
 	SubMinutes        int
 	FullSyncMinutes   int // periodic safety full-sync interval; <= 0 disables it
 	Port              string
-	DeltaPath         string // file holding the Graph delta link
-	ExtractPageImages bool   // hint Goodmem to extract page images
+	DeltaPath         string  // file holding the Graph delta link
+	ExtractPageImages bool    // hint Goodmem to extract page images
+	MaxItemAttempts   int     // transient failures before an item is dead-lettered
+	MaxDeleteRatio    float64 // refuse a full sync deleting > this fraction of memories
+	MaxFileBytes      int64   // skip files larger than this before downloading (0 = no cap)
+	RetentionDays     int     // prune sync history older than this many days (<= 0 disables)
+	IgnoredFolderPath string  // set when SHAREPOINT_FOLDER_PATH is configured but ignored (listener syncs whole drive)
 
 	driveID   string
 	delta     deltaStore
@@ -41,13 +46,20 @@ type Listener struct {
 	eventSink syncer.EventSink
 	server    *Server
 	baseCtx   context.Context
-	syncMu    sync.Mutex // serialize full/delta syncs
+	syncMu    sync.Mutex    // serialize full/delta syncs
+	notify    chan struct{} // 1-buffered: coalesces notification bursts into one delta run
 }
 
 // opts builds the sync Options for this listener (durable retry, page images,
-// and the sync-history sink).
+// safety limits, and the sync-history sink).
 func (l *Listener) opts() syncer.Options {
-	return syncer.Options{ExtractPageImages: l.ExtractPageImages, Retry: l.retry, Sink: l.eventSink}
+	return syncer.Options{
+		ExtractPageImages: l.ExtractPageImages,
+		MaxFileBytes:      l.MaxFileBytes,
+		MaxDeleteRatio:    l.MaxDeleteRatio,
+		Retry:             l.retry,
+		Sink:              l.eventSink,
+	}
 }
 
 // Run binds the HTTP server and blocks until ctx is cancelled.
@@ -60,10 +72,14 @@ func (l *Listener) Run(ctx context.Context) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return fmt.Errorf("create state dir %s: %w", stateDir, err)
 	}
-	l.retry = syncer.NewRetrier(stateDir)
-	l.server = New(l.ClientState, func(int) { l.onNotification() })
+	l.retry = syncer.NewRetrier(stateDir, l.MaxItemAttempts)
+	l.notify = make(chan struct{}, 1)
+	l.server = New(l.ClientState, func(int) { l.signal() })
 	l.server.Metrics.SetPendingFn(l.retry.Counts)
 	l.server.Log("info", "durable state dir: "+stateDir+" (delta cursor + pending-retry sets)")
+	if l.IgnoredFolderPath != "" {
+		l.server.Log("warn", "SHAREPOINT_FOLDER_PATH="+l.IgnoredFolderPath+" is ignored by the listener; it syncs the whole drive (folder scoping applies only to sync-once)")
+	}
 
 	// Durable, queryable sync history (SQLite on the same volume) → GET /syncs.
 	// Non-fatal: on failure the listener runs without history.
@@ -83,6 +99,9 @@ func (l *Listener) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	// Route dead-letter events to the same history sink so parked items show up in
+	// GET /syncs (set after eventSink is resolved; nil is fine — events discarded).
+	l.retry.Sink = l.eventSink
 
 	// Surface Graph throttling/backoff in the activity log + metrics.
 	l.GC.OnThrottle = func(status, attempt int, retryAfter time.Duration) {
@@ -113,8 +132,10 @@ func (l *Listener) Run(ctx context.Context) error {
 		return err
 	}
 	go l.startup()                 // full sync + delta bootstrap + create subscription
-	go l.subscriptionLoop(ctx)     // periodic renewal
+	go l.deltaWorker(ctx)          // single worker draining coalesced notifications
+	go l.subscriptionLoop(ctx)     // periodic renewal (short-backoff retry on failure)
 	go l.periodicFullSyncLoop(ctx) // periodic safety full-sync (repairs missed deltas)
+	go l.retentionLoop(ctx)        // prune old sync-history rows
 
 	srv := &http.Server{Handler: l.server.Handler()}
 	go func() {
@@ -143,12 +164,26 @@ func (l *Listener) startup() {
 	}
 }
 
-// fullSyncLocked runs a full sync and re-bootstraps the delta link, serialized
-// against other syncs. tag labels the activity log ("startup" / "periodic").
+// fullSyncLocked acquires the sync lock and runs a full sync + delta
+// re-bootstrap. tag labels the activity log ("startup" / "periodic").
 func (l *Listener) fullSyncLocked(tag string) {
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
+	l.runFull(tag)
+}
+
+// runFull performs a full sync and advances the delta cursor. Caller must hold
+// syncMu. Two correctness rules:
+//
+//   - The cursor is captured BEFORE listing, so a change that lands mid-sync
+//     (after the listing, before the token) is caught by the next delta rather
+//     than falling between the full sync and all future deltas.
+//   - The cursor is advanced only when the full sync SUCCEEDED. On failure the
+//     old link is kept so its window is retried; resetting to "now" on a failed
+//     sync would silently skip every change in between until the next reconcile.
+func (l *Listener) runFull(tag string) error {
 	l.server.Log("info", "["+tag+"] full sync starting")
+	_, preLink, derr := l.GC.DriveDelta(l.driveID, "", true)
 	res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, l.opts())
 	if err != nil {
 		l.server.Log("error", "["+tag+"] full sync: "+err.Error())
@@ -156,11 +191,12 @@ func (l *Listener) fullSyncLocked(tag string) {
 		l.server.Log("info", fmt.Sprintf("[%s] full sync done: +%d ~%d -%d (skipped %d)", tag, res.Added, res.Updated, res.Deleted, res.Skipped))
 	}
 	l.server.Metrics.RecordSync("full", res)
-	if _, link, err := l.GC.DriveDelta(l.driveID, "", true); err == nil && link != "" {
-		if err := l.delta.save(link); err == nil {
+	if err == nil && derr == nil && preLink != "" {
+		if serr := l.delta.save(preLink); serr == nil {
 			l.server.Log("info", "["+tag+"] delta link saved")
 		}
 	}
+	return err
 }
 
 // periodicFullSyncLoop runs a safety full sync every FullSyncMinutes to reconcile
@@ -185,10 +221,15 @@ func (l *Listener) periodicFullSyncLoop(ctx context.Context) {
 	}
 }
 
-// subscriptionLoop renews the subscription roughly every half-lifetime.
+// subscriptionLoop renews the subscription roughly every half-lifetime, but on a
+// failed renewal retries on a short exponential backoff instead of waiting the
+// full half-lifetime — otherwise a single failed renewal isn't retried until
+// almost exactly expiry, and two in a row let the subscription lapse.
 func (l *Listener) subscriptionLoop(ctx context.Context) {
-	interval := time.Duration(max(l.SubMinutes/2, 20)) * time.Minute
-	t := time.NewTicker(interval)
+	normal := time.Duration(max(l.SubMinutes/2, 20)) * time.Minute
+	const retryMin, retryMax = 2 * time.Minute, 15 * time.Minute
+	retry := retryMin
+	t := time.NewTimer(normal)
 	defer t.Stop()
 	for {
 		select {
@@ -198,31 +239,53 @@ func (l *Listener) subscriptionLoop(ctx context.Context) {
 			sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes)
 			l.server.Metrics.RecordRenewal(err == nil)
 			if err != nil {
-				l.server.Log("error", "subscription renew: "+err.Error())
+				l.server.Log("error", fmt.Sprintf("subscription renew failed: %v; retrying in %s", err, retry))
+				t.Reset(retry)
+				if retry *= 2; retry > retryMax {
+					retry = retryMax
+				}
 			} else {
 				l.server.Log("info", "subscription renewed (expires "+sub.ExpirationDateTime+")")
+				retry = retryMin
+				t.Reset(normal)
 			}
 		}
 	}
 }
 
-// onNotification runs a delta sync (serialized). On an expired delta token it
-// falls back to a full sync and re-bootstraps the delta link.
-func (l *Listener) onNotification() {
+// signal requests a delta sync. The 1-buffered channel coalesces a burst of
+// notifications (e.g. a bulk upload) into at most one queued run: the in-flight
+// sync plus one follow-up that picks up everything via the delta cursor, instead
+// of thousands of serialized no-op delta calls.
+func (l *Listener) signal() {
+	select {
+	case l.notify <- struct{}{}:
+	default: // a run is already pending; this notification folds into it
+	}
+}
+
+// deltaWorker is the single consumer draining coalesced notification signals.
+func (l *Listener) deltaWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-l.notify:
+			l.runDelta()
+		}
+	}
+}
+
+// runDelta runs one delta sync (serialized). On an expired delta token it falls
+// back to a full sync, which re-bootstraps the delta link.
+func (l *Listener) runDelta() {
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
 	l.server.Log("info", "[delta] sync starting")
 	newLink, res, err := syncer.RunDelta(l.baseCtx, l.GC, l.GM, l.SpaceID, l.driveID, l.delta.load(), l.opts())
 	if err == syncer.ErrDeltaExpired {
 		l.server.Log("info", "[delta] token expired; running full sync")
-		fres, ferr := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, l.opts())
-		l.server.Metrics.RecordSync("full", fres)
-		if ferr != nil {
-			l.server.Log("error", "[delta] fallback full sync: "+ferr.Error())
-		}
-		if _, link, e := l.GC.DriveDelta(l.driveID, "", true); e == nil && link != "" {
-			_ = l.delta.save(link)
-		}
+		l.runFull("delta-fallback")
 		return
 	}
 	if err != nil {
@@ -234,6 +297,34 @@ func (l *Listener) onNotification() {
 		_ = l.delta.save(newLink)
 	}
 	l.server.Log("info", fmt.Sprintf("[delta] done: +%d ~%d -%d (skipped %d)", res.Added, res.Updated, res.Deleted, res.Skipped))
+}
+
+// retentionLoop prunes sync-history rows older than RetentionDays: once at
+// startup, then daily. Disabled when RetentionDays <= 0 or history is off.
+func (l *Listener) retentionLoop(ctx context.Context) {
+	if l.history == nil || l.RetentionDays <= 0 {
+		return
+	}
+	l.pruneHistory()
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.pruneHistory()
+		}
+	}
+}
+
+func (l *Listener) pruneHistory() {
+	cutoff := time.Now().Add(-time.Duration(l.RetentionDays) * 24 * time.Hour)
+	if n, err := l.history.Prune(cutoff); err != nil {
+		l.server.Log("error", "history prune: "+err.Error())
+	} else if n > 0 {
+		l.server.Log("info", fmt.Sprintf("history prune: removed %d record(s) older than %d days", n, l.RetentionDays))
+	}
 }
 
 // deltaStore persists the Graph delta link to a file (single-machine state;

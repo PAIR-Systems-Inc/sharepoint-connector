@@ -12,6 +12,8 @@ The connector is a single Go binary, **`connector`**, with subcommands (`sync-on
 
 **Event-triggered sync** — a long-running **listener** (`connector serve`) sits between SharePoint and Goodmem. Microsoft Graph sends it a webhook on each change; the listener pulls the delta and syncs it to Goodmem. Graph requires the listener to be **publicly reachable over HTTPS/TLS** — any host works. It exposes `/metrics` (Prometheus) and `/syncs` (a durable SQLite sync history) for monitoring; `connector watch <url>` is an optional local tool that tails the listener's `/activity` log (the listener syncs with or without it). `./deploy_fly_io.sh` is the supported way to stand this up on Fly.io: with no flag it deploys the listener (Goodmem already runs elsewhere); `--hands-free` deploys the listener and a Goodmem server together. Run `./deploy_fly_io.sh --help` to see all modes and options. (Railway support is coming.)
 
+> **Scope:** the listener syncs and subscribes to the site's **first** document library, and **always syncs the whole drive** — `SHAREPOINT_FOLDER_PATH` scopes only a one-time `sync-once`, not the listener. See [usage.md → Scope & limits](docs/usage.md#scope--limits).
+
 ## Getting started
 
 1. **Ask IT** to grant the Azure AD app permissions. Share [permission.md](docs/permission.md) with them.

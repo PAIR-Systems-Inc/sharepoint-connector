@@ -3,9 +3,11 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,12 +29,21 @@ import (
 // A create is polled until Goodmem reports COMPLETED/FAILED (or a timeout), so a
 // 200-but-later-FAILED ingest is not silently counted as success.
 //
+// Each pending item carries an attempt count; after maxAttempts transient
+// failures it is moved to a durable dead-letter set (and, if a Sink is set,
+// surfaced to the sync history) instead of being re-downloaded and re-ingested
+// forever — the unbounded retry loop the Python reference had.
+//
 // The one-shot CLI passes a nil *Retrier (Options.Retry == nil): no pending sets
 // and no polling, matching sync_once.py. All methods are nil-safe.
 type Retrier struct {
 	addPath    string
 	updatePath string
 	removePath string
+	deadPath   string
+
+	maxAttempts int       // transient failures before an item is dead-lettered
+	Sink        EventSink // optional: dead-letter events → durable sync history
 
 	pollInterval    time.Duration
 	pollMaxAttempts int
@@ -44,15 +55,21 @@ type Retrier struct {
 const (
 	defaultPollInterval    = 10 * time.Second
 	defaultPollMaxAttempts = 30 // ~5 min, matching listener.py
+	defaultMaxAttempts     = 10 // transient retries before dead-lettering an item
 )
 
-// NewRetrier stores the three pending-set files alongside dir (the same
-// directory as the delta-link file).
-func NewRetrier(dir string) *Retrier {
+// NewRetrier stores the pending-set files alongside dir (the same directory as
+// the delta-link file). maxAttempts <= 0 uses defaultMaxAttempts.
+func NewRetrier(dir string, maxAttempts int) *Retrier {
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxAttempts
+	}
 	return &Retrier{
 		addPath:         filepath.Join(dir, ".graph_pending_add"),
 		updatePath:      filepath.Join(dir, ".graph_pending_update"),
 		removePath:      filepath.Join(dir, ".graph_pending_removes"),
+		deadPath:        filepath.Join(dir, ".graph_dead"),
+		maxAttempts:     maxAttempts,
 		pollInterval:    defaultPollInterval,
 		pollMaxAttempts: defaultPollMaxAttempts,
 		sleep:           ctxSleep,
@@ -79,91 +96,132 @@ const (
 	resTransient                            // download/network/5xx/timeout → retry the same op
 )
 
-// --- pending-set persistence (newline-delimited file IDs) ---
+// --- pending-set persistence (one "id<TAB>attempts" line per item) ---
 
-func readIDSet(path string) map[string]bool {
-	set := map[string]bool{}
+// readIDSet parses a pending file into id → attempt count. Lines may be a bare
+// "id" (count 0, the pre-dead-letter format) or "id<TAB>count".
+func readIDSet(path string) map[string]int {
+	set := map[string]int{}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return set
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		if s := strings.TrimSpace(line); s != "" {
-			set[s] = true
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
+		id, cnt, hasCnt := strings.Cut(line, "\t")
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		n := 0
+		if hasCnt {
+			n, _ = strconv.Atoi(strings.TrimSpace(cnt))
+		}
+		set[id] = n
 	}
 	return set
 }
 
-func writeIDSet(path string, set map[string]bool) error {
+func writeIDSet(path string, set map[string]int) error {
 	ids := make([]string, 0, len(set))
 	for id := range set {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	return os.WriteFile(path, []byte(strings.Join(ids, "\n")), 0o600)
-}
-
-// mutate loads the set, adds or removes id, and saves — mirroring listener.py's
-// load-before-mutate so a concurrent set is never clobbered with a stale one.
-func (r *Retrier) mutate(path, id string, add bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	set := readIDSet(path)
-	if add {
-		if set[id] {
-			return
-		}
-		set[id] = true
-	} else {
-		if !set[id] {
-			return
-		}
-		delete(set, id)
+	var sb strings.Builder
+	for _, id := range ids {
+		sb.WriteString(id)
+		sb.WriteByte('\t')
+		sb.WriteString(strconv.Itoa(set[id]))
+		sb.WriteByte('\n')
 	}
-	_ = writeIDSet(path, set)
+	return os.WriteFile(path, []byte(sb.String()), 0o600)
 }
 
-func (r *Retrier) load(path string) map[string]bool {
+func (r *Retrier) load(path string) map[string]int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return readIDSet(path)
 }
 
-func (r *Retrier) addAdd(id string)     { r.mutate(r.addPath, id, true) }
-func (r *Retrier) discardAdd(id string) { r.mutate(r.addPath, id, false) }
-func (r *Retrier) loadAdd() map[string]bool {
+// discard removes id from the set at path (a no-op if absent). Used on success
+// and on a permanent skip (oversized / unsupported) so the item stops retrying.
+func (r *Retrier) discard(path, id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	set := readIDSet(path)
+	if _, ok := set[id]; !ok {
+		return
+	}
+	delete(set, id)
+	_ = writeIDSet(path, set)
+}
+
+// bump increments id's attempt count at path; once it reaches maxAttempts the id
+// is moved to the dead-letter set and (if a Sink is set) surfaced to the sync
+// history, so a permanently-failing item stops being re-downloaded every sync.
+// op labels the dead-letter event ("add"/"update"/"remove").
+func (r *Retrier) bump(path, id, op string) {
+	r.mu.Lock()
+	set := readIDSet(path)
+	n := set[id] + 1
+	dead := n >= r.maxAttempts
+	if dead {
+		delete(set, id)
+	} else {
+		set[id] = n
+	}
+	_ = writeIDSet(path, set)
+	if dead {
+		deadSet := readIDSet(r.deadPath)
+		deadSet[id] = n
+		_ = writeIDSet(r.deadPath, deadSet)
+	}
+	r.mu.Unlock()
+	if dead && r.Sink != nil {
+		r.Sink(SyncEvent{FileID: id, Op: op, Status: "dead",
+			Message: fmt.Sprintf("parked after %d failed attempts; needs operator attention", n)})
+	}
+}
+
+// undead removes id from the dead-letter set — called on a later success so a
+// file that starts working again (e.g. after an edit) leaves the parked set.
+func (r *Retrier) undead(id string) { r.discard(r.deadPath, id) }
+
+func (r *Retrier) discardAdd(id string) { r.discard(r.addPath, id); r.undead(id) }
+func (r *Retrier) loadAdd() map[string]int {
 	if r == nil {
 		return nil
 	}
 	return r.load(r.addPath)
 }
 
-func (r *Retrier) addUpdate(id string)     { r.mutate(r.updatePath, id, true) }
-func (r *Retrier) discardUpdate(id string) { r.mutate(r.updatePath, id, false) }
-func (r *Retrier) loadUpdate() map[string]bool {
+func (r *Retrier) discardUpdate(id string) { r.discard(r.updatePath, id); r.undead(id) }
+func (r *Retrier) loadUpdate() map[string]int {
 	if r == nil {
 		return nil
 	}
 	return r.load(r.updatePath)
 }
 
-func (r *Retrier) addRemove(id string)     { r.mutate(r.removePath, id, true) }
-func (r *Retrier) discardRemove(id string) { r.mutate(r.removePath, id, false) }
-func (r *Retrier) loadRemove() map[string]bool {
+func (r *Retrier) discardRemove(id string) { r.discard(r.removePath, id); r.undead(id) }
+func (r *Retrier) loadRemove() map[string]int {
 	if r == nil {
 		return nil
 	}
 	return r.load(r.removePath)
 }
 
-// Counts returns the number of file IDs currently queued in the pending add,
-// update, and remove sets (queue depth, for metrics). Nil-safe.
-func (r *Retrier) Counts() (add, update, remove int) {
+// Counts returns the current depth of the pending add/update/remove queues and
+// the dead-letter set (for metrics). Nil-safe.
+func (r *Retrier) Counts() (add, update, remove, dead int) {
 	if r == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
-	return len(r.loadAdd()), len(r.loadUpdate()), len(r.loadRemove())
+	return len(r.loadAdd()), len(r.loadUpdate()), len(r.loadRemove()), len(r.load(r.deadPath))
 }
 
 // --- outcome → pending-set bookkeeping (all nil-safe) ---
@@ -173,12 +231,13 @@ func (r *Retrier) recordAdd(fileID string, out ingestResult) {
 		return
 	}
 	switch out {
-	case resOK:
-		r.discardAdd(fileID)
+	case resOK, resSkipped:
+		r.discardAdd(fileID) // done (or a permanent skip) → stop retrying
 	case resFailedProcessing:
-		r.addUpdate(fileID) // memory may exist in a bad state → delete-then-add
+		r.discard(r.addPath, fileID)
+		r.bump(r.updatePath, fileID, "update") // memory may exist in a bad state → delete-then-add
 	case resTransient:
-		r.addAdd(fileID)
+		r.bump(r.addPath, fileID, "add")
 	}
 }
 
@@ -187,10 +246,10 @@ func (r *Retrier) recordUpdate(fileID string, out ingestResult) {
 		return
 	}
 	switch out {
-	case resOK:
+	case resOK, resSkipped:
 		r.discardUpdate(fileID)
 	case resFailedProcessing, resTransient:
-		r.addUpdate(fileID)
+		r.bump(r.updatePath, fileID, "update")
 	}
 }
 
@@ -201,7 +260,7 @@ func (r *Retrier) recordRemove(fileID string, ok bool) {
 	if ok {
 		r.discardRemove(fileID)
 	} else {
-		r.addRemove(fileID)
+		r.bump(r.removePath, fileID, "remove")
 	}
 }
 
@@ -254,7 +313,7 @@ func (r *Retrier) merge(gc fileGetter, driveID string, addFiles, updateFiles []g
 // mergeInto appends pending file IDs (not already present) to files, re-fetching
 // each from SharePoint. A file that is gone (404) or unsupported is discarded
 // from the pending set; a transient fetch failure leaves it pending.
-func (r *Retrier) mergeInto(gc fileGetter, driveID string, files []graph.FileInfo, pending map[string]bool, discard func(string)) []graph.FileInfo {
+func (r *Retrier) mergeInto(gc fileGetter, driveID string, files []graph.FileInfo, pending map[string]int, discard func(string)) []graph.FileInfo {
 	for id := range pending {
 		if hasFileID(files, id) {
 			continue

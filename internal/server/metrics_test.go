@@ -17,7 +17,7 @@ func TestMetricsExposition(t *testing.T) {
 	m.RecordThrottle()
 	m.RecordRenewal(true)
 	m.RecordRenewal(false)
-	m.SetPendingFn(func() (int, int, int) { return 5, 6, 7 })
+	m.SetPendingFn(func() (int, int, int, int) { return 5, 6, 7, 8 })
 
 	var buf bytes.Buffer
 	m.WritePrometheus(&buf)
@@ -38,6 +38,7 @@ func TestMetricsExposition(t *testing.T) {
 		"sharepoint_pending_add":                         "5",
 		"sharepoint_pending_update":                      "6",
 		"sharepoint_pending_remove":                      "7",
+		"sharepoint_pending_dead":                        "8",
 	}
 	for name, val := range want {
 		if !strings.Contains(out, "\n"+name+" "+val+"\n") {
@@ -56,6 +57,6 @@ func TestMetricsExposition(t *testing.T) {
 	mn.RecordSync("full", nil)
 	mn.RecordThrottle()
 	mn.RecordRenewal(true)
-	mn.SetPendingFn(func() (int, int, int) { return 0, 0, 0 })
+	mn.SetPendingFn(func() (int, int, int, int) { return 0, 0, 0, 0 })
 	mn.WritePrometheus(&buf)
 }

@@ -33,8 +33,8 @@ type Metrics struct {
 func NewMetrics() *Metrics { return &Metrics{} }
 
 // SetPendingFn registers a provider for the current pending-retry queue depths
-// (read at scrape time), e.g. syncer.Retrier.Counts.
-func (m *Metrics) SetPendingFn(fn func() (add, update, remove int)) {
+// and dead-letter count (read at scrape time), e.g. syncer.Retrier.Counts.
+func (m *Metrics) SetPendingFn(fn func() (add, update, remove, dead int)) {
 	if m == nil || fn == nil {
 		return
 	}
@@ -86,9 +86,9 @@ func (m *Metrics) WritePrometheus(w io.Writer) {
 	if m == nil {
 		return
 	}
-	pAdd, pUpd, pRem := 0, 0, 0
-	if fn, ok := m.pendingFn.Load().(func() (int, int, int)); ok && fn != nil {
-		pAdd, pUpd, pRem = fn()
+	pAdd, pUpd, pRem, pDead := 0, 0, 0, 0
+	if fn, ok := m.pendingFn.Load().(func() (int, int, int, int)); ok && fn != nil {
+		pAdd, pUpd, pRem, pDead = fn()
 	}
 	metrics := []struct {
 		name, typ, help string
@@ -109,6 +109,7 @@ func (m *Metrics) WritePrometheus(w io.Writer) {
 		{"sharepoint_pending_add", "gauge", "Files queued for retry as add.", int64(pAdd)},
 		{"sharepoint_pending_update", "gauge", "Files queued for retry as update (delete-then-add).", int64(pUpd)},
 		{"sharepoint_pending_remove", "gauge", "Files queued for retry as remove.", int64(pRem)},
+		{"sharepoint_pending_dead", "gauge", "Files parked after exhausting retries (need operator attention).", int64(pDead)},
 	}
 	for _, mt := range metrics {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", mt.name, mt.help, mt.name, mt.typ, mt.name, mt.val)
@@ -116,4 +117,4 @@ func (m *Metrics) WritePrometheus(w io.Writer) {
 }
 
 // compile-time check that syncer.Retrier.Counts matches the pendingFn shape.
-var _ = func(r *syncer.Retrier) { var _ func() (int, int, int) = r.Counts }
+var _ = func(r *syncer.Retrier) { var _ func() (int, int, int, int) = r.Counts }

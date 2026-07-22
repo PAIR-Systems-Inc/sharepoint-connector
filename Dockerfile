@@ -4,9 +4,11 @@
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 # The Goodmem SDK (fury.io/pairsys/goodmem) is served from Gemfury's public
-# tokenless proxy; sum.golang.org doesn't index it, so disable the sum DB.
+# tokenless proxy; sum.golang.org doesn't index it. Scope the checksum-DB bypass
+# to that module (GONOSUMDB) instead of disabling it globally (GOSUMDB=off), so
+# every other dependency is still verified against the public sum DB.
 ENV GOPROXY=https://go-proxy.fury.io/pairsys/,https://proxy.golang.org,direct \
-    GOSUMDB=off \
+    GONOSUMDB=fury.io/* \
     CGO_ENABLED=0 \
     GOOS=linux
 COPY go.mod go.sum ./

@@ -3,9 +3,43 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
 )
+
+// TestPrune verifies retention pruning removes rows older than the cutoff (and
+// only those), returning the count deleted.
+func TestPrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for _, id := range []string{"old", "new"} {
+		if err := s.Record(syncer.SyncEvent{FileID: id, Op: "add", Status: "success"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Backdate the 'old' row well before the cutoff (same package → direct SQL).
+	if _, err := s.db.Exec(`UPDATE sync_events SET ts=1000 WHERE file_id='old'`); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.Prune(time.Unix(2000, 0)) // remove anything before ts=2000
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned %d rows, want 1", n)
+	}
+	rows, _ := s.Recent(100, "")
+	if len(rows) != 1 || rows[0].FileID != "new" {
+		t.Fatalf("after prune: %+v, want only 'new'", rows)
+	}
+}
 
 // TestStore exercises the real SQLite store: record, query, filter, limit, and
 // persistence across reopen.

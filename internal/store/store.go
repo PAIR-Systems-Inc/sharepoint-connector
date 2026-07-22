@@ -87,5 +87,21 @@ func (s *Store) Recent(limit int, status string) ([]syncer.SyncRecord, error) {
 	return out, rows.Err()
 }
 
+// Prune deletes sync events older than cutoff and reclaims WAL space, so the
+// history (which shares the /data volume with the delta cursor and pending sets)
+// does not grow without bound and eventually degrade sync itself. Returns the
+// number of rows removed.
+func (s *Store) Prune(cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM sync_events WHERE ts < ?`, cutoff.Unix())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	// Checkpoint-truncate so the deleted rows' pages are actually returned to the
+	// filesystem rather than lingering in the WAL.
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return n, nil
+}
+
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }

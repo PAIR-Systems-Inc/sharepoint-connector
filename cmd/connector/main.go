@@ -83,6 +83,8 @@ func runSyncOnce(args []string) error {
 		FolderPath:        cfg.SharePointFolderPath,
 		ExtractPageImages: cfg.ExtractPageImages,
 		DryRun:            *dryRun,
+		MaxFileBytes:      int64(atoiOr(os.Getenv("SHAREPOINT_MAX_FILE_MB"), 100)) * 1024 * 1024,
+		MaxDeleteRatio:    floatOr(os.Getenv("GRAPH_MAX_DELETE_RATIO"), 0.5),
 	})
 	if err != nil {
 		return err
@@ -151,6 +153,11 @@ func runServe(args []string) error {
 		Port:              port,
 		DeltaPath:         deltaPath,
 		ExtractPageImages: cfg.ExtractPageImages,
+		MaxItemAttempts:   atoiOr(os.Getenv("GRAPH_MAX_ITEM_ATTEMPTS"), 10),
+		MaxDeleteRatio:    floatOr(os.Getenv("GRAPH_MAX_DELETE_RATIO"), 0.5),
+		MaxFileBytes:      int64(atoiOr(os.Getenv("SHAREPOINT_MAX_FILE_MB"), 100)) * 1024 * 1024,
+		RetentionDays:     atoiOr(os.Getenv("SYNC_HISTORY_RETENTION_DAYS"), 90),
+		IgnoredFolderPath: strings.TrimSpace(cfg.SharePointFolderPath),
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -263,6 +270,13 @@ func firstNonEmpty(vals ...string) string {
 func atoiOr(s string, def int) int {
 	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
 		return n
+	}
+	return def
+}
+
+func floatOr(s string, def float64) float64 {
+	if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+		return f
 	}
 	return def
 }

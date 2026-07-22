@@ -527,19 +527,25 @@ func (c *Client) ListFiles(driveID, folderPath string, recursive bool, siteID st
 			fi.RelativePath = it.Name
 			files = append(files, fi)
 		case it.Folder != nil && recursive:
-			files = append(files, c.filesFromFolder(driveID, it.ID, it.Name)...)
+			sub, err := c.filesFromFolder(driveID, it.ID, it.Name)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, sub...)
 		}
 	}
 	return files, nil
 }
 
-// filesFromFolder recursively lists files under a folder. On error it warns and
-// returns what it has (mirroring the Python reference).
-func (c *Client) filesFromFolder(driveID, folderID, parentPath string) []FileInfo {
+// filesFromFolder recursively lists files under a folder. Unlike the Python
+// reference (which warned and returned a partial listing), it propagates any
+// listing error: a full sync built on a silently-truncated listing would diff
+// the missing files as orphaned memories and delete a whole subtree, so an
+// incomplete listing must abort the sync rather than feed the diff.
+func (c *Client) filesFromFolder(driveID, folderID, parentPath string) ([]FileInfo, error) {
 	items, err := c.getChildren(fmt.Sprintf("%s/drives/%s/items/%s/children", c.graphBase, driveID, folderID))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to get files from folder %s: %v\n", folderID, err)
-		return nil
+		return nil, fmt.Errorf("list folder %q: %w", parentPath, err)
 	}
 	var files []FileInfo
 	for _, it := range items {
@@ -550,10 +556,14 @@ func (c *Client) filesFromFolder(driveID, folderID, parentPath string) []FileInf
 			fi.RelativePath = rel
 			files = append(files, fi)
 		case it.Folder != nil:
-			files = append(files, c.filesFromFolder(driveID, it.ID, rel)...)
+			sub, err := c.filesFromFolder(driveID, it.ID, rel)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, sub...)
 		}
 	}
-	return files
+	return files, nil
 }
 
 // getChildren fetches all children of an item endpoint, following pagination.
@@ -638,7 +648,9 @@ func (c *Client) DriveDelta(driveID, deltaLink string, tokenLatest bool) (items 
 }
 
 // Download fetches the bytes at a pre-authenticated @microsoft.graph.downloadUrl,
-// with the same throttle/transient retry as authenticated calls.
+// with the same throttle/transient retry as authenticated calls. It buffers the
+// whole file in memory, so callers must enforce a size ceiling (see
+// Options.MaxFileBytes) before invoking it to avoid OOMing on huge files.
 func (c *Client) Download(downloadURL string) ([]byte, error) {
 	body, status, err := c.httpDoRetry(func() (*http.Request, error) {
 		return http.NewRequest(http.MethodGet, downloadURL, nil)

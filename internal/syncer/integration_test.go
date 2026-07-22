@@ -39,7 +39,7 @@ func newHarness(t *testing.T) (*fakes.Graph, *fakes.Goodmem, *graph.Client, *goo
 		t.Fatal(err)
 	}
 	// A Retrier with no real waiting, so pending-retry / polling paths run fast.
-	r := NewRetrier(t.TempDir())
+	r := NewRetrier(t.TempDir(), 0)
 	r.pollInterval = 0
 	r.sleep = func(context.Context, time.Duration) {}
 	return fg, fm, gc, gmc, r
@@ -98,6 +98,26 @@ func TestIntegration_FullSyncLifecycle(t *testing.T) {
 	}
 	if fm.Has(memid.FromFileID("a")) {
 		t.Fatal("memory a should be deleted")
+	}
+}
+
+func TestIntegration_SizeCap(t *testing.T) {
+	fg, fm, gc, gmc, _ := newHarness(t)
+	fg.Put(fakes.File{ID: "small", Name: "s.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "S", Size: 1_000})
+	fg.Put(fakes.File{ID: "big", Name: "b.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "B", Size: 500_000_000}) // 500 MB
+
+	res, err := RunFull(context.Background(), gc, gmc, spaceID, Options{MaxFileBytes: 100 * 1024 * 1024}) // 100 MB cap
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Added != 1 || res.Skipped != 1 {
+		t.Fatalf("size cap: added=%d skipped=%d, want 1/1", res.Added, res.Skipped)
+	}
+	if !fm.Has(memid.FromFileID("small")) {
+		t.Error("small file should be ingested")
+	}
+	if fm.Has(memid.FromFileID("big")) {
+		t.Error("oversized file must be skipped, not ingested")
 	}
 }
 
@@ -187,7 +207,7 @@ func TestIntegration_PendingRetry(t *testing.T) {
 		t.Fatalf("failed create: added=%d, want 0", res.Added)
 	}
 	// Pending sets are keyed by SharePoint file ID (memories are keyed by UUID).
-	if !r.loadAdd()["a"] {
+	if !pending(r.loadAdd(), "a") {
 		t.Fatal("file a should be queued in pending-add after a failed create")
 	}
 	if fm.Count() != 0 {
@@ -204,7 +224,7 @@ func TestIntegration_PendingRetry(t *testing.T) {
 	if !fm.Has(memid.FromFileID("a")) {
 		t.Fatal("file a should be ingested on the pending retry")
 	}
-	if r.loadAdd()["a"] {
+	if pending(r.loadAdd(), "a") {
 		t.Fatal("file a should be cleared from pending-add after a successful retry")
 	}
 }
@@ -226,7 +246,7 @@ func TestIntegration_ProcessingStatusFailed(t *testing.T) {
 		t.Fatal("a FAILED create should be recorded as an error")
 	}
 	// FAILED re-queues as an update (delete-then-add) for the next sync.
-	if !r.loadUpdate()["a"] {
+	if !pending(r.loadUpdate(), "a") {
 		t.Fatal("file a should be queued in pending-update after FAILED processing")
 	}
 }

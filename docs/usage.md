@@ -80,8 +80,8 @@ The listener (`connector serve`) exposes:
 |---|---|
 | `POST /sync/webhook` | Microsoft Graph change notifications (validation handshake + `clientState` check). |
 | `GET /healthz` | Liveness probe (always `200`). |
-| `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta sync counts, Graph throttle events, subscription-renewal health, last-sync time, and pending-retry queue depth. Point Prometheus/Grafana here. |
-| `GET /syncs` | **Durable sync history** (SQLite): one JSON record per item — `file_id`, `file_name`, `memory_id`, `space_id`, `op`, `status`, `message`, `ts`. Query params: `?limit=100&status=failure`. Great for "did file X sync, and why did it fail?". |
+| `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta sync counts, Graph throttle events, subscription-renewal health, last-sync time, pending-retry queue depth, and `sharepoint_pending_dead` (items parked after exhausting retries — alert on this). Point Prometheus/Grafana here. |
+| `GET /syncs` | **Durable sync history** (SQLite): one JSON record per item — `file_id`, `file_name`, `memory_id`, `space_id`, `op`, `status`, `message`, `ts`. `status` is `success`, `failure`, `skipped`, or `dead` (parked — see below). Query params: `?limit=100&status=failure`. Great for "did file X sync, and why did it fail?". |
 | `GET /activity` | In-memory recent-events log (what `connector watch` polls). |
 
 ## Monitoring
@@ -92,6 +92,26 @@ The listener (`connector serve`) exposes:
 - **Live tail (optional):** `./connector watch https://<listener>` prints new
   activity events as they happen. The listener syncs with or without it.
 
+## Scope & limits
+
+Know these before pointing the listener at a site:
+
+- **First document library only.** The listener syncs and subscribes to the
+  site's **first** drive (document library). A site with multiple libraries only
+  has its first one covered.
+- **The listener always syncs the whole drive.** `SHAREPOINT_FOLDER_PATH` scopes
+  a one-time `sync-once` to a folder, but the **listener ignores it** and syncs
+  the entire drive. It logs a warning at startup if the variable is set.
+  ⚠️ **Trap:** if you run a folder-scoped `sync-once` into a space and then start
+  the listener against that same space, the listener's startup full sync ingests
+  the *entire* drive into it. Use a dedicated space for the listener.
+- **Safety knobs** (all in [`.env.example`](../.env.example)): `SHAREPOINT_MAX_FILE_MB`
+  skips oversized files (default 100 MB); `GRAPH_MAX_DELETE_RATIO` refuses a full
+  sync that would delete an implausible share of memories (default 0.5, a guard
+  against a partial listing); `GRAPH_MAX_ITEM_ATTEMPTS` parks a permanently-failing
+  file after N tries (default 10) instead of retrying it forever;
+  `SYNC_HISTORY_RETENTION_DAYS` prunes old `/syncs` rows (default 90).
+
 ## Operations
 
 - **Durable state.** The delta cursor, pending-retry sets, and the sync-history
@@ -101,6 +121,17 @@ The listener (`connector serve`) exposes:
 - **Periodic safety full-sync.** Beyond deltas, the listener runs a full
   reconcile every `GRAPH_FULL_SYNC_MINUTES` (default = half the subscription
   lifetime; `0` disables) to repair anything a missed notification dropped.
+- **Parked (dead-lettered) files.** A file that keeps failing (oversized once the
+  cap is raised, corrupt, or one Goodmem always marks FAILED) is parked after
+  `GRAPH_MAX_ITEM_ATTEMPTS` tries instead of being re-downloaded every sync. It
+  shows up in `GET /syncs?status=dead` and the `sharepoint_pending_dead` gauge —
+  alert on that gauge, investigate the file, and re-uploading/editing it in
+  SharePoint queues a fresh attempt.
+- **Shutdown.** On SIGTERM the listener stops accepting work and exits; an
+  in-flight Graph call may still be sleeping between retries (bounded to a couple
+  of minutes), so shutdown can briefly wait on it — process exit is the backstop.
+  This is safe: the delta cursor is saved only *after* a sync's changes are
+  applied and re-ingestion is idempotent, so a mid-sync kill is recoverable.
 - **Renew the subscription manually** (e.g. after a failed deploy):
   `./connector create-subscription` — it renews the existing subscription
   instead of creating a duplicate.
