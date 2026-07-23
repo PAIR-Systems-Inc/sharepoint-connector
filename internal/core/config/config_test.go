@@ -30,16 +30,23 @@ func TestValidateSyncBySource(t *testing.T) {
 		t.Errorf("sharepoint with full config should validate: %v", cfg.ValidateSync())
 	}
 
-	// gdrive needs GDRIVE_DRIVE_ID + a service-account key, not Azure.
+	// gdrive needs GDRIVE_DRIVE_ID (not Azure). The service-account key is optional
+	// — without it the source falls back to Application Default Credentials.
 	t.Setenv("SOURCE", "gdrive")
 	cfg, _ := Load("")
-	if err := cfg.ValidateSync(); err == nil || !strings.Contains(err.Error(), "GDRIVE") {
-		t.Errorf("gdrive without drive/key should fail on GDRIVE_*, got: %v", err)
+	if err := cfg.ValidateSync(); err == nil || !strings.Contains(err.Error(), "GDRIVE_DRIVE_ID") {
+		t.Errorf("gdrive without drive id should fail on GDRIVE_DRIVE_ID, got: %v", err)
 	}
 	t.Setenv("GDRIVE_DRIVE_ID", "0ABC")
-	t.Setenv("GDRIVE_SA_JSON", `{"client_email":"x","private_key":"y"}`)
 	if cfg, _ := Load(""); cfg.ValidateSync() != nil {
-		t.Errorf("gdrive with drive+key should validate: %v", cfg.ValidateSync())
+		t.Errorf("gdrive with just the drive id should validate (ADC fallback): %v", cfg.ValidateSync())
+	}
+	if cfg, _ := Load(""); cfg.HasServiceAccount() {
+		t.Error("HasServiceAccount should be false with no GDRIVE_SA_JSON")
+	}
+	t.Setenv("GDRIVE_SA_JSON", `{"client_email":"x","private_key":"y"}`)
+	if cfg, _ := Load(""); !cfg.HasServiceAccount() {
+		t.Error("HasServiceAccount should be true with GDRIVE_SA_JSON set")
 	}
 
 	// An unknown source is rejected.

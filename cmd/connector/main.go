@@ -275,11 +275,20 @@ func loadConfig(envFile string) (*config.Config, error) {
 func buildSource(ctx context.Context, cfg *config.Config, folderPath string) (source.Source, error) {
 	switch cfg.Source {
 	case "gdrive":
-		sa, err := cfg.ServiceAccountJSON()
-		if err != nil {
-			return nil, err
+		var (
+			c   *gdrive.Client
+			err error
+		)
+		if cfg.HasServiceAccount() {
+			var sa []byte
+			if sa, err = cfg.ServiceAccountJSON(); err != nil {
+				return nil, err
+			}
+			c, err = gdrive.NewWithServiceAccount(ctx, sa, cfg.GDriveDriveID)
+		} else {
+			// No key configured — use Application Default Credentials.
+			c, err = gdrive.NewWithADC(ctx, cfg.GDriveDriveID)
 		}
-		c, err := gdrive.NewWithServiceAccount(ctx, sa, cfg.GDriveDriveID)
 		if err != nil {
 			return nil, fmt.Errorf("gdrive client: %w", err)
 		}

@@ -78,6 +78,15 @@ func NewWithServiceAccount(ctx context.Context, serviceAccountJSON []byte, drive
 	)
 }
 
+// NewWithADC builds a client using Application Default Credentials — a local
+// `gcloud auth application-default login` (with Drive scope), or a GCP metadata
+// server on a GCP host. Useful for local dev and where org policy forbids
+// downloadable service-account keys. The identity must be a member of the Shared
+// Drive. Read-only scope.
+func NewWithADC(ctx context.Context, driveID string) (*Client, error) {
+	return New(ctx, driveID, option.WithScopes(drive.DriveReadonlyScope))
+}
+
 func toFile(f *drive.File) *DriveFile {
 	return &DriveFile{
 		ID: f.Id, Name: f.Name, MimeType: f.MimeType,

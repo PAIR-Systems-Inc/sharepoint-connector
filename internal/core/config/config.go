@@ -95,6 +95,13 @@ func sourceFromEnv() string {
 	return s
 }
 
+// HasServiceAccount reports whether a Google service-account key is configured
+// (inline or by file). When false, the gdrive source falls back to Application
+// Default Credentials (local `gcloud auth application-default login` / GCP host).
+func (c *Config) HasServiceAccount() bool {
+	return strings.TrimSpace(c.GDriveServiceAccount) != "" || strings.TrimSpace(c.GDriveServiceAccountFile) != ""
+}
+
 // ServiceAccountJSON returns the Google service-account key bytes, from the
 // inline GDRIVE_SA_JSON if set, else the file at GDRIVE_SA_JSON_FILE.
 func (c *Config) ServiceAccountJSON() ([]byte, error) {
@@ -142,10 +149,8 @@ func (c *Config) ValidateSync() error {
 	switch c.Source {
 	case "gdrive":
 		required["GDRIVE_DRIVE_ID"] = c.GDriveDriveID
-		// The service-account key comes from GDRIVE_SA_JSON or GDRIVE_SA_JSON_FILE.
-		if strings.TrimSpace(c.GDriveServiceAccount) == "" && strings.TrimSpace(c.GDriveServiceAccountFile) == "" {
-			required["GDRIVE_SA_JSON|GDRIVE_SA_JSON_FILE"] = ""
-		}
+		// Auth is a service-account key (GDRIVE_SA_JSON / _FILE) or, if neither is
+		// set, Application Default Credentials — so the key is not required here.
 	case "sharepoint":
 		required["AZURE_AD_CLIENT_ID"] = c.AzureClientID
 		required["AZURE_AD_TENANT_ID"] = c.AzureTenantID
