@@ -158,8 +158,11 @@ key as a new secret class, `channels.stop` cleanup, and Shared-Drive scoping doc
 3. ✅ **Extract `source.Source` + neutral types** (`internal/core/source`); retyped
    `syncer`/`server` off the provider; SharePoint is now an `Adapter` implementing the
    interface (data plane + webhook validation + subscription + throttle). Green throughout.
-4. **gdrive provider** against the interface + in-process fakes (mirror `core/fakes`).
-5. **CLI/config** source selection + per-provider validation; `.env.example` + drift test.
+4. ✅ **gdrive provider** (`internal/providers/gdrive`) implementing `source.Source`
+   via the official Drive SDK (`google.golang.org/api/drive/v3`, service-account
+   auth) + a fake Drive server; export-vs-download policy, Changes-API cursor,
+   `changes.watch`/`channels.stop`, header-token webhook validation. Green under `-race`.
+5. **CLI/config** source selection (`--source`/`SOURCE`) + `GDRIVE_*` config; `.env.example` + drift test.
 6. **Productionize gdrive**: export policy, channel renewal/stop, docs, one live pass.
 
 Deferred (do alongside gdrive, not blocking): rename the `sharepoint_*` metrics to a
