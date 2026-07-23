@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // Plan is the outcome of a diff: what to add, update, and delete.
@@ -33,8 +33,8 @@ type Plan struct {
 //
 // MIME filtering is intentionally separate (see IsMimeSupported): the returned
 // Add/Update may include unsupported types for the caller to drop at ingest.
-func DiffFull(spFiles []graph.FileInfo, gmMemoryIDs []string, gmStoredModified map[string]string) Plan {
-	spByUUID := make(map[string]graph.FileInfo, len(spFiles))
+func DiffFull(spFiles []sharepoint.FileInfo, gmMemoryIDs []string, gmStoredModified map[string]string) Plan {
+	spByUUID := make(map[string]sharepoint.FileInfo, len(spFiles))
 	spUUIDs := make(map[string]struct{}, len(spFiles))
 	for _, f := range spFiles {
 		u := memid.FromFileID(f.ID)
@@ -104,7 +104,7 @@ func classify(gmModified, spModified string) (update, newer bool) {
 // should pre-filter unsupported MIME types and items lacking a download URL
 // (see IsMimeSupported). A present file whose stored timestamp is not older than
 // the delta timestamp is still updated but flagged in UnexpectedNewer.
-func DiffDelta(items []graph.Item, gmStoredModified map[string]string) Plan {
+func DiffDelta(items []sharepoint.Item, gmStoredModified map[string]string) Plan {
 	var p Plan
 	for _, it := range items {
 		if it.ID == "" {

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
 )
 
 // TestPrune verifies retention pruning removes rows older than the cutoff (and

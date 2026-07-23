@@ -22,11 +22,11 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/config"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/server"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/config"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/server"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 func main() {
@@ -139,7 +139,7 @@ func runServe(args []string) error {
 
 	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "5000")
 	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
-	subMin := atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault)
+	subMin := atoiOr(cfg.GraphSubscriptionMinutes, sharepoint.SubMinutesDefault)
 	// Periodic safety full-sync: defaults to the subscription-renewal cadence
 	// (~half the subscription lifetime). Set GRAPH_FULL_SYNC_MINUTES=0 to disable.
 	fullSyncMin := atoiOr(os.Getenv("GRAPH_FULL_SYNC_MINUTES"), max(subMin/2, 20))
@@ -181,8 +181,8 @@ func runCreateSubscription(args []string) error {
 	if cfg.GraphClientState == "" || cfg.GraphNotificationURL == "" {
 		return errors.New("GRAPH_CLIENT_STATE and GRAPH_NOTIFICATION_URL are required")
 	}
-	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
-	sub, err := gc.EnsureSubscription(cfg.GraphNotificationURL, cfg.GraphClientState, atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault))
+	gc := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+	sub, err := gc.EnsureSubscription(cfg.GraphNotificationURL, cfg.GraphClientState, atoiOr(cfg.GraphSubscriptionMinutes, sharepoint.SubMinutesDefault))
 	if err != nil {
 		return err
 	}
@@ -245,14 +245,14 @@ func loadConfig(envFile string) (*config.Config, error) {
 	if err := cfg.ValidateSync(); err != nil {
 		return nil, err
 	}
-	if err := graph.ValidateTokenRefreshBuffer(); err != nil {
+	if err := sharepoint.ValidateTokenRefreshBuffer(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-func buildClients(cfg *config.Config) (*graph.Client, *goodmem.Client, error) {
-	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+func buildClients(cfg *config.Config) (*sharepoint.Client, *goodmem.Client, error) {
+	gc := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
 	gmc, err := gm.New(cfg.GoodmemBaseURL, cfg.GoodmemAPIKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("goodmem client: %w", err)

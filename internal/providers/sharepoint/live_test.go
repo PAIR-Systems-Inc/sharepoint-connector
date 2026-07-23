@@ -1,4 +1,4 @@
-package graph
+package sharepoint
 
 import (
 	"os"
@@ -9,7 +9,7 @@ import (
 // Microsoft Graph API (auth → site → drives → recursive file list). It is
 // skipped unless GRAPH_LIVE=1 and the Azure/SharePoint env vars are set:
 //
-//	GRAPH_LIVE=1 go test ./internal/graph -run TestLive -v
+//	GRAPH_LIVE=1 go test ./internal/providers/sharepoint -run TestLive -v
 //
 // Read-only; makes no changes to the site.
 func TestLive_ListSharePoint(t *testing.T) {

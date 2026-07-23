@@ -1,4 +1,4 @@
-package graph
+package sharepoint
 
 import (
 	"net/http"

@@ -1,8 +1,8 @@
-// Package graph is a lean, hand-rolled Microsoft Graph client for reading a
+// Package sharepoint is a lean, hand-rolled Microsoft Graph client for reading a
 // SharePoint site's drive. It is a port of sharepoint_client.py: OAuth2
 // client-credentials auth plus the small slice of Graph we use (site, drives,
 // drive children, get item by id, drive delta, download). No Graph SDK.
-package graph
+package sharepoint
 
 import (
 	"bytes"

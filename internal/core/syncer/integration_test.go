@@ -9,19 +9,19 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/fakes"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/fakes"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
-// End-to-end harness: drives the REAL graph.Client and the REAL Goodmem SDK
+// End-to-end harness: drives the REAL sharepoint.Client and the REAL Goodmem SDK
 // client against in-process fake SharePoint + Goodmem HTTP servers (internal/fakes),
 // exercising RunFull/RunDelta the way the connector does.
 
 const spaceID = "space-1"
 
-func newHarness(t *testing.T) (*fakes.Graph, *fakes.Goodmem, *graph.Client, *goodmem.Client, *Retrier) {
+func newHarness(t *testing.T) (*fakes.Graph, *fakes.Goodmem, *sharepoint.Client, *goodmem.Client, *Retrier) {
 	t.Helper()
 	fg := fakes.NewGraph()
 	gsrv := httptest.NewServer(fg.Handler())
@@ -32,8 +32,8 @@ func newHarness(t *testing.T) (*fakes.Graph, *fakes.Goodmem, *graph.Client, *goo
 	msrv := httptest.NewServer(fm.Handler())
 	t.Cleanup(msrv.Close)
 
-	gc := graph.NewClient("cid", "tid", "sec", "https://contoso.sharepoint.com/sites/Test",
-		graph.WithBaseURLs(gsrv.URL, gsrv.URL))
+	gc := sharepoint.NewClient("cid", "tid", "sec", "https://contoso.sharepoint.com/sites/Test",
+		sharepoint.WithBaseURLs(gsrv.URL, gsrv.URL))
 	gmc, err := gm.New(msrv.URL, "key")
 	if err != nil {
 		t.Fatal(err)

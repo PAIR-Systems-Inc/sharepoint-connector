@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/fakes"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/fakes"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // TestIntegration_ListenerMetrics runs the REAL Listener (its real HTTP server)
@@ -32,8 +32,8 @@ func TestIntegration_ListenerMetrics(t *testing.T) {
 	msrv := httptest.NewServer(fm.Handler())
 	defer msrv.Close()
 
-	gc := graph.NewClient("cid", "tid", "sec", "https://contoso.sharepoint.com/sites/Test",
-		graph.WithBaseURLs(gsrv.URL, gsrv.URL))
+	gc := sharepoint.NewClient("cid", "tid", "sec", "https://contoso.sharepoint.com/sites/Test",
+		sharepoint.WithBaseURLs(gsrv.URL, gsrv.URL))
 	gmc, err := gm.New(msrv.URL, "key")
 	if err != nil {
 		t.Fatal(err)

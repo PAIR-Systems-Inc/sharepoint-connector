@@ -1,5 +1,5 @@
 // Package fakes provides in-process fake Microsoft Graph (SharePoint) and
-// Goodmem HTTP servers for end-to-end tests: the real graph.Client and the real
+// Goodmem HTTP servers for end-to-end tests: the real sharepoint.Client and the real
 // Goodmem SDK talk to these over real HTTP, exercising the connector's actual
 // wire behavior. Test-only — nothing in the shipped binary imports it.
 package fakes

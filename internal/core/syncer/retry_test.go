@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // pending reports whether id is present in a pending set (attempt count ignored).
@@ -175,14 +175,14 @@ func TestPollStatus(t *testing.T) {
 // TestMergeAndConflicts covers pending-merge (re-fetch, 404 discard) and the
 // intra-sync conflict resolution.
 func TestMergeAndConflicts(t *testing.T) {
-	supported := &graph.FileInfo{ID: "keep", Name: "keep.pdf", MimeType: "application/pdf", DownloadURL: "http://x/keep"}
+	supported := &sharepoint.FileInfo{ID: "keep", Name: "keep.pdf", MimeType: "application/pdf", DownloadURL: "http://x/keep"}
 	getter := &fakeGetter{
-		files: map[string]*graph.FileInfo{
+		files: map[string]*sharepoint.FileInfo{
 			"keep":     supported,
 			"conflict": {ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadURL: "http://x/c"},
 		},
 		errs: map[string]error{
-			"gone": &graph.HTTPError{StatusCode: 404},
+			"gone": &sharepoint.HTTPError{StatusCode: 404},
 		},
 	}
 	dir := t.TempDir()
@@ -193,7 +193,7 @@ func TestMergeAndConflicts(t *testing.T) {
 	r.recordAdd("gone", resTransient)
 	r.recordRemove("conflict", false)
 
-	deltaAdd := []graph.FileInfo{{ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadURL: "http://x/c"}}
+	deltaAdd := []sharepoint.FileInfo{{ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadURL: "http://x/c"}}
 	adds, updates, removes := r.merge(getter, "drive1", deltaAdd, nil, nil)
 
 	// "keep" merged into adds; "gone" dropped and discarded from pending-add.
@@ -224,11 +224,11 @@ func TestMergeAndConflicts(t *testing.T) {
 }
 
 type fakeGetter struct {
-	files map[string]*graph.FileInfo
+	files map[string]*sharepoint.FileInfo
 	errs  map[string]error
 }
 
-func (f *fakeGetter) GetFileByID(driveID, id string) (*graph.FileInfo, error) {
+func (f *fakeGetter) GetFileByID(driveID, id string) (*sharepoint.FileInfo, error) {
 	if e := f.errs[id]; e != nil {
 		return nil, e
 	}

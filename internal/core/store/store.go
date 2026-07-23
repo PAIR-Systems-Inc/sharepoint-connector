@@ -11,7 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
 )
 
 // Store is a SQLite-backed sync-history log. Safe for concurrent use.

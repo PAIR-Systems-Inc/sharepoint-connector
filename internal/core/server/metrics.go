@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
 )
 
 // Metrics holds Prometheus-style counters and gauges for the listener, exposed

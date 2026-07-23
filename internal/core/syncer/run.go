@@ -11,8 +11,8 @@ import (
 	"fury.io/pairsys/goodmem"
 	gmodels "fury.io/pairsys/goodmem/models"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // Result summarizes a full sync run.
@@ -48,7 +48,7 @@ func (o Options) emit(e SyncEvent) {
 // RunFull performs a one-shot full sync from a SharePoint site to a Goodmem
 // space (the sync-once path). When opts.DryRun is true it computes and returns
 // the plan without mutating Goodmem.
-func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, opts Options) (*Result, error) {
+func RunFull(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spaceID string, opts Options) (*Result, error) {
 	siteID, err := gc.GetSiteID()
 	if err != nil {
 		return nil, fmt.Errorf("resolve site: %w", err)
@@ -78,7 +78,7 @@ func RunFull(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID 
 		return res, fmt.Errorf("refusing to apply full sync: %s", reason)
 	}
 
-	byID := make(map[string]graph.FileInfo, len(files))
+	byID := make(map[string]sharepoint.FileInfo, len(files))
 	for _, f := range files {
 		byID[f.ID] = f
 	}
@@ -135,7 +135,7 @@ func refuseMassDelete(nFiles, nMemories, nDelete int, maxDeleteRatio float64) st
 
 // ingest downloads a file and (re-)creates its memory. Unsupported types and
 // files without a download URL are skipped (mirroring sync_once.py).
-func (res *Result) ingest(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID string, f graph.FileInfo, isUpdate bool, opts Options) ingestResult {
+func (res *Result) ingest(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spaceID string, f sharepoint.FileInfo, isUpdate bool, opts Options) ingestResult {
 	op := "add"
 	if isUpdate {
 		op = "update"
@@ -240,7 +240,7 @@ func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string
 // createMemory creates a Goodmem memory for f's content, using the deterministic
 // memoryId and storing the file metadata (including modified_datetime). It
 // returns the created memory so the caller can inspect its processingStatus.
-func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f graph.FileInfo, content []byte, extractPageImages bool) (*gmodels.Memory, error) {
+func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f sharepoint.FileInfo, content []byte, extractPageImages bool) (*gmodels.Memory, error) {
 	mime := f.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
@@ -265,7 +265,7 @@ func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f gra
 
 // fileMetadata converts a FileInfo to the metadata map stored on the memory,
 // dropping empty fields (mirroring the Python `{k: v for ... if v is not None}`).
-func fileMetadata(f graph.FileInfo) map[string]any {
+func fileMetadata(f sharepoint.FileInfo) map[string]any {
 	b, _ := json.Marshal(f)
 	var m map[string]any
 	_ = json.Unmarshal(b, &m)

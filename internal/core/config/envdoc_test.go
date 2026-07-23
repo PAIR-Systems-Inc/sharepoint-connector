@@ -55,8 +55,8 @@ func repoRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("cannot locate test file")
 	}
-	// this file is internal/config/envdoc_test.go → repo root is two levels up.
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	// this file is internal/core/config/envdoc_test.go → repo root is three levels up.
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
 }
 
 func readFile(t *testing.T, path string) string {

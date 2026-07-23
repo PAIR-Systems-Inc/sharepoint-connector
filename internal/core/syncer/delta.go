@@ -7,8 +7,8 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // ErrDeltaExpired means the Graph delta token was invalid (410 Gone). The
@@ -18,7 +18,7 @@ var ErrDeltaExpired = errors.New("delta token expired (410); full sync required"
 // RunDelta applies one Graph delta batch to Goodmem and returns the next delta
 // link. Deleted items are removed; changed files are added or updated (via the
 // diff's existence check). On a 410 it returns ErrDeltaExpired.
-func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID, driveID, deltaLink string, opts Options) (newLink string, res *Result, err error) {
+func RunDelta(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spaceID, driveID, deltaLink string, opts Options) (newLink string, res *Result, err error) {
 	items, newLink, err := gc.DriveDelta(driveID, deltaLink, false)
 	if err != nil {
 		return "", nil, err
@@ -29,7 +29,7 @@ func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID
 
 	// Prepare file infos for the changed (non-deleted) file items, recovering a
 	// missing download URL via GetFileByID (delta stubs often lack it).
-	fileByID := make(map[string]graph.FileInfo)
+	fileByID := make(map[string]sharepoint.FileInfo)
 	var candidateUUIDs []string
 	for _, it := range items {
 		if it.Deleted || !it.IsFile {
@@ -63,7 +63,7 @@ func RunDelta(ctx context.Context, gc *graph.Client, gm *goodmem.Client, spaceID
 
 	// Assemble the work as file infos / IDs so the durable pending sets (and
 	// their re-fetched SharePoint state) can be merged in before applying.
-	var addFiles, updateFiles []graph.FileInfo
+	var addFiles, updateFiles []sharepoint.FileInfo
 	for _, id := range plan.Add {
 		addFiles = append(addFiles, fileByID[id])
 	}

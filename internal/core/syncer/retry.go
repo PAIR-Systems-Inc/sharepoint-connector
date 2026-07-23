@@ -14,7 +14,7 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // Retrier carries the durable failure-retry state and Goodmem processing-status
@@ -290,16 +290,16 @@ func (r *Retrier) pollStatus(ctx context.Context, gm *goodmem.Client, memID stri
 // --- pending merge + conflict resolution (delta path) ---
 
 // fileGetter fetches a SharePoint file's current state by ID (satisfied by
-// *graph.Client; narrowed to an interface so the merge logic is unit-testable).
+// *sharepoint.Client; narrowed to an interface so the merge logic is unit-testable).
 type fileGetter interface {
-	GetFileByID(driveID, itemID string) (*graph.FileInfo, error)
+	GetFileByID(driveID, itemID string) (*sharepoint.FileInfo, error)
 }
 
 // merge augments the delta work with previously-failed items (re-fetching their
 // current SharePoint state) and resolves any file that lands in more than one
 // list. Ports the pending-merge + _resolve_sync_conflicts logic. Returns the
 // merged add/update file infos and remove file IDs.
-func (r *Retrier) merge(gc fileGetter, driveID string, addFiles, updateFiles []graph.FileInfo, removeIDs []string) ([]graph.FileInfo, []graph.FileInfo, []string) {
+func (r *Retrier) merge(gc fileGetter, driveID string, addFiles, updateFiles []sharepoint.FileInfo, removeIDs []string) ([]sharepoint.FileInfo, []sharepoint.FileInfo, []string) {
 	addFiles = r.mergeInto(gc, driveID, addFiles, r.loadAdd(), r.discardAdd)
 	updateFiles = r.mergeInto(gc, driveID, updateFiles, r.loadUpdate(), r.discardUpdate)
 	for id := range r.loadRemove() {
@@ -313,7 +313,7 @@ func (r *Retrier) merge(gc fileGetter, driveID string, addFiles, updateFiles []g
 // mergeInto appends pending file IDs (not already present) to files, re-fetching
 // each from SharePoint. A file that is gone (404) or unsupported is discarded
 // from the pending set; a transient fetch failure leaves it pending.
-func (r *Retrier) mergeInto(gc fileGetter, driveID string, files []graph.FileInfo, pending map[string]int, discard func(string)) []graph.FileInfo {
+func (r *Retrier) mergeInto(gc fileGetter, driveID string, files []sharepoint.FileInfo, pending map[string]int, discard func(string)) []sharepoint.FileInfo {
 	for id := range pending {
 		if hasFileID(files, id) {
 			continue
@@ -343,7 +343,7 @@ func (r *Retrier) mergeInto(gc fileGetter, driveID string, files []graph.FileInf
 // more than one list it re-checks SharePoint: absent/unsupported → keep only the
 // remove; present/supported → drop the remove, and if in both add and update
 // keep only the update (update = delete-then-add). Ports _resolve_sync_conflicts.
-func (r *Retrier) resolveConflicts(gc fileGetter, driveID string, addFiles, updateFiles []graph.FileInfo, removeIDs []string) ([]graph.FileInfo, []graph.FileInfo, []string) {
+func (r *Retrier) resolveConflicts(gc fileGetter, driveID string, addFiles, updateFiles []sharepoint.FileInfo, removeIDs []string) ([]sharepoint.FileInfo, []sharepoint.FileInfo, []string) {
 	addIDs := idSet(addFiles)
 	updateIDs := idSet(updateFiles)
 	removeSet := map[string]bool{}
@@ -388,7 +388,7 @@ func (r *Retrier) resolveConflicts(gc fileGetter, driveID string, addFiles, upda
 
 // --- small helpers ---
 
-func hasFileID(files []graph.FileInfo, id string) bool {
+func hasFileID(files []sharepoint.FileInfo, id string) bool {
 	for _, f := range files {
 		if f.ID == id {
 			return true
@@ -397,7 +397,7 @@ func hasFileID(files []graph.FileInfo, id string) bool {
 	return false
 }
 
-func idSet(files []graph.FileInfo) map[string]bool {
+func idSet(files []sharepoint.FileInfo) map[string]bool {
 	s := make(map[string]bool, len(files))
 	for _, f := range files {
 		s[f.ID] = true
@@ -405,7 +405,7 @@ func idSet(files []graph.FileInfo) map[string]bool {
 	return s
 }
 
-func removeFileByID(files []graph.FileInfo, id string) []graph.FileInfo {
+func removeFileByID(files []sharepoint.FileInfo, id string) []sharepoint.FileInfo {
 	out := files[:0]
 	for _, f := range files {
 		if f.ID != id {
@@ -424,8 +424,8 @@ func containsStr(s []string, v string) bool {
 	return false
 }
 
-// isHTTPStatus reports whether err is a *graph.HTTPError with the given status.
+// isHTTPStatus reports whether err is a *sharepoint.HTTPError with the given status.
 func isHTTPStatus(err error, status int) bool {
-	var he *graph.HTTPError
+	var he *sharepoint.HTTPError
 	return errors.As(err, &he) && he.StatusCode == status
 }

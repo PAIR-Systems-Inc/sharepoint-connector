@@ -4,14 +4,14 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // TestDiffFull is a characterization test of the full-sync set math + timestamp
 // rules, pinning the Go engine to sync_once.py's behavior.
 func TestDiffFull(t *testing.T) {
-	sp := []graph.FileInfo{
+	sp := []sharepoint.FileInfo{
 		{ID: "A", ModifiedDateTime: "2026-01-02T00:00:00Z"}, // in both, SharePoint newer -> update
 		{ID: "B", ModifiedDateTime: "2026-01-01T00:00:00Z"}, // only in SharePoint  -> add
 		{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}, // in both, equal       -> skip
@@ -42,7 +42,7 @@ func TestDiffFull(t *testing.T) {
 }
 
 func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
-	sp := []graph.FileInfo{{ID: "E", ModifiedDateTime: "2026-01-01T00:00:00Z"}}
+	sp := []sharepoint.FileInfo{{ID: "E", ModifiedDateTime: "2026-01-01T00:00:00Z"}}
 	gm := []string{memid.FromFileID("E")}
 	got := DiffFull(sp, gm, map[string]string{}) // no stored ts
 	if len(got.Update) != 1 || got.Update[0] != "E" || len(got.Add) != 0 || len(got.Delete) != 0 {
@@ -52,12 +52,12 @@ func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
 
 // TestDiffDelta pins the delta classification to the listener's behavior.
 func TestDiffDelta(t *testing.T) {
-	items := []graph.Item{
+	items := []sharepoint.Item{
 		{ID: "D", Deleted: true},  // deleted -> Delete uuid(D)
 		{ID: "F", IsFolder: true}, // folder  -> ignored
-		{ID: "A", IsFile: true, File: graph.FileInfo{ID: "A", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // new     -> Add
-		{ID: "B", IsFile: true, File: graph.FileInfo{ID: "B", ModifiedDateTime: "2026-01-02T00:00:00Z"}}, // present, stored older -> Update
-		{ID: "C", IsFile: true, File: graph.FileInfo{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // present, stored newer -> Update + anomaly
+		{ID: "A", IsFile: true, File: sharepoint.FileInfo{ID: "A", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // new     -> Add
+		{ID: "B", IsFile: true, File: sharepoint.FileInfo{ID: "B", ModifiedDateTime: "2026-01-02T00:00:00Z"}}, // present, stored older -> Update
+		{ID: "C", IsFile: true, File: sharepoint.FileInfo{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // present, stored newer -> Update + anomaly
 	}
 	stored := map[string]string{
 		memid.FromFileID("B"): "2026-01-01T00:00:00Z", // older -> update

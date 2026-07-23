@@ -14,9 +14,9 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/store"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/store"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // Listener runs the event-triggered sync: it stands up the webhook server, does
@@ -24,7 +24,7 @@ import (
 // change subscription (with a renewal loop), and on each notification runs a
 // delta sync. Syncs are serialized. Ported from listener.py's orchestration.
 type Listener struct {
-	GC                *graph.Client
+	GC                *sharepoint.Client
 	GM                *goodmem.Client
 	SpaceID           string
 	ClientState       string
