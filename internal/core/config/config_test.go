@@ -1,6 +1,53 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestValidateSyncBySource checks that required-config validation branches on
+// SOURCE: gdrive needs GDRIVE_*, sharepoint needs Azure/SharePoint, Goodmem always.
+func TestValidateSyncBySource(t *testing.T) {
+	// Goodmem is always required.
+	goodmem := func() {
+		t.Setenv("GOODMEM_BASE_URL", "https://gm")
+		t.Setenv("GOODMEM_API_KEY", "k")
+	}
+
+	// Default source is sharepoint, and it needs Azure + SharePoint.
+	goodmem()
+	if cfg, _ := Load(""); cfg.Source != "sharepoint" {
+		t.Errorf("default Source = %q, want sharepoint", cfg.Source)
+	}
+	if cfg, _ := Load(""); cfg.ValidateSync() == nil {
+		t.Error("sharepoint without Azure should fail validation")
+	}
+	t.Setenv("AZURE_AD_CLIENT_ID", "c")
+	t.Setenv("AZURE_AD_TENANT_ID", "t")
+	t.Setenv("AZURE_AD_CLIENT_SECRET", "s")
+	t.Setenv("SHAREPOINT_SITE_URL", "https://x.sharepoint.com/sites/S")
+	if cfg, _ := Load(""); cfg.ValidateSync() != nil {
+		t.Errorf("sharepoint with full config should validate: %v", cfg.ValidateSync())
+	}
+
+	// gdrive needs GDRIVE_DRIVE_ID + a service-account key, not Azure.
+	t.Setenv("SOURCE", "gdrive")
+	cfg, _ := Load("")
+	if err := cfg.ValidateSync(); err == nil || !strings.Contains(err.Error(), "GDRIVE") {
+		t.Errorf("gdrive without drive/key should fail on GDRIVE_*, got: %v", err)
+	}
+	t.Setenv("GDRIVE_DRIVE_ID", "0ABC")
+	t.Setenv("GDRIVE_SA_JSON", `{"client_email":"x","private_key":"y"}`)
+	if cfg, _ := Load(""); cfg.ValidateSync() != nil {
+		t.Errorf("gdrive with drive+key should validate: %v", cfg.ValidateSync())
+	}
+
+	// An unknown source is rejected.
+	t.Setenv("SOURCE", "dropbox")
+	if cfg, _ := Load(""); cfg.ValidateSync() == nil {
+		t.Error("unknown SOURCE should fail validation")
+	}
+}
 
 // TestSpaceEmbedderAliases verifies the Python env-alias chains
 // (GOODMEM_SPACE_ID / SPACE_ID / DEFAULT_SPACE_ID, and the embedder equivalents)

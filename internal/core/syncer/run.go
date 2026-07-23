@@ -267,14 +267,15 @@ func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f sou
 }
 
 // ResolveSpaceID returns the target Goodmem space id: an explicit spaceID, else
-// a space named SharePoint_{Org}_{Site}, creating it if absent — with an
-// embedder that is the given one, else the first available, else a
-// text-embedding-3-small embedder created from openaiKey.
-func ResolveSpaceID(ctx context.Context, gm *goodmem.Client, spaceID, siteURL, embedderID, openaiKey string) (string, error) {
+// a space named spaceName, creating it if absent — with an embedder that is the
+// given one, else the first available, else a text-embedding-3-small embedder
+// created from openaiKey. Callers derive spaceName per source (e.g.
+// SpaceNameFromSiteURL for SharePoint).
+func ResolveSpaceID(ctx context.Context, gm *goodmem.Client, spaceID, spaceName, embedderID, openaiKey string) (string, error) {
 	if strings.TrimSpace(spaceID) != "" {
 		return spaceID, nil
 	}
-	name := SpaceNameFromSiteURL(siteURL)
+	name := spaceName
 	page, err := gm.Spaces().List(ctx, &goodmem.SpacesListParams{NameFilter: &name})
 	if err != nil {
 		return "", err

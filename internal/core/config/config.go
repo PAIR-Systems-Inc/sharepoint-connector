@@ -12,11 +12,19 @@ import (
 
 // Config holds runtime configuration. Field names mirror the .env variables.
 type Config struct {
-	// Azure AD / SharePoint — always required.
+	// Source selects the content provider: "sharepoint" (default) or "gdrive".
+	Source string
+
+	// Azure AD / SharePoint — required when Source is "sharepoint".
 	AzureClientID     string
 	AzureTenantID     string
 	AzureClientSecret string
 	SharePointSiteURL string
+
+	// Google Drive — required when Source is "gdrive".
+	GDriveServiceAccount     string // inline service-account JSON (e.g. a Fly secret)
+	GDriveServiceAccountFile string // ...or a path to the JSON key file
+	GDriveDriveID            string // the Shared Drive id
 
 	// Goodmem — required for a sync (unless the deploy provisions it).
 	GoodmemBaseURL    string
@@ -54,10 +62,14 @@ func Load(envFile string) (*Config, error) {
 		}
 	}
 	return &Config{
+		Source:                   sourceFromEnv(),
 		AzureClientID:            os.Getenv("AZURE_AD_CLIENT_ID"),
 		AzureTenantID:            os.Getenv("AZURE_AD_TENANT_ID"),
 		AzureClientSecret:        os.Getenv("AZURE_AD_CLIENT_SECRET"),
 		SharePointSiteURL:        os.Getenv("SHAREPOINT_SITE_URL"),
+		GDriveServiceAccount:     os.Getenv("GDRIVE_SA_JSON"),
+		GDriveServiceAccountFile: os.Getenv("GDRIVE_SA_JSON_FILE"),
+		GDriveDriveID:            os.Getenv("GDRIVE_DRIVE_ID"),
 		GoodmemBaseURL:           os.Getenv("GOODMEM_BASE_URL"),
 		GoodmemAPIKey:            os.Getenv("GOODMEM_API_KEY"),
 		GoodmemSpaceID:           firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),
@@ -72,6 +84,31 @@ func Load(envFile string) (*Config, error) {
 		OpenAIAPIKey:             os.Getenv("OPENAI_API_KEY"),
 		ExtractPageImages:        envTruthy("GOODMEM_EXTRACT_PAGE_IMAGES"),
 	}, nil
+}
+
+// sourceFromEnv reads SOURCE, defaulting to "sharepoint". Case-insensitive.
+func sourceFromEnv() string {
+	s := strings.ToLower(strings.TrimSpace(os.Getenv("SOURCE")))
+	if s == "" {
+		return "sharepoint"
+	}
+	return s
+}
+
+// ServiceAccountJSON returns the Google service-account key bytes, from the
+// inline GDRIVE_SA_JSON if set, else the file at GDRIVE_SA_JSON_FILE.
+func (c *Config) ServiceAccountJSON() ([]byte, error) {
+	if strings.TrimSpace(c.GDriveServiceAccount) != "" {
+		return []byte(c.GDriveServiceAccount), nil
+	}
+	if p := strings.TrimSpace(c.GDriveServiceAccountFile); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("read GDRIVE_SA_JSON_FILE %q: %w", p, err)
+		}
+		return b, nil
+	}
+	return nil, fmt.Errorf("set GDRIVE_SA_JSON or GDRIVE_SA_JSON_FILE for the gdrive source")
 }
 
 // firstEnv returns the first non-empty value among the given env var names,
@@ -95,18 +132,31 @@ func envTruthy(key string) bool {
 	return false
 }
 
-// ValidateSync checks the fields required to run a SharePoint→Goodmem sync
-// (manual sync or the listener): Azure + SharePoint + Goodmem.
+// ValidateSync checks the fields required to run a source→Goodmem sync (manual
+// sync or the listener): Goodmem always, plus the selected source's credentials.
 func (c *Config) ValidateSync() error {
+	required := map[string]string{
+		"GOODMEM_BASE_URL": c.GoodmemBaseURL,
+		"GOODMEM_API_KEY":  c.GoodmemAPIKey,
+	}
+	switch c.Source {
+	case "gdrive":
+		required["GDRIVE_DRIVE_ID"] = c.GDriveDriveID
+		// The service-account key comes from GDRIVE_SA_JSON or GDRIVE_SA_JSON_FILE.
+		if strings.TrimSpace(c.GDriveServiceAccount) == "" && strings.TrimSpace(c.GDriveServiceAccountFile) == "" {
+			required["GDRIVE_SA_JSON|GDRIVE_SA_JSON_FILE"] = ""
+		}
+	case "sharepoint":
+		required["AZURE_AD_CLIENT_ID"] = c.AzureClientID
+		required["AZURE_AD_TENANT_ID"] = c.AzureTenantID
+		required["AZURE_AD_CLIENT_SECRET"] = c.AzureClientSecret
+		required["SHAREPOINT_SITE_URL"] = c.SharePointSiteURL
+	default:
+		return fmt.Errorf("unknown SOURCE %q (want \"sharepoint\" or \"gdrive\")", c.Source)
+	}
+
 	var missing []string
-	for k, v := range map[string]string{
-		"AZURE_AD_CLIENT_ID":     c.AzureClientID,
-		"AZURE_AD_TENANT_ID":     c.AzureTenantID,
-		"AZURE_AD_CLIENT_SECRET": c.AzureClientSecret,
-		"SHAREPOINT_SITE_URL":    c.SharePointSiteURL,
-		"GOODMEM_BASE_URL":       c.GoodmemBaseURL,
-		"GOODMEM_API_KEY":        c.GoodmemAPIKey,
-	} {
+	for k, v := range required {
 		if strings.TrimSpace(v) == "" {
 			missing = append(missing, k)
 		}
@@ -114,7 +164,7 @@ func (c *Config) ValidateSync() error {
 	// Note: GOODMEM_SPACE_ID / GOODMEM_EMBEDDER_ID are optional — the space is
 	// resolved (or created from an embedder) at runtime; see ResolveSpaceID.
 	if len(missing) > 0 {
-		return fmt.Errorf("missing required config: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("missing required config for source %q: %s", c.Source, strings.Join(missing, ", "))
 	}
 	return nil
 }

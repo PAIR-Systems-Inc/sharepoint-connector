@@ -162,8 +162,11 @@ key as a new secret class, `channels.stop` cleanup, and Shared-Drive scoping doc
    via the official Drive SDK (`google.golang.org/api/drive/v3`, service-account
    auth) + a fake Drive server; export-vs-download policy, Changes-API cursor,
    `changes.watch`/`channels.stop`, header-token webhook validation. Green under `-race`.
-5. **CLI/config** source selection (`--source`/`SOURCE`) + `GDRIVE_*` config; `.env.example` + drift test.
-6. **Productionize gdrive**: export policy, channel renewal/stop, docs, one live pass.
+5. ✅ **CLI/config** source selection (`--source` flag / `SOURCE` env) + `GDRIVE_*`
+   config, source-aware `ValidateSync`, per-source space naming; `.env.example` +
+   drift test + a validation test. Green.
+6. **Productionize gdrive**: docs (Shared-Drive setup, webhook domain verification),
+   one live pass against a real Shared Drive.
 
 Deferred (do alongside gdrive, not blocking): rename the `sharepoint_*` metrics to a
 neutral `connector_*` prefix with a `source` label; generalize the `GRAPH_*`/
