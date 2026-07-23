@@ -146,10 +146,11 @@ type Delta struct {
 
 // Graph is a stateful fake of the subset of Microsoft Graph the client uses.
 type Graph struct {
-	mu     sync.Mutex
-	base   string
-	files  map[string]*File
-	deltas []Delta
+	mu        sync.Mutex
+	base      string
+	files     map[string]*File
+	deltas    []Delta
+	deltaGone bool // one-shot: next non-latest delta call returns 410 Gone
 }
 
 // NewGraph returns an empty fake Graph.
@@ -182,6 +183,14 @@ func (g *Graph) SetDeltas(d ...Delta) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.deltas = d
+}
+
+// ExpireDelta makes the next non-latest delta call return 410 Gone (once),
+// simulating an expired delta token.
+func (g *Graph) ExpireDelta() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.deltaGone = true
 }
 
 // DeltaLink returns a delta-link URL the fake serves the scripted deltas for
@@ -229,6 +238,11 @@ func (g *Graph) Handler() http.Handler {
 			fmt.Fprint(w, `{"access_token":"tok","expires_in":3600}`)
 
 		case p == "/drives/drive1/root/delta":
+			if g.deltaGone && r.URL.Query().Get("token") != "latest" {
+				g.deltaGone = false
+				w.WriteHeader(http.StatusGone) // 410 → expired token
+				return
+			}
 			var items []map[string]any
 			if r.URL.Query().Get("token") != "latest" {
 				for _, d := range g.deltas {
