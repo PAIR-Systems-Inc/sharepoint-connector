@@ -55,15 +55,15 @@ func TestRunFullCursorAdvance(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	s := sharepoint.NewAdapter(gc, "", "cs")
 	l := &Listener{
-		GC:      gc,
+		Src:     s,
 		GM:      gmc,
 		SpaceID: "space-1",
-		driveID: "drive1",
 		baseCtx: context.Background(),
 		delta:   deltaStore{path: filepath.Join(t.TempDir(), "delta")},
 	}
-	l.server = New("cs", nil)
+	l.server = New(s, nil)
 
 	// Successful full sync advances the cursor.
 	if err := l.runFull("s1"); err != nil {

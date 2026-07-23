@@ -41,10 +41,9 @@ func TestIntegration_ListenerMetrics(t *testing.T) {
 
 	port := freePort(t)
 	l := &Listener{
-		GC:              gc,
+		Src:             sharepoint.NewAdapter(gc, "", "cs"),
 		GM:              gmc,
 		SpaceID:         "space-1",
-		ClientState:     "cs",
 		NotificationURL: "https://example.test/sync/webhook",
 		SubMinutes:      4320,
 		FullSyncMinutes: 0, // disable the periodic loop so counts stay deterministic

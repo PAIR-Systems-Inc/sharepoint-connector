@@ -14,7 +14,7 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 )
 
 // Retrier carries the durable failure-retry state and Goodmem processing-status
@@ -289,46 +289,45 @@ func (r *Retrier) pollStatus(ctx context.Context, gm *goodmem.Client, memID stri
 
 // --- pending merge + conflict resolution (delta path) ---
 
-// fileGetter fetches a SharePoint file's current state by ID (satisfied by
-// *sharepoint.Client; narrowed to an interface so the merge logic is unit-testable).
-type fileGetter interface {
-	GetFileByID(driveID, itemID string) (*sharepoint.FileInfo, error)
+// fileFetcher fetches a file's current source state by ID (satisfied by any
+// source.Source; narrowed to an interface so the merge logic is unit-testable).
+type fileFetcher interface {
+	GetFile(ctx context.Context, id string) (*source.FileInfo, error)
 }
 
 // merge augments the delta work with previously-failed items (re-fetching their
-// current SharePoint state) and resolves any file that lands in more than one
-// list. Ports the pending-merge + _resolve_sync_conflicts logic. Returns the
-// merged add/update file infos and remove file IDs.
-func (r *Retrier) merge(gc fileGetter, driveID string, addFiles, updateFiles []sharepoint.FileInfo, removeIDs []string) ([]sharepoint.FileInfo, []sharepoint.FileInfo, []string) {
-	addFiles = r.mergeInto(gc, driveID, addFiles, r.loadAdd(), r.discardAdd)
-	updateFiles = r.mergeInto(gc, driveID, updateFiles, r.loadUpdate(), r.discardUpdate)
+// current source state) and resolves any file that lands in more than one list.
+// Returns the merged add/update file infos and remove file IDs.
+func (r *Retrier) merge(ctx context.Context, gc fileFetcher, addFiles, updateFiles []source.FileInfo, removeIDs []string) ([]source.FileInfo, []source.FileInfo, []string) {
+	addFiles = r.mergeInto(ctx, gc, addFiles, r.loadAdd(), r.discardAdd)
+	updateFiles = r.mergeInto(ctx, gc, updateFiles, r.loadUpdate(), r.discardUpdate)
 	for id := range r.loadRemove() {
 		if !containsStr(removeIDs, id) {
 			removeIDs = append(removeIDs, id)
 		}
 	}
-	return r.resolveConflicts(gc, driveID, addFiles, updateFiles, removeIDs)
+	return r.resolveConflicts(ctx, gc, addFiles, updateFiles, removeIDs)
 }
 
 // mergeInto appends pending file IDs (not already present) to files, re-fetching
-// each from SharePoint. A file that is gone (404) or unsupported is discarded
-// from the pending set; a transient fetch failure leaves it pending.
-func (r *Retrier) mergeInto(gc fileGetter, driveID string, files []sharepoint.FileInfo, pending map[string]int, discard func(string)) []sharepoint.FileInfo {
+// each from the source. A file that is gone (ErrNotFound) or unsupported is
+// discarded from the pending set; a transient fetch failure leaves it pending.
+func (r *Retrier) mergeInto(ctx context.Context, gc fileFetcher, files []source.FileInfo, pending map[string]int, discard func(string)) []source.FileInfo {
 	for id := range pending {
 		if hasFileID(files, id) {
 			continue
 		}
-		f, err := gc.GetFileByID(driveID, id)
+		f, err := gc.GetFile(ctx, id)
 		if err != nil {
-			if isHTTPStatus(err, 404) {
-				discard(id) // gone from SharePoint
+			if errors.Is(err, source.ErrNotFound) {
+				discard(id) // gone from the source
 			}
 			continue // transient: keep pending, retry next sync
 		}
 		if f == nil { // a folder, not a file
 			continue
 		}
-		if !IsMimeSupported(f.MimeType) || f.DownloadURL == "" {
+		if !IsMimeSupported(f.MimeType) {
 			continue
 		}
 		if f.RelativePath == "" {
@@ -340,10 +339,10 @@ func (r *Retrier) mergeInto(gc fileGetter, driveID string, files []sharepoint.Fi
 }
 
 // resolveConflicts ensures each file ID has at most one action. For any ID in
-// more than one list it re-checks SharePoint: absent/unsupported → keep only the
+// more than one list it re-checks the source: absent/unsupported → keep only the
 // remove; present/supported → drop the remove, and if in both add and update
-// keep only the update (update = delete-then-add). Ports _resolve_sync_conflicts.
-func (r *Retrier) resolveConflicts(gc fileGetter, driveID string, addFiles, updateFiles []sharepoint.FileInfo, removeIDs []string) ([]sharepoint.FileInfo, []sharepoint.FileInfo, []string) {
+// keep only the update (update = delete-then-add).
+func (r *Retrier) resolveConflicts(ctx context.Context, gc fileFetcher, addFiles, updateFiles []source.FileInfo, removeIDs []string) ([]source.FileInfo, []source.FileInfo, []string) {
 	addIDs := idSet(addFiles)
 	updateIDs := idSet(updateFiles)
 	removeSet := map[string]bool{}
@@ -362,8 +361,8 @@ func (r *Retrier) resolveConflicts(gc fileGetter, driveID string, addFiles, upda
 		}
 	}
 	for id := range conflicts {
-		f, err := gc.GetFileByID(driveID, id)
-		supported := err == nil && f != nil && IsMimeSupported(f.MimeType) && f.DownloadURL != ""
+		f, err := gc.GetFile(ctx, id)
+		supported := err == nil && f != nil && IsMimeSupported(f.MimeType)
 		if !supported {
 			addFiles = removeFileByID(addFiles, id)
 			updateFiles = removeFileByID(updateFiles, id)
@@ -388,7 +387,7 @@ func (r *Retrier) resolveConflicts(gc fileGetter, driveID string, addFiles, upda
 
 // --- small helpers ---
 
-func hasFileID(files []sharepoint.FileInfo, id string) bool {
+func hasFileID(files []source.FileInfo, id string) bool {
 	for _, f := range files {
 		if f.ID == id {
 			return true
@@ -397,7 +396,7 @@ func hasFileID(files []sharepoint.FileInfo, id string) bool {
 	return false
 }
 
-func idSet(files []sharepoint.FileInfo) map[string]bool {
+func idSet(files []source.FileInfo) map[string]bool {
 	s := make(map[string]bool, len(files))
 	for _, f := range files {
 		s[f.ID] = true
@@ -405,7 +404,7 @@ func idSet(files []sharepoint.FileInfo) map[string]bool {
 	return s
 }
 
-func removeFileByID(files []sharepoint.FileInfo, id string) []sharepoint.FileInfo {
+func removeFileByID(files []source.FileInfo, id string) []source.FileInfo {
 	out := files[:0]
 	for _, f := range files {
 		if f.ID != id {
@@ -422,10 +421,4 @@ func containsStr(s []string, v string) bool {
 		}
 	}
 	return false
-}
-
-// isHTTPStatus reports whether err is a *sharepoint.HTTPError with the given status.
-func isHTTPStatus(err error, status int) bool {
-	var he *sharepoint.HTTPError
-	return errors.As(err, &he) && he.StatusCode == status
 }

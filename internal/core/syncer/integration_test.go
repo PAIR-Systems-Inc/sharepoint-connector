@@ -15,9 +15,10 @@ import (
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
-// End-to-end harness: drives the REAL sharepoint.Client and the REAL Goodmem SDK
-// client against in-process fake SharePoint + Goodmem HTTP servers (internal/fakes),
-// exercising RunFull/RunDelta the way the connector does.
+// End-to-end harness: drives the REAL SharePoint adapter (real graph.Client) and
+// the REAL Goodmem SDK client against in-process fake SharePoint + Goodmem HTTP
+// servers (internal/core/fakes), exercising RunFull/RunDelta the way the
+// connector does.
 
 const spaceID = "space-1"
 
@@ -45,8 +46,12 @@ func newHarness(t *testing.T) (*fakes.Graph, *fakes.Goodmem, *sharepoint.Client,
 	return fg, fm, gc, gmc, r
 }
 
+// src wraps the Graph client as a whole-drive source adapter.
+func src(gc *sharepoint.Client) *sharepoint.Adapter { return sharepoint.NewAdapter(gc, "", "") }
+
 func TestIntegration_FullSyncLifecycle(t *testing.T) {
 	fg, fm, gc, gmc, _ := newHarness(t)
+	s := src(gc)
 	fg.Put(fakes.File{ID: "a", Name: "a.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "A"})
 	fg.Put(fakes.File{ID: "b", Name: "b.txt", Mime: "text/plain", Modified: "2026-01-01T00:00:00Z", Content: "B"})
 	fg.Put(fakes.File{ID: "c", Name: "c.bin", Mime: "application/x-thing", Modified: "2026-01-01T00:00:00Z", Content: "C"}) // unsupported
@@ -54,7 +59,7 @@ func TestIntegration_FullSyncLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	// Initial full sync: two supported files added, one skipped.
-	res, err := RunFull(ctx, gc, gmc, spaceID, Options{})
+	res, err := RunFull(ctx, s, gmc, spaceID, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +74,7 @@ func TestIntegration_FullSyncLifecycle(t *testing.T) {
 	}
 
 	// Re-run: idempotent (nothing changed).
-	res, err = RunFull(ctx, gc, gmc, spaceID, Options{})
+	res, err = RunFull(ctx, s, gmc, spaceID, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +84,7 @@ func TestIntegration_FullSyncLifecycle(t *testing.T) {
 
 	// Touch b (newer timestamp) → one update.
 	fg.Put(fakes.File{ID: "b", Name: "b.txt", Mime: "text/plain", Modified: "2026-02-01T00:00:00Z", Content: "B2"})
-	res, err = RunFull(ctx, gc, gmc, spaceID, Options{})
+	res, err = RunFull(ctx, s, gmc, spaceID, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,9 +92,9 @@ func TestIntegration_FullSyncLifecycle(t *testing.T) {
 		t.Fatalf("after touch: updated=%d added=%d, want 1/0", res.Updated, res.Added)
 	}
 
-	// Delete a from SharePoint → one orphan delete.
+	// Delete a from the source → one orphan delete.
 	fg.Del("a")
-	res, err = RunFull(ctx, gc, gmc, spaceID, Options{})
+	res, err = RunFull(ctx, s, gmc, spaceID, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +111,7 @@ func TestIntegration_SizeCap(t *testing.T) {
 	fg.Put(fakes.File{ID: "small", Name: "s.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "S", Size: 1_000})
 	fg.Put(fakes.File{ID: "big", Name: "b.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "B", Size: 500_000_000}) // 500 MB
 
-	res, err := RunFull(context.Background(), gc, gmc, spaceID, Options{MaxFileBytes: 100 * 1024 * 1024}) // 100 MB cap
+	res, err := RunFull(context.Background(), src(gc), gmc, spaceID, Options{MaxFileBytes: 100 * 1024 * 1024}) // 100 MB cap
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,19 +128,20 @@ func TestIntegration_SizeCap(t *testing.T) {
 
 func TestIntegration_MassDeleteGuard(t *testing.T) {
 	fg, fm, gc, gmc, _ := newHarness(t)
+	s := src(gc)
 	fg.Put(fakes.File{ID: "a", Name: "a.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "A"})
 	ctx := context.Background()
-	if _, err := RunFull(ctx, gc, gmc, spaceID, Options{}); err != nil {
+	if _, err := RunFull(ctx, s, gmc, spaceID, Options{}); err != nil {
 		t.Fatal(err)
 	}
 	if fm.Count() != 1 {
 		t.Fatalf("setup: want 1 memory, got %d", fm.Count())
 	}
 
-	// SharePoint now returns zero files (simulated transient failure) while
+	// The source now returns zero files (simulated transient failure) while
 	// Goodmem still has memories: the guard must refuse and delete nothing.
 	fg.Del("a")
-	_, err := RunFull(ctx, gc, gmc, spaceID, Options{})
+	_, err := RunFull(ctx, s, gmc, spaceID, Options{})
 	if err == nil || !strings.Contains(err.Error(), "refusing to apply") {
 		t.Fatalf("expected mass-delete guard error, got: %v", err)
 	}
@@ -150,7 +156,9 @@ func TestIntegration_FolderScope(t *testing.T) {
 	fg.Put(fakes.File{ID: "rep1", Name: "x.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "X", Parent: "Reports"})
 	fg.Put(fakes.File{ID: "rep2", Name: "y.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "Y", Parent: "Reports"})
 
-	res, err := RunFull(context.Background(), gc, gmc, spaceID, Options{FolderPath: "Reports"})
+	// The folder scope now lives in the adapter, not Options.
+	scoped := sharepoint.NewAdapter(gc, "Reports", "")
+	res, err := RunFull(context.Background(), scoped, gmc, spaceID, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,10 +175,11 @@ func TestIntegration_FolderScope(t *testing.T) {
 
 func TestIntegration_Delta(t *testing.T) {
 	fg, fm, gc, gmc, r := newHarness(t)
+	s := src(gc)
 	fg.Put(fakes.File{ID: "a", Name: "a.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "A"})
 	fg.Put(fakes.File{ID: "b", Name: "b.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "B"})
 	ctx := context.Background()
-	if _, err := RunFull(ctx, gc, gmc, spaceID, Options{Retry: r}); err != nil {
+	if _, err := RunFull(ctx, s, gmc, spaceID, Options{Retry: r}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,7 +189,7 @@ func TestIntegration_Delta(t *testing.T) {
 	fg.Del("b")
 	fg.SetDeltas(fakes.Delta{ID: "a"}, fakes.Delta{ID: "c"}, fakes.Delta{ID: "b", Deleted: true})
 
-	_, res, err := RunDelta(ctx, gc, gmc, spaceID, "drive1", fg.DeltaLink(), Options{Retry: r})
+	_, res, err := RunDelta(ctx, s, gmc, spaceID, fg.DeltaLink(), Options{Retry: r})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,6 +203,7 @@ func TestIntegration_Delta(t *testing.T) {
 
 func TestIntegration_PendingRetry(t *testing.T) {
 	fg, fm, gc, gmc, r := newHarness(t)
+	s := src(gc)
 	fg.Put(fakes.File{ID: "a", Name: "a.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "A"})
 	ctx := context.Background()
 
@@ -201,12 +211,12 @@ func TestIntegration_PendingRetry(t *testing.T) {
 	// queued in the pending-add set.
 	fm.FailCreateIDs[memid.FromFileID("a")] = true
 	fg.SetDeltas(fakes.Delta{ID: "a"})
-	if _, res, err := RunDelta(ctx, gc, gmc, spaceID, "drive1", fg.DeltaLink(), Options{Retry: r}); err != nil {
+	if _, res, err := RunDelta(ctx, s, gmc, spaceID, fg.DeltaLink(), Options{Retry: r}); err != nil {
 		t.Fatal(err)
 	} else if res.Added != 0 {
 		t.Fatalf("failed create: added=%d, want 0", res.Added)
 	}
-	// Pending sets are keyed by SharePoint file ID (memories are keyed by UUID).
+	// Pending sets are keyed by source file ID (memories are keyed by UUID).
 	if !pending(r.loadAdd(), "a") {
 		t.Fatal("file a should be queued in pending-add after a failed create")
 	}
@@ -218,7 +228,7 @@ func TestIntegration_PendingRetry(t *testing.T) {
 	// Goodmem now succeeds → a is ingested and cleared from pending.
 	fm.FailCreateIDs = map[string]bool{}
 	fg.SetDeltas() // empty delta batch
-	if _, _, err := RunDelta(ctx, gc, gmc, spaceID, "drive1", fg.DeltaLink(), Options{Retry: r}); err != nil {
+	if _, _, err := RunDelta(ctx, s, gmc, spaceID, fg.DeltaLink(), Options{Retry: r}); err != nil {
 		t.Fatal(err)
 	}
 	if !fm.Has(memid.FromFileID("a")) {
@@ -235,7 +245,7 @@ func TestIntegration_ProcessingStatusFailed(t *testing.T) {
 	fm.CreateStatus = "FAILED" // Goodmem accepts (200) but processing fails
 	fg.SetDeltas(fakes.Delta{ID: "a"})
 
-	_, res, err := RunDelta(context.Background(), gc, gmc, spaceID, "drive1", fg.DeltaLink(), Options{Retry: r})
+	_, res, err := RunDelta(context.Background(), src(gc), gmc, spaceID, fg.DeltaLink(), Options{Retry: r})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
 )
 
@@ -31,10 +32,10 @@ type SyncHistory interface {
 // (Durable state — delta cursor, pending sets, persisted activity — is a
 // follow-up; today the log is in-memory like the Python PoC.)
 type Server struct {
-	// clientState is the shared secret Graph echoes back in each notification;
-	// it authenticates that a notification genuinely came from our subscription.
-	clientState string
-	onNotify    Notifier
+	// validator classifies incoming webhook requests (provider-specific: it holds
+	// the shared secret and knows the provider's handshake/spoof-check contract).
+	validator source.WebhookValidator
+	onNotify  Notifier
 
 	// Metrics is exposed at GET /metrics (Prometheus text format).
 	Metrics *Metrics
@@ -60,10 +61,10 @@ type Event struct {
 	Message string    `json:"message"`
 }
 
-// New returns a Server. onNotify is called (in a goroutine) for each validated
-// notification; pass nil to only record activity.
-func New(clientState string, onNotify Notifier) *Server {
-	return &Server{clientState: clientState, onNotify: onNotify, maxLog: 500, Metrics: NewMetrics(), logger: slog.Default()}
+// New returns a Server. validator classifies webhook requests (provider-specific);
+// onNotify is called (in a goroutine) for each validated change notification.
+func New(validator source.WebhookValidator, onNotify Notifier) *Server {
+	return &Server{validator: validator, onNotify: onNotify, maxLog: 500, Metrics: NewMetrics(), logger: slog.Default()}
 }
 
 // SetReadyFn registers a readiness predicate for GET /readyz. Until it returns
@@ -113,51 +114,33 @@ func (s *Server) handleSyncs(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"syncs": recs})
 }
 
-// graphNotification is the subset of a Graph change-notification payload we read.
-type graphNotification struct {
-	Value []struct {
-		ClientState string `json:"clientState"`
-		Resource    string `json:"resource"`
-		ChangeType  string `json:"changeType"`
-	} `json:"value"`
-}
-
-// handleWebhook implements the Graph webhook contract:
-//   - Subscription validation: a GET/POST carrying ?validationToken=... must
-//     echo the token back verbatim as text/plain within 10s.
-//   - Change notification: a POST whose body carries our clientState; any value
-//     with a mismatched clientState is rejected (spoof protection).
+// handleWebhook applies the provider's webhook contract via the validator:
+//   - Handshake (e.g. a validation/sync ping) → 200, echoing the returned token.
+//   - Change → fast 202 ack, then the sync runs out of band.
+//   - Reject (not ours / bad secret) → 401.
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	if token := r.URL.Query().Get("validationToken"); token != "" {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // cap at 1 MiB
+	result, echo := source.WebhookReject, ""
+	if s.validator != nil {
+		result, echo = s.validator.ValidateWebhook(r, body)
+	}
+	switch result {
+	case source.WebhookHandshake:
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, token)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // cap at 1 MiB
-	var n graphNotification
-	if err := json.Unmarshal(body, &n); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	// Reject if any notification carries a clientState that isn't ours.
-	for _, v := range n.Value {
-		if v.ClientState != s.clientState {
-			s.log("rejected", "notification with invalid clientState")
-			http.Error(w, "invalid clientState", http.StatusUnauthorized)
-			return
+		if echo != "" {
+			_, _ = io.WriteString(w, echo)
 		}
-	}
-	// Ack immediately (Graph requires a fast 2xx); process out of band.
-	w.WriteHeader(http.StatusAccepted)
-	count := len(n.Value)
-	s.log("notification_received", "received change notification")
-	if s.onNotify != nil && count > 0 {
-		go s.onNotify(count)
+	case source.WebhookChange:
+		// Ack immediately (providers require a fast 2xx); process out of band.
+		w.WriteHeader(http.StatusAccepted)
+		s.log("notification_received", "received change notification")
+		if s.onNotify != nil {
+			go s.onNotify(1)
+		}
+	default: // WebhookReject
+		s.log("rejected", "webhook rejected (invalid or not ours)")
+		http.Error(w, "invalid webhook", http.StatusUnauthorized)
 	}
 }
 

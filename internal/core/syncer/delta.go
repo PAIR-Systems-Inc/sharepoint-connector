@@ -8,44 +8,28 @@ import (
 	"fury.io/pairsys/goodmem"
 
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 )
 
-// ErrDeltaExpired means the Graph delta token was invalid (410 Gone). The
-// caller should run a full sync (RunFull) and re-bootstrap the delta link.
-var ErrDeltaExpired = errors.New("delta token expired (410); full sync required")
-
-// RunDelta applies one Graph delta batch to Goodmem and returns the next delta
-// link. Deleted items are removed; changed files are added or updated (via the
-// diff's existence check). On a 410 it returns ErrDeltaExpired.
-func RunDelta(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spaceID, driveID, deltaLink string, opts Options) (newLink string, res *Result, err error) {
-	items, newLink, err := gc.DriveDelta(driveID, deltaLink, false)
+// RunDelta applies one incremental batch from the source to Goodmem and returns
+// the next cursor. Deleted items are removed; changed files are added or updated
+// (via the diff's existence check). On an expired cursor it returns
+// source.ErrCursorExpired, so the caller runs a full sync and re-bootstraps.
+func RunDelta(ctx context.Context, src source.Source, gm *goodmem.Client, spaceID, cursor string, opts Options) (next string, res *Result, err error) {
+	changes, next, err := src.Delta(ctx, cursor)
 	if err != nil {
-		return "", nil, err
-	}
-	if items == nil && newLink == "" {
-		return "", nil, ErrDeltaExpired
+		return "", nil, err // includes source.ErrCursorExpired
 	}
 
-	// Prepare file infos for the changed (non-deleted) file items, recovering a
-	// missing download URL via GetFileByID (delta stubs often lack it).
-	fileByID := make(map[string]sharepoint.FileInfo)
+	// Index the changed (non-deleted) files; the provider returns them ready to
+	// ingest (download ref + metadata already resolved).
+	fileByID := make(map[string]source.FileInfo)
 	var candidateUUIDs []string
-	for _, it := range items {
+	for _, it := range changes {
 		if it.Deleted || !it.IsFile {
 			continue
 		}
 		f := it.File
-		if f.DownloadURL == "" {
-			if full, gerr := gc.GetFileByID(driveID, it.ID); gerr == nil && full != nil {
-				rel := f.RelativePath
-				if rel == "" {
-					rel = f.Name
-				}
-				f = *full
-				f.RelativePath = rel
-			}
-		}
 		if f.RelativePath == "" {
 			f.RelativePath = f.Name
 		}
@@ -58,20 +42,20 @@ func RunDelta(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, sp
 		return "", nil, err
 	}
 
-	plan := DiffDelta(items, stored)
+	plan := DiffDelta(changes, stored)
 	res = &Result{Plan: plan}
 
 	// Assemble the work as file infos / IDs so the durable pending sets (and
-	// their re-fetched SharePoint state) can be merged in before applying.
-	var addFiles, updateFiles []sharepoint.FileInfo
+	// their re-fetched source state) can be merged in before applying.
+	var addFiles, updateFiles []source.FileInfo
 	for _, id := range plan.Add {
 		addFiles = append(addFiles, fileByID[id])
 	}
 	for _, id := range plan.Update {
 		updateFiles = append(updateFiles, fileByID[id])
 	}
-	var removeIDs []string // SharePoint file IDs of deleted items
-	for _, it := range items {
+	var removeIDs []string // source file IDs of deleted items
+	for _, it := range changes {
 		if it.Deleted && it.ID != "" {
 			removeIDs = append(removeIDs, it.ID)
 		}
@@ -80,7 +64,7 @@ func RunDelta(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, sp
 	// Listener mode: fold in previously-failed items and resolve any file that
 	// now lands in more than one action list.
 	if opts.Retry != nil {
-		addFiles, updateFiles, removeIDs = opts.Retry.merge(gc, driveID, addFiles, updateFiles, removeIDs)
+		addFiles, updateFiles, removeIDs = opts.Retry.merge(ctx, src, addFiles, updateFiles, removeIDs)
 	}
 
 	for _, fid := range removeIDs {
@@ -97,16 +81,16 @@ func RunDelta(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, sp
 		opts.Retry.recordRemove(fid, ok)
 	}
 	for _, f := range addFiles {
-		opts.Retry.recordAdd(f.ID, res.ingest(ctx, gc, gm, spaceID, f, false, opts))
+		opts.Retry.recordAdd(f.ID, res.ingest(ctx, src, gm, spaceID, f, false, opts))
 	}
 	for _, f := range updateFiles {
-		opts.Retry.recordUpdate(f.ID, res.ingest(ctx, gc, gm, spaceID, f, true, opts))
+		opts.Retry.recordUpdate(f.ID, res.ingest(ctx, src, gm, spaceID, f, true, opts))
 	}
-	return newLink, res, nil
+	return next, res, nil
 }
 
 // goodmemStoredModified returns, for each memory UUID that exists in Goodmem,
-// the SharePoint modified_datetime stored in its metadata (present key = exists;
+// the source modified_datetime stored in its metadata (present key = exists;
 // value may be "" if the memory lacks that metadata).
 func goodmemStoredModified(ctx context.Context, gm *goodmem.Client, uuids []string) (map[string]string, error) {
 	stored := make(map[string]string, len(uuids))

@@ -69,10 +69,11 @@ func runSyncOnce(args []string) error {
 	if err != nil {
 		return err
 	}
-	gc, gmc, err := buildClients(cfg)
+	gmc, err := buildGoodmem(cfg)
 	if err != nil {
 		return err
 	}
+	src := buildSource(cfg, cfg.SharePointFolderPath)
 	ctx := context.Background()
 	spaceID, err := syncer.ResolveSpaceID(ctx, gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
 	if err != nil {
@@ -80,8 +81,7 @@ func runSyncOnce(args []string) error {
 	}
 	fmt.Printf("Space: %s\n", spaceID)
 
-	res, err := syncer.RunFull(ctx, gc, gmc, spaceID, syncer.Options{
-		FolderPath:        cfg.SharePointFolderPath,
+	res, err := syncer.RunFull(ctx, src, gmc, spaceID, syncer.Options{
 		ExtractPageImages: cfg.ExtractPageImages,
 		DryRun:            *dryRun,
 		MaxFileBytes:      int64(atoiOr(os.Getenv("SHAREPOINT_MAX_FILE_MB"), 100)) * 1024 * 1024,
@@ -90,7 +90,7 @@ func runSyncOnce(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("SharePoint files: %d   Goodmem memories: %d\n", res.SharePointFiles, res.GoodmemMemories)
+	fmt.Printf("Source files: %d   Goodmem memories: %d\n", res.SourceFiles, res.GoodmemMemories)
 	fmt.Printf("Plan: +%d add   ~%d update   -%d delete\n", len(res.Plan.Add), len(res.Plan.Update), len(res.Plan.Delete))
 	if n := len(res.Plan.UnexpectedNewer); n > 0 {
 		fmt.Printf("Warning: %d file(s) have a Goodmem timestamp ≥ SharePoint (skipped): %v\n", n, res.Plan.UnexpectedNewer)
@@ -128,10 +128,11 @@ func runServe(args []string) error {
 	if strings.TrimSpace(cfg.GraphNotificationURL) == "" {
 		return errors.New("GRAPH_NOTIFICATION_URL is required for serve")
 	}
-	gc, gmc, err := buildClients(cfg)
+	gmc, err := buildGoodmem(cfg)
 	if err != nil {
 		return err
 	}
+	src := buildSource(cfg, "") // the listener always syncs the whole drive
 	spaceID, err := syncer.ResolveSpaceID(context.Background(), gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
 	if err != nil {
 		return err
@@ -145,10 +146,9 @@ func runServe(args []string) error {
 	fullSyncMin := atoiOr(os.Getenv("GRAPH_FULL_SYNC_MINUTES"), max(subMin/2, 20))
 
 	l := &server.Listener{
-		GC:                gc,
+		Src:               src,
 		GM:                gmc,
 		SpaceID:           spaceID,
-		ClientState:       cfg.GraphClientState,
 		NotificationURL:   cfg.GraphNotificationURL,
 		SubMinutes:        subMin,
 		FullSyncMinutes:   fullSyncMin,
@@ -251,13 +251,19 @@ func loadConfig(envFile string) (*config.Config, error) {
 	return cfg, nil
 }
 
-func buildClients(cfg *config.Config) (*sharepoint.Client, *goodmem.Client, error) {
-	gc := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+// buildSource constructs the SharePoint provider adapter (a source.Source).
+// folderPath scopes a one-time full sync ("" = whole drive, as the listener uses).
+func buildSource(cfg *config.Config, folderPath string) *sharepoint.Adapter {
+	c := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+	return sharepoint.NewAdapter(c, folderPath, cfg.GraphClientState)
+}
+
+func buildGoodmem(cfg *config.Config) (*goodmem.Client, error) {
 	gmc, err := gm.New(cfg.GoodmemBaseURL, cfg.GoodmemAPIKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("goodmem client: %w", err)
+		return nil, fmt.Errorf("goodmem client: %w", err)
 	}
-	return gc, gmc, nil
+	return gmc, nil
 }
 
 func firstNonEmpty(vals ...string) string {

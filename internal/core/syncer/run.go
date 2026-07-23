@@ -1,35 +1,33 @@
 package syncer
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"fury.io/pairsys/goodmem"
 	gmodels "fury.io/pairsys/goodmem/models"
 
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 )
 
 // Result summarizes a full sync run.
 type Result struct {
-	SharePointFiles int
+	SourceFiles     int
 	GoodmemMemories int
 	Plan            Plan
 	Added           int
 	Updated         int
 	Deleted         int
-	Skipped         int      // unsupported MIME / no download URL
+	Skipped         int      // unsupported MIME / oversized
 	Errors          []string // non-fatal per-item failures
 }
 
 // Options carries cross-cutting sync settings shared by the full and delta paths.
 type Options struct {
-	FolderPath        string    // scope the full-sync listing to this folder; "" = whole drive
 	ExtractPageImages bool      // hint Goodmem to extract page images (e.g. PDF page screenshots)
 	DryRun            bool      // compute the plan without mutating Goodmem (full sync only)
 	MaxFileBytes      int64     // skip files larger than this before downloading (0 = no cap)
@@ -45,17 +43,13 @@ func (o Options) emit(e SyncEvent) {
 	}
 }
 
-// RunFull performs a one-shot full sync from a SharePoint site to a Goodmem
-// space (the sync-once path). When opts.DryRun is true it computes and returns
-// the plan without mutating Goodmem.
-func RunFull(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spaceID string, opts Options) (*Result, error) {
-	siteID, err := gc.GetSiteID()
+// RunFull performs a full sync from a source to a Goodmem space (the sync-once
+// path). When opts.DryRun is true it computes and returns the plan without
+// mutating Goodmem.
+func RunFull(ctx context.Context, src source.Source, gm *goodmem.Client, spaceID string, opts Options) (*Result, error) {
+	files, err := src.ListFiles(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("resolve site: %w", err)
-	}
-	files, err := gc.ListFiles("", opts.FolderPath, true, siteID)
-	if err != nil {
-		return nil, fmt.Errorf("list SharePoint files: %w", err)
+		return nil, fmt.Errorf("list source files: %w", err)
 	}
 
 	memIDs, stored, err := listGoodmemMemories(ctx, gm, spaceID)
@@ -64,26 +58,26 @@ func RunFull(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spa
 	}
 
 	plan := DiffFull(files, memIDs, stored)
-	res := &Result{SharePointFiles: len(files), GoodmemMemories: len(memIDs), Plan: plan}
+	res := &Result{SourceFiles: len(files), GoodmemMemories: len(memIDs), Plan: plan}
 	if opts.DryRun {
 		return res, nil
 	}
 
 	// Guard against a partial/failed listing wiping memories: refuse the apply if
-	// SharePoint returned zero files while Goodmem is non-empty (a transient
-	// Graph/auth failure), or if the plan would delete an implausibly large share
-	// of the space (a listing that silently dropped a subtree). Either way the
-	// next successful sync applies the real change.
+	// the source returned zero files while Goodmem is non-empty (a transient
+	// failure), or if the plan would delete an implausibly large share of the
+	// space (a listing that silently dropped a subtree). Either way the next
+	// successful sync applies the real change.
 	if reason := refuseMassDelete(len(files), len(memIDs), len(plan.Delete), opts.MaxDeleteRatio); reason != "" {
 		return res, fmt.Errorf("refusing to apply full sync: %s", reason)
 	}
 
-	byID := make(map[string]sharepoint.FileInfo, len(files))
+	byID := make(map[string]source.FileInfo, len(files))
 	for _, f := range files {
 		byID[f.ID] = f
 	}
 
-	// Delete orphaned memories (no longer in SharePoint).
+	// Delete orphaned memories (no longer at the source).
 	for _, uuid := range plan.Delete {
 		if err := gm.Memories().Delete(ctx, uuid); err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("delete %s: %v", uuid, err))
@@ -100,10 +94,10 @@ func RunFull(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spa
 	// full sync itself re-heals dropped adds/removes via the diff, so it does not
 	// merge the pending sets (that happens in the delta path).
 	for _, id := range plan.Add {
-		opts.Retry.recordAdd(id, res.ingest(ctx, gc, gm, spaceID, byID[id], false, opts))
+		opts.Retry.recordAdd(id, res.ingest(ctx, src, gm, spaceID, byID[id], false, opts))
 	}
 	for _, id := range plan.Update {
-		opts.Retry.recordUpdate(id, res.ingest(ctx, gc, gm, spaceID, byID[id], true, opts))
+		opts.Retry.recordUpdate(id, res.ingest(ctx, src, gm, spaceID, byID[id], true, opts))
 	}
 	return res, nil
 }
@@ -125,7 +119,7 @@ const massDeleteFloor = 10
 // to allow a genuinely large deletion through.
 func refuseMassDelete(nFiles, nMemories, nDelete int, maxDeleteRatio float64) string {
 	if nFiles == 0 && nMemories > 0 {
-		return fmt.Sprintf("SharePoint returned 0 files but Goodmem has %d memories (likely a transient Graph/auth failure); skipping to avoid deleting everything", nMemories)
+		return fmt.Sprintf("source returned 0 files but Goodmem has %d memories (likely a transient failure); skipping to avoid deleting everything", nMemories)
 	}
 	if maxDeleteRatio > 0 && nDelete > massDeleteFloor && float64(nDelete) > maxDeleteRatio*float64(nMemories) {
 		return fmt.Sprintf("plan would delete %d of %d memories (>%.0f%%); refusing as a likely partial listing — raise GRAPH_MAX_DELETE_RATIO (e.g. 1) to override", nDelete, nMemories, maxDeleteRatio*100)
@@ -133,9 +127,9 @@ func refuseMassDelete(nFiles, nMemories, nDelete int, maxDeleteRatio float64) st
 	return ""
 }
 
-// ingest downloads a file and (re-)creates its memory. Unsupported types and
-// files without a download URL are skipped (mirroring sync_once.py).
-func (res *Result) ingest(ctx context.Context, gc *sharepoint.Client, gm *goodmem.Client, spaceID string, f sharepoint.FileInfo, isUpdate bool, opts Options) ingestResult {
+// ingest fetches a file and (re-)creates its memory. Unsupported types and
+// oversized files are skipped.
+func (res *Result) ingest(ctx context.Context, src source.Source, gm *goodmem.Client, spaceID string, f source.FileInfo, isUpdate bool, opts Options) ingestResult {
 	op := "add"
 	if isUpdate {
 		op = "update"
@@ -145,14 +139,14 @@ func (res *Result) ingest(ctx context.Context, gc *sharepoint.Client, gm *goodme
 		opts.emit(SyncEvent{FileID: f.ID, FileName: f.Name, MemoryID: uuid, SpaceID: spaceID, Op: op, Status: status, Message: msg})
 	}
 
-	if !IsMimeSupported(f.MimeType) || f.DownloadURL == "" {
+	if !IsMimeSupported(f.MimeType) {
 		res.Skipped++
-		emit("skipped", "unsupported MIME or no download URL")
+		emit("skipped", "unsupported MIME type")
 		return resSkipped
 	}
-	// Skip oversized files before downloading — Download buffers the whole file in
-	// memory, so a multi-hundred-MB file would OOM a small VM. Recorded as skipped
-	// (not queued for retry) so it does not loop forever in the pending set.
+	// Skip oversized files before fetching — a multi-hundred-MB file would OOM a
+	// small VM. Recorded as skipped (not queued for retry) so it does not loop
+	// forever in the pending set.
 	if opts.MaxFileBytes > 0 && f.Size > opts.MaxFileBytes {
 		res.Skipped++
 		emit("skipped", fmt.Sprintf("file size %.1f MB exceeds cap %.1f MB", float64(f.Size)/1e6, float64(opts.MaxFileBytes)/1e6))
@@ -160,20 +154,21 @@ func (res *Result) ingest(ctx context.Context, gc *sharepoint.Client, gm *goodme
 	}
 	if isUpdate {
 		// A 404 means the memory is already gone; treat it as an add and fall
-		// through rather than aborting the update (matching listener.py).
+		// through rather than aborting the update.
 		if err := gm.Memories().Delete(ctx, uuid); err != nil && !isNotFound(err) {
 			res.Errors = append(res.Errors, fmt.Sprintf("pre-update delete %s: %v", f.Name, err))
 			emit("failure", "pre-update delete: "+err.Error())
 			return resTransient
 		}
 	}
-	content, err := gc.Download(f.DownloadURL)
+	rc, err := src.Open(ctx, f)
 	if err != nil {
-		res.Errors = append(res.Errors, fmt.Sprintf("download %s: %v", f.Name, err))
-		emit("failure", "download: "+err.Error())
+		res.Errors = append(res.Errors, fmt.Sprintf("fetch %s: %v", f.Name, err))
+		emit("failure", "fetch: "+err.Error())
 		return resTransient
 	}
-	mem, err := createMemory(ctx, gm, spaceID, f, content, opts.ExtractPageImages)
+	defer rc.Close()
+	mem, err := createMemory(ctx, gm, spaceID, f, rc, opts.ExtractPageImages)
 	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: %v", f.Name, err))
 		emit("failure", "create: "+err.Error())
@@ -238,9 +233,10 @@ func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string
 }
 
 // createMemory creates a Goodmem memory for f's content, using the deterministic
-// memoryId and storing the file metadata (including modified_datetime). It
-// returns the created memory so the caller can inspect its processingStatus.
-func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f sharepoint.FileInfo, content []byte, extractPageImages bool) (*gmodels.Memory, error) {
+// memoryId and the provider-supplied metadata (guaranteeing modified_datetime is
+// stored, which the diff reads back). It returns the created memory so the caller
+// can inspect its processingStatus.
+func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f source.FileInfo, content io.Reader, extractPageImages bool) (*gmodels.Memory, error) {
 	mime := f.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
@@ -250,33 +246,24 @@ func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f sha
 	if filename == "" {
 		filename = "upload"
 	}
+	md := map[string]any{}
+	for k, v := range f.Metadata {
+		md[k] = v
+	}
+	if f.ModifiedDateTime != "" {
+		md["modified_datetime"] = f.ModifiedDateTime // the diff compares against this
+	}
 	req := &gmodels.JSONMemoryCreationRequest{
 		SpaceID:     spaceID,
 		MemoryID:    &uuid,
 		ContentType: mime,
-		Metadata:    fileMetadata(f),
+		Metadata:    md,
 	}
 	if extractPageImages {
 		t := true
 		req.ExtractPageImages = &t
 	}
-	return gm.Memories().CreateFromReader(ctx, bytes.NewReader(content), filename, req)
-}
-
-// fileMetadata converts a FileInfo to the metadata map stored on the memory,
-// dropping empty fields (mirroring the Python `{k: v for ... if v is not None}`).
-func fileMetadata(f sharepoint.FileInfo) map[string]any {
-	b, _ := json.Marshal(f)
-	var m map[string]any
-	_ = json.Unmarshal(b, &m)
-	for k, v := range m {
-		if s, ok := v.(string); ok && s == "" {
-			delete(m, k)
-		} else if v == nil {
-			delete(m, k)
-		}
-	}
-	return m
+	return gm.Memories().CreateFromReader(ctx, content, filename, req)
 }
 
 // ResolveSpaceID returns the target Goodmem space id: an explicit spaceID, else

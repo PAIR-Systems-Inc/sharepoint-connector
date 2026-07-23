@@ -152,18 +152,23 @@ key as a new secret class, `channels.stop` cleanup, and Shared-Drive scoping doc
 
 ## Phased plan
 
-1. **Module rename** → `goodmem-connectors` (mechanical; tests stay green). ← *this PR*
-2. **Restructure** → `internal/core/*` + `internal/providers/sharepoint` (package
-   `graph`→`sharepoint`); no behavior change. ← *this PR*
-3. **Extract `source.Source` + neutral types**; retype `syncer`/`server` off the
-   provider; SharePoint becomes adapter #1. Rename metrics to `connector_*` + `source`
-   label. Green throughout.
+1. ✅ **Module rename** → `goodmem-connectors` (mechanical; tests green).
+2. ✅ **Restructure** → `internal/core/*` + `internal/providers/sharepoint` (package
+   `graph`→`sharepoint`); no behavior change.
+3. ✅ **Extract `source.Source` + neutral types** (`internal/core/source`); retyped
+   `syncer`/`server` off the provider; SharePoint is now an `Adapter` implementing the
+   interface (data plane + webhook validation + subscription + throttle). Green throughout.
 4. **gdrive provider** against the interface + in-process fakes (mirror `core/fakes`).
 5. **CLI/config** source selection + per-provider validation; `.env.example` + drift test.
 6. **Productionize gdrive**: export policy, channel renewal/stop, docs, one live pass.
 
-Steps 1–2 are pure refactors worth doing regardless; 3 is the real design work; 4–6
-deliver Google Drive.
+Deferred (do alongside gdrive, not blocking): rename the `sharepoint_*` metrics to a
+neutral `connector_*` prefix with a `source` label; generalize the `GRAPH_*`/
+`SHAREPOINT_*` env knobs that aren't provider-specific; stream `Open` straight into
+`CreateFromReader` (the interface already returns an `io.ReadCloser`).
+
+Steps 1–3 were pure refactors of the existing SharePoint connector — the engine is now
+provider-neutral, so step 4 is additive (a new folder) rather than invasive.
 
 ## Sources
 

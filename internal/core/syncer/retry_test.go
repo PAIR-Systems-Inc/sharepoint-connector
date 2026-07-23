@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/gm"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 )
 
 // pending reports whether id is present in a pending set (attempt count ignored).
@@ -175,26 +175,26 @@ func TestPollStatus(t *testing.T) {
 // TestMergeAndConflicts covers pending-merge (re-fetch, 404 discard) and the
 // intra-sync conflict resolution.
 func TestMergeAndConflicts(t *testing.T) {
-	supported := &sharepoint.FileInfo{ID: "keep", Name: "keep.pdf", MimeType: "application/pdf", DownloadURL: "http://x/keep"}
+	supported := &source.FileInfo{ID: "keep", Name: "keep.pdf", MimeType: "application/pdf", DownloadRef: "http://x/keep"}
 	getter := &fakeGetter{
-		files: map[string]*sharepoint.FileInfo{
+		files: map[string]*source.FileInfo{
 			"keep":     supported,
-			"conflict": {ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadURL: "http://x/c"},
+			"conflict": {ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadRef: "http://x/c"},
 		},
 		errs: map[string]error{
-			"gone": &sharepoint.HTTPError{StatusCode: 404},
+			"gone": source.ErrNotFound,
 		},
 	}
 	dir := t.TempDir()
 	r := NewRetrier(dir, 0)
-	// Seed pending sets: an add that still exists, an add that's 404-gone, and a
-	// remove that conflicts with a live delta add of the same file.
+	// Seed pending sets: an add that still exists, an add that's gone (ErrNotFound),
+	// and a remove that conflicts with a live delta add of the same file.
 	r.recordAdd("keep", resTransient)
 	r.recordAdd("gone", resTransient)
 	r.recordRemove("conflict", false)
 
-	deltaAdd := []sharepoint.FileInfo{{ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadURL: "http://x/c"}}
-	adds, updates, removes := r.merge(getter, "drive1", deltaAdd, nil, nil)
+	deltaAdd := []source.FileInfo{{ID: "conflict", Name: "c.pdf", MimeType: "application/pdf", DownloadRef: "http://x/c"}}
+	adds, updates, removes := r.merge(context.Background(), getter, deltaAdd, nil, nil)
 
 	// "keep" merged into adds; "gone" dropped and discarded from pending-add.
 	if !hasFileID(adds, "keep") {
@@ -224,11 +224,11 @@ func TestMergeAndConflicts(t *testing.T) {
 }
 
 type fakeGetter struct {
-	files map[string]*sharepoint.FileInfo
+	files map[string]*source.FileInfo
 	errs  map[string]error
 }
 
-func (f *fakeGetter) GetFileByID(driveID, id string) (*sharepoint.FileInfo, error) {
+func (f *fakeGetter) GetFile(ctx context.Context, id string) (*source.FileInfo, error) {
 	if e := f.errs[id]; e != nil {
 		return nil, e
 	}

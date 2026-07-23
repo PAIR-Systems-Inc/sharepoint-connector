@@ -5,15 +5,15 @@ import (
 	"testing"
 
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 )
 
 // TestDiffFull is a characterization test of the full-sync set math + timestamp
-// rules, pinning the Go engine to sync_once.py's behavior.
+// rules.
 func TestDiffFull(t *testing.T) {
-	sp := []sharepoint.FileInfo{
-		{ID: "A", ModifiedDateTime: "2026-01-02T00:00:00Z"}, // in both, SharePoint newer -> update
-		{ID: "B", ModifiedDateTime: "2026-01-01T00:00:00Z"}, // only in SharePoint  -> add
+	sp := []source.FileInfo{
+		{ID: "A", ModifiedDateTime: "2026-01-02T00:00:00Z"}, // in both, source newer -> update
+		{ID: "B", ModifiedDateTime: "2026-01-01T00:00:00Z"}, // only at source      -> add
 		{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}, // in both, equal       -> skip
 		{ID: "D", ModifiedDateTime: "2026-01-01T00:00:00Z"}, // in both, Goodmem newer-> anomaly
 	}
@@ -42,7 +42,7 @@ func TestDiffFull(t *testing.T) {
 }
 
 func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
-	sp := []sharepoint.FileInfo{{ID: "E", ModifiedDateTime: "2026-01-01T00:00:00Z"}}
+	sp := []source.FileInfo{{ID: "E", ModifiedDateTime: "2026-01-01T00:00:00Z"}}
 	gm := []string{memid.FromFileID("E")}
 	got := DiffFull(sp, gm, map[string]string{}) // no stored ts
 	if len(got.Update) != 1 || got.Update[0] != "E" || len(got.Add) != 0 || len(got.Delete) != 0 {
@@ -52,18 +52,18 @@ func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
 
 // TestDiffDelta pins the delta classification to the listener's behavior.
 func TestDiffDelta(t *testing.T) {
-	items := []sharepoint.Item{
-		{ID: "D", Deleted: true},  // deleted -> Delete uuid(D)
-		{ID: "F", IsFolder: true}, // folder  -> ignored
-		{ID: "A", IsFile: true, File: sharepoint.FileInfo{ID: "A", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // new     -> Add
-		{ID: "B", IsFile: true, File: sharepoint.FileInfo{ID: "B", ModifiedDateTime: "2026-01-02T00:00:00Z"}}, // present, stored older -> Update
-		{ID: "C", IsFile: true, File: sharepoint.FileInfo{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // present, stored newer -> Update + anomaly
+	changes := []source.Change{
+		{ID: "D", Deleted: true}, // deleted -> Delete uuid(D)
+		{ID: "F"},                // non-file (folder) -> ignored
+		{ID: "A", IsFile: true, File: source.FileInfo{ID: "A", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // new     -> Add
+		{ID: "B", IsFile: true, File: source.FileInfo{ID: "B", ModifiedDateTime: "2026-01-02T00:00:00Z"}}, // present, stored older -> Update
+		{ID: "C", IsFile: true, File: source.FileInfo{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // present, stored newer -> Update + anomaly
 	}
 	stored := map[string]string{
 		memid.FromFileID("B"): "2026-01-01T00:00:00Z", // older -> update
 		memid.FromFileID("C"): "2026-01-02T00:00:00Z", // newer -> update + anomaly
 	}
-	got := DiffDelta(items, stored)
+	got := DiffDelta(changes, stored)
 	want := Plan{
 		Add:             []string{"A"},
 		Update:          []string{"B", "C"},

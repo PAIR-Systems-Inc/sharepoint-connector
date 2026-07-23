@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,33 +15,31 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/store"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 // Listener runs the event-triggered sync: it stands up the webhook server, does
-// a startup full sync, bootstraps and persists the Graph delta link, ensures the
-// change subscription (with a renewal loop), and on each notification runs a
-// delta sync. Syncs are serialized. Ported from listener.py's orchestration.
+// a startup full sync, bootstraps and persists the incremental cursor, ensures
+// the change subscription (with a renewal loop), and on each notification runs a
+// delta sync. Syncs are serialized. Provider-agnostic — it drives a source.Source.
 type Listener struct {
-	GC                *sharepoint.Client
+	Src               source.Source
 	GM                *goodmem.Client
 	SpaceID           string
-	ClientState       string
 	NotificationURL   string
 	SubMinutes        int
 	FullSyncMinutes   int // periodic safety full-sync interval; <= 0 disables it
 	Port              string
-	DeltaPath         string  // file holding the Graph delta link
+	DeltaPath         string  // file holding the incremental cursor
 	ExtractPageImages bool    // hint Goodmem to extract page images
 	MaxItemAttempts   int     // transient failures before an item is dead-lettered
 	MaxDeleteRatio    float64 // refuse a full sync deleting > this fraction of memories
 	MaxFileBytes      int64   // skip files larger than this before downloading (0 = no cap)
 	RetentionDays     int     // prune sync history older than this many days (<= 0 disables)
-	IgnoredFolderPath string  // set when SHAREPOINT_FOLDER_PATH is configured but ignored (listener syncs whole drive)
+	IgnoredFolderPath string  // set when a folder scope is configured but ignored (listener syncs whole drive)
 
-	driveID   string
 	delta     deltaStore
 	retry     *syncer.Retrier
 	history   *store.Store
@@ -76,7 +75,7 @@ func (l *Listener) Run(ctx context.Context) error {
 	}
 	l.retry = syncer.NewRetrier(stateDir, l.MaxItemAttempts)
 	l.notify = make(chan struct{}, 1)
-	l.server = New(l.ClientState, func(int) { l.signal() })
+	l.server = New(l.Src, func(int) { l.signal() })
 	l.server.Metrics.SetPendingFn(l.retry.Counts)
 	l.server.SetReadyFn(l.ready.Load)
 	l.server.Log("info", "durable state dir: "+stateDir+" (delta cursor + pending-retry sets)")
@@ -106,30 +105,20 @@ func (l *Listener) Run(ctx context.Context) error {
 	// GET /syncs (set after eventSink is resolved; nil is fine — events discarded).
 	l.retry.Sink = l.eventSink
 
-	// Surface Graph throttling/backoff in the activity log + metrics.
-	l.GC.OnThrottle = func(status, attempt int, retryAfter time.Duration) {
-		l.server.Metrics.RecordThrottle()
-		msg := fmt.Sprintf("[throttle] Graph status=%d; backing off before retry %d", status, attempt)
-		if retryAfter > 0 {
-			msg += fmt.Sprintf(" (Retry-After %s)", retryAfter)
-		}
-		l.server.Log("warn", msg)
+	// Surface provider throttling/backoff in the activity log + metrics (providers
+	// that back off implement source.ThrottleReporter).
+	if tr, ok := l.Src.(source.ThrottleReporter); ok {
+		tr.SetThrottleHook(func(status, attempt int, retryAfter time.Duration) {
+			l.server.Metrics.RecordThrottle()
+			msg := fmt.Sprintf("[throttle] source status=%d; backing off before retry %d", status, attempt)
+			if retryAfter > 0 {
+				msg += fmt.Sprintf(" (Retry-After %s)", retryAfter)
+			}
+			l.server.Log("warn", msg)
+		})
 	}
 
-	siteID, err := l.GC.GetSiteID()
-	if err != nil {
-		return fmt.Errorf("resolve site: %w", err)
-	}
-	drives, err := l.GC.GetDrives(siteID)
-	if err != nil {
-		return fmt.Errorf("list drives: %w", err)
-	}
-	if len(drives) == 0 {
-		return fmt.Errorf("no drives found for site")
-	}
-	l.driveID = drives[0].ID
-
-	// Bind the port first so Graph's subscription-validation POST can reach us.
+	// Bind the port first so the provider's subscription-validation POST can reach us.
 	ln, err := net.Listen("tcp", ":"+l.Port)
 	if err != nil {
 		return err
@@ -158,12 +147,12 @@ func (l *Listener) Run(ctx context.Context) error {
 // creates/renews the subscription (after the server is listening).
 func (l *Listener) startup() {
 	l.fullSyncLocked("startup")
-	sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes)
+	sub, err := l.Src.EnsureSubscription(l.baseCtx, l.NotificationURL, time.Duration(l.SubMinutes)*time.Minute)
 	l.server.Metrics.RecordRenewal(err == nil)
 	if err != nil {
 		l.server.Log("error", "subscription: "+err.Error())
 	} else {
-		l.server.Log("info", "subscription ready (expires "+sub.ExpirationDateTime+")")
+		l.server.Log("info", "subscription ready (expires "+sub.Expiration+")")
 		l.ready.Store(true) // startup full sync done + subscription ensured → serve /readyz 200
 	}
 }
@@ -187,8 +176,8 @@ func (l *Listener) fullSyncLocked(tag string) {
 //     sync would silently skip every change in between until the next reconcile.
 func (l *Listener) runFull(tag string) error {
 	l.server.Log("info", "["+tag+"] full sync starting")
-	_, preLink, derr := l.GC.DriveDelta(l.driveID, "", true)
-	res, err := syncer.RunFull(l.baseCtx, l.GC, l.GM, l.SpaceID, l.opts())
+	preLink, derr := l.Src.LatestCursor(l.baseCtx)
+	res, err := syncer.RunFull(l.baseCtx, l.Src, l.GM, l.SpaceID, l.opts())
 	if err != nil {
 		l.server.Log("error", "["+tag+"] full sync: "+err.Error())
 	} else {
@@ -240,7 +229,7 @@ func (l *Listener) subscriptionLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			sub, err := l.GC.EnsureSubscription(l.NotificationURL, l.ClientState, l.SubMinutes)
+			sub, err := l.Src.EnsureSubscription(ctx, l.NotificationURL, time.Duration(l.SubMinutes)*time.Minute)
 			l.server.Metrics.RecordRenewal(err == nil)
 			if err != nil {
 				l.server.Log("error", fmt.Sprintf("subscription renew failed: %v; retrying in %s", err, retry))
@@ -249,7 +238,7 @@ func (l *Listener) subscriptionLoop(ctx context.Context) {
 					retry = retryMax
 				}
 			} else {
-				l.server.Log("info", "subscription renewed (expires "+sub.ExpirationDateTime+")")
+				l.server.Log("info", "subscription renewed (expires "+sub.Expiration+")")
 				l.ready.Store(true) // recovered if the startup subscription had failed
 				retry = retryMin
 				t.Reset(normal)
@@ -287,9 +276,9 @@ func (l *Listener) runDelta() {
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
 	l.server.Log("info", "[delta] sync starting")
-	newLink, res, err := syncer.RunDelta(l.baseCtx, l.GC, l.GM, l.SpaceID, l.driveID, l.delta.load(), l.opts())
-	if err == syncer.ErrDeltaExpired {
-		l.server.Log("info", "[delta] token expired; running full sync")
+	newLink, res, err := syncer.RunDelta(l.baseCtx, l.Src, l.GM, l.SpaceID, l.delta.load(), l.opts())
+	if errors.Is(err, source.ErrCursorExpired) {
+		l.server.Log("info", "[delta] cursor expired; running full sync")
 		l.runFull("delta-fallback")
 		return
 	}
