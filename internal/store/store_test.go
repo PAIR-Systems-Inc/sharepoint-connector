@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
 )
 
 // TestPrune verifies retention pruning removes rows older than the cutoff (and

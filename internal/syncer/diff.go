@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
 )
 
 // Plan is the outcome of a diff: what to add, update, and delete.

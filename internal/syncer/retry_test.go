@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/gm"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
 )
 
 // pending reports whether id is present in a pending set (attempt count ignored).

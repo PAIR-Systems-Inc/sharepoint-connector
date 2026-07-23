@@ -1,4 +1,4 @@
-module github.com/PAIR-Systems-Inc/sharepoint-connector
+module github.com/PAIR-Systems-Inc/goodmem-connectors
 
 go 1.23
 

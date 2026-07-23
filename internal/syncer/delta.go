@@ -7,8 +7,8 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
 )
 
 // ErrDeltaExpired means the Graph delta token was invalid (410 Gone). The

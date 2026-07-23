@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
 )
 
 // TestDiffFull is a characterization test of the full-sync set math + timestamp

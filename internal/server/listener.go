@@ -14,9 +14,9 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/store"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/store"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
 )
 
 // Listener runs the event-triggered sync: it stands up the webhook server, does

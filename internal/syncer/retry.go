@@ -14,7 +14,7 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
 )
 
 // Retrier carries the durable failure-retry state and Goodmem processing-status

@@ -11,8 +11,8 @@ import (
 	"fury.io/pairsys/goodmem"
 	gmodels "fury.io/pairsys/goodmem/models"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
 )
 
 // Result summarizes a full sync run.

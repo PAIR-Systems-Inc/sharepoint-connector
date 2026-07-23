@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
 )
 
 func TestMetricsExposition(t *testing.T) {

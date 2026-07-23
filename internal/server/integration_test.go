@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/fakes"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/gm"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/fakes"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
 )
 
 // TestIntegration_ListenerMetrics runs the REAL Listener (its real HTTP server)

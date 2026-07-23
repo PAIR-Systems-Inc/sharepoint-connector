@@ -9,10 +9,10 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/fakes"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/gm"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/memid"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/fakes"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/memid"
 )
 
 // End-to-end harness: drives the REAL graph.Client and the REAL Goodmem SDK

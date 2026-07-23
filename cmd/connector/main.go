@@ -22,11 +22,11 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/config"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/gm"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/server"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/config"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/graph"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/server"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
 )
 
 func main() {

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/syncer"
 )
 
 // Notifier is invoked (asynchronously) when a validated change notification
