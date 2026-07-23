@@ -22,11 +22,13 @@ import (
 
 	"fury.io/pairsys/goodmem"
 
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/config"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/gm"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/graph"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/server"
-	"github.com/PAIR-Systems-Inc/sharepoint-connector/internal/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/config"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/gm"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/server"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/gdrive"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
 func main() {
@@ -62,26 +64,33 @@ func main() {
 func runSyncOnce(args []string) error {
 	fs := flag.NewFlagSet("sync-once", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|gdrive (overrides SOURCE)")
 	dryRun := fs.Bool("dry-run", false, "compute the sync plan without changing Goodmem")
 	_ = fs.Parse(args)
+	if *srcFlag != "" {
+		os.Setenv("SOURCE", *srcFlag)
+	}
 
 	cfg, err := loadConfig(*envFile)
 	if err != nil {
 		return err
 	}
-	gc, gmc, err := buildClients(cfg)
+	gmc, err := buildGoodmem(cfg)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
-	spaceID, err := syncer.ResolveSpaceID(ctx, gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
+	src, err := buildSource(ctx, cfg, cfg.SharePointFolderPath)
+	if err != nil {
+		return err
+	}
+	spaceID, err := syncer.ResolveSpaceID(ctx, gmc, cfg.GoodmemSpaceID, spaceName(cfg), cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Space: %s\n", spaceID)
 
-	res, err := syncer.RunFull(ctx, gc, gmc, spaceID, syncer.Options{
-		FolderPath:        cfg.SharePointFolderPath,
+	res, err := syncer.RunFull(ctx, src, gmc, spaceID, syncer.Options{
 		ExtractPageImages: cfg.ExtractPageImages,
 		DryRun:            *dryRun,
 		MaxFileBytes:      int64(atoiOr(os.Getenv("SHAREPOINT_MAX_FILE_MB"), 100)) * 1024 * 1024,
@@ -90,7 +99,7 @@ func runSyncOnce(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("SharePoint files: %d   Goodmem memories: %d\n", res.SharePointFiles, res.GoodmemMemories)
+	fmt.Printf("Source files: %d   Goodmem memories: %d\n", res.SourceFiles, res.GoodmemMemories)
 	fmt.Printf("Plan: +%d add   ~%d update   -%d delete\n", len(res.Plan.Add), len(res.Plan.Update), len(res.Plan.Delete))
 	if n := len(res.Plan.UnexpectedNewer); n > 0 {
 		fmt.Printf("Warning: %d file(s) have a Goodmem timestamp ≥ SharePoint (skipped): %v\n", n, res.Plan.UnexpectedNewer)
@@ -115,40 +124,49 @@ func runSyncOnce(args []string) error {
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|gdrive (overrides SOURCE)")
 	_ = fs.Parse(args)
+	if *srcFlag != "" {
+		os.Setenv("SOURCE", *srcFlag)
+	}
 
 	cfg, err := loadConfig(*envFile)
 	if err != nil {
 		return err
 	}
 	configureLogging() // structured logs to stderr (Fly logs / shippers)
+	// The webhook secret + public URL are needed regardless of source (they are the
+	// channel token / address for gdrive, the clientState / notificationUrl for SharePoint).
 	if strings.TrimSpace(cfg.GraphClientState) == "" {
-		return errors.New("GRAPH_CLIENT_STATE is required for serve")
+		return errors.New("GRAPH_CLIENT_STATE (webhook secret) is required for serve")
 	}
 	if strings.TrimSpace(cfg.GraphNotificationURL) == "" {
-		return errors.New("GRAPH_NOTIFICATION_URL is required for serve")
+		return errors.New("GRAPH_NOTIFICATION_URL (public webhook URL) is required for serve")
 	}
-	gc, gmc, err := buildClients(cfg)
+	gmc, err := buildGoodmem(cfg)
 	if err != nil {
 		return err
 	}
-	spaceID, err := syncer.ResolveSpaceID(context.Background(), gmc, cfg.GoodmemSpaceID, cfg.SharePointSiteURL, cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
+	src, err := buildSource(context.Background(), cfg, "") // the listener always syncs the whole drive
+	if err != nil {
+		return err
+	}
+	spaceID, err := syncer.ResolveSpaceID(context.Background(), gmc, cfg.GoodmemSpaceID, spaceName(cfg), cfg.GoodmemEmbedderID, cfg.OpenAIAPIKey)
 	if err != nil {
 		return err
 	}
 
 	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "5000")
 	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
-	subMin := atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault)
+	subMin := atoiOr(cfg.GraphSubscriptionMinutes, sharepoint.SubMinutesDefault)
 	// Periodic safety full-sync: defaults to the subscription-renewal cadence
 	// (~half the subscription lifetime). Set GRAPH_FULL_SYNC_MINUTES=0 to disable.
 	fullSyncMin := atoiOr(os.Getenv("GRAPH_FULL_SYNC_MINUTES"), max(subMin/2, 20))
 
 	l := &server.Listener{
-		GC:                gc,
+		Src:               src,
 		GM:                gmc,
 		SpaceID:           spaceID,
-		ClientState:       cfg.GraphClientState,
 		NotificationURL:   cfg.GraphNotificationURL,
 		SubMinutes:        subMin,
 		FullSyncMinutes:   fullSyncMin,
@@ -181,8 +199,8 @@ func runCreateSubscription(args []string) error {
 	if cfg.GraphClientState == "" || cfg.GraphNotificationURL == "" {
 		return errors.New("GRAPH_CLIENT_STATE and GRAPH_NOTIFICATION_URL are required")
 	}
-	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
-	sub, err := gc.EnsureSubscription(cfg.GraphNotificationURL, cfg.GraphClientState, atoiOr(cfg.GraphSubscriptionMinutes, graph.SubMinutesDefault))
+	gc := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+	sub, err := gc.EnsureSubscription(cfg.GraphNotificationURL, cfg.GraphClientState, atoiOr(cfg.GraphSubscriptionMinutes, sharepoint.SubMinutesDefault))
 	if err != nil {
 		return err
 	}
@@ -245,19 +263,57 @@ func loadConfig(envFile string) (*config.Config, error) {
 	if err := cfg.ValidateSync(); err != nil {
 		return nil, err
 	}
-	if err := graph.ValidateTokenRefreshBuffer(); err != nil {
+	if err := sharepoint.ValidateTokenRefreshBuffer(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-func buildClients(cfg *config.Config) (*graph.Client, *goodmem.Client, error) {
-	gc := graph.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+// buildSource constructs the configured provider adapter (a source.Source).
+// folderPath scopes a one-time SharePoint full sync ("" = whole drive; ignored by
+// gdrive, which syncs the whole Shared Drive).
+func buildSource(ctx context.Context, cfg *config.Config, folderPath string) (source.Source, error) {
+	switch cfg.Source {
+	case "gdrive":
+		var (
+			c   *gdrive.Client
+			err error
+		)
+		if cfg.HasServiceAccount() {
+			var sa []byte
+			if sa, err = cfg.ServiceAccountJSON(); err != nil {
+				return nil, err
+			}
+			c, err = gdrive.NewWithServiceAccount(ctx, sa, cfg.GDriveDriveID)
+		} else {
+			// No key configured — use Application Default Credentials.
+			c, err = gdrive.NewWithADC(ctx, cfg.GDriveDriveID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("gdrive client: %w", err)
+		}
+		return gdrive.NewAdapter(c, cfg.GraphClientState), nil
+	default: // sharepoint
+		c := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
+		return sharepoint.NewAdapter(c, folderPath, cfg.GraphClientState), nil
+	}
+}
+
+// spaceName derives the default Goodmem space name for the configured source
+// (used only when GOODMEM_SPACE_ID is unset).
+func spaceName(cfg *config.Config) string {
+	if cfg.Source == "gdrive" {
+		return "GDrive_" + cfg.GDriveDriveID
+	}
+	return syncer.SpaceNameFromSiteURL(cfg.SharePointSiteURL)
+}
+
+func buildGoodmem(cfg *config.Config) (*goodmem.Client, error) {
 	gmc, err := gm.New(cfg.GoodmemBaseURL, cfg.GoodmemAPIKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("goodmem client: %w", err)
+		return nil, fmt.Errorf("goodmem client: %w", err)
 	}
-	return gc, gmc, nil
+	return gmc, nil
 }
 
 func firstNonEmpty(vals ...string) string {

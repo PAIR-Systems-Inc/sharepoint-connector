@@ -40,24 +40,34 @@ The connector is a single Go binary, **`connector`**, with subcommands (`sync-on
 
 ## Repo layout
 
+The connector is being generalized to sync **multiple sources** into Goodmem — a
+shared **core** engine plus one folder per **provider** (SharePoint today, Google
+Drive next; see [MULTI_SOURCE.md](docs/MULTI_SOURCE.md)).
+
 ```
-sharepoint/
-├── cmd/connector/        # The `connector` binary (subcommands: sync-once, serve, create-subscription, watch).
+goodmem-connectors/
+├── cmd/connector/            # The `connector` binary (subcommands: sync-once, serve, create-subscription, watch).
 ├── internal/
-│   ├── graph/            # Microsoft Graph client: auth, drive listing, delta, subscriptions, retry/backoff.
-│   ├── gm/               # Goodmem SDK wrapper.
-│   ├── syncer/           # Sync engine: diff, apply, pending-retry, processing-status polling.
-│   ├── server/           # Webhook listener + HTTP endpoints (/sync/webhook, /healthz, /metrics, /syncs, /activity) + metrics.
-│   ├── store/            # SQLite durable sync history (behind /syncs).
-│   ├── config/           # .env / environment loading.
-│   ├── memid/            # Deterministic memory IDs.
-│   └── fakes/            # In-process fake Graph/Goodmem servers for integration tests.
-├── deploy_fly_io.sh      # Deploy the listener (and optionally Goodmem) to Fly.io.
-├── Dockerfile            # Builds `connector` into a distroless static image.
-├── fly_io.toml.template  # Fly config template (app/region substituted by the deploy script; mounts the /data volume).
-├── .env.example          # Documents every config variable.
-└── docs/                 # usage.md, tech_details.md, permission.md, PRODUCTIONIZATION.md, architecture diagram.
+│   ├── core/                 # Provider-agnostic engine (shared by every source):
+│   │   ├── syncer/           #   Sync engine: diff, apply, pending-retry, dead-letter, processing-status polling.
+│   │   ├── server/           #   Webhook listener + HTTP endpoints (/sync/webhook, /healthz, /readyz, /metrics, /syncs, /activity) + metrics.
+│   │   ├── store/            #   SQLite durable sync history (behind /syncs).
+│   │   ├── gm/               #   Goodmem SDK wrapper (the destination).
+│   │   ├── config/           #   .env / environment loading.
+│   │   ├── memid/            #   Deterministic memory IDs.
+│   │   └── fakes/            #   In-process fake source/Goodmem servers for integration tests.
+│   └── providers/
+│       └── sharepoint/       # Microsoft Graph client: auth, drive listing, delta, subscriptions, retry/backoff.
+├── deploy/alerts.yml         # Recommended Prometheus/Alertmanager rules.
+├── deploy_fly_io.sh          # Deploy the listener (and optionally Goodmem) to Fly.io.
+├── Dockerfile                # Builds `connector` into a distroless static image.
+├── fly_io.toml.template      # Fly config template (app/region substituted by the deploy script; mounts the /data volume).
+├── .env.example              # Documents every config variable.
+└── docs/                     # usage.md, MULTI_SOURCE.md, tech_details.md, permission.md, PRODUCTIONIZATION.md, architecture diagram.
 ```
+
+> A future `internal/providers/gdrive/` will add Google Drive behind the same
+> `core/source.Source` interface — the engine, endpoints, and ops surface are written once.
 
 > **Note:** the Python files (`sharepoint_client.py`, `goodmem_client.py`, `sync_once.py`, `listener.py`, `watch_listener.py`) are the original proof-of-concept, kept **only as a historical reference**. They are **never deployed** and are **not a production fallback or safety net** — the Go `connector` binary is the sole production system. Use the binary, not the Python scripts.
 
