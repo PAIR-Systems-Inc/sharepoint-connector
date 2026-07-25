@@ -80,7 +80,7 @@ The listener (`connector serve`) exposes:
 |---|---|
 | `POST /sync/webhook` | Microsoft Graph change notifications (validation handshake + `clientState` check). |
 | `GET /healthz` | Liveness probe (always `200` once the server is up). |
-| `GET /readyz` | Readiness probe — `200` only after the startup full sync completed **and** the Graph subscription is ensured; `503` until then. Point your load balancer / platform health check here so traffic isn't routed to a listener that never subscribed. |
+| `GET /readyz` | Readiness probe — `200` once the Graph subscription is ensured and the startup full sync has been **attempted**; `503` until then. A failed startup sync does **not** hold readiness — the periodic reconcile retries it, and the delta cursor isn't advanced on a failed sync so nothing is silently skipped. Point your load balancer / platform health check here so traffic isn't routed to a listener that never subscribed. |
 | `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta sync counts, Graph throttle events, subscription-renewal health, last-sync time, pending-retry queue depth, and `sharepoint_pending_dead` (items parked after exhausting retries — alert on this). Point Prometheus/Grafana here. |
 | `GET /syncs` | **Durable sync history** (SQLite): one JSON record per item — `file_id`, `file_name`, `memory_id`, `space_id`, `op`, `status`, `message`, `ts`. `status` is `success`, `failure`, `skipped`, or `dead` (parked — see below). Query params: `?limit=100&status=failure`. Great for "did file X sync, and why did it fail?". |
 | `GET /activity` | In-memory recent-events log (what `connector watch` polls). |
