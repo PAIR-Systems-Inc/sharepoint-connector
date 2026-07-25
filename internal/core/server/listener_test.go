@@ -34,6 +34,30 @@ func TestSignalCoalesces(t *testing.T) {
 	}
 }
 
+// TestRenewAfter: the renewal cadence never exceeds half the lifetime the
+// provider actually granted (Drive can grant less than requested), falls back to
+// the configured half-life when the grant is unknown, and is floored so a tiny or
+// past grant can't spin the loop.
+func TestRenewAfter(t *testing.T) {
+	normal := 36 * time.Hour
+	cases := []struct {
+		name    string
+		granted time.Duration
+		want    time.Duration
+	}{
+		{"unknown grant → normal", 0, normal},
+		{"generous grant → normal", 10 * 24 * time.Hour, normal},
+		{"short grant → half of it", 24 * time.Hour, 12 * time.Hour},
+		{"tiny grant → floored", 30 * time.Second, time.Minute},
+		{"already expired → floored", -time.Hour, normal}, // negative treated as unknown → normal
+	}
+	for _, c := range cases {
+		if got := renewAfter(normal, c.granted); got != c.want {
+			t.Errorf("%s: renewAfter(%s, %s) = %s, want %s", c.name, normal, c.granted, got, c.want)
+		}
+	}
+}
+
 // TestRunFullCursorAdvance: the delta cursor advances only when the full sync
 // succeeds; a failed full sync must keep the old cursor so the missed window is
 // retried rather than skipped.

@@ -11,7 +11,6 @@ import (
 
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/fakes"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/gm"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/memid"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
@@ -66,10 +65,10 @@ func TestIntegration_FullSyncLifecycle(t *testing.T) {
 	if res.Added != 2 || res.Skipped != 1 || res.Deleted != 0 {
 		t.Fatalf("first sync: added=%d skipped=%d deleted=%d, want 2/1/0", res.Added, res.Skipped, res.Deleted)
 	}
-	if !fm.Has(memid.FromFileID("a")) || !fm.Has(memid.FromFileID("b")) {
+	if !fm.Has(mid("a")) || !fm.Has(mid("b")) {
 		t.Fatal("expected memories for a and b")
 	}
-	if fm.Has(memid.FromFileID("c")) {
+	if fm.Has(mid("c")) {
 		t.Fatal("unsupported file c must not be ingested")
 	}
 
@@ -101,7 +100,7 @@ func TestIntegration_FullSyncLifecycle(t *testing.T) {
 	if res.Deleted != 1 {
 		t.Fatalf("after delete: deleted=%d, want 1", res.Deleted)
 	}
-	if fm.Has(memid.FromFileID("a")) {
+	if fm.Has(mid("a")) {
 		t.Fatal("memory a should be deleted")
 	}
 }
@@ -118,10 +117,10 @@ func TestIntegration_SizeCap(t *testing.T) {
 	if res.Added != 1 || res.Skipped != 1 {
 		t.Fatalf("size cap: added=%d skipped=%d, want 1/1", res.Added, res.Skipped)
 	}
-	if !fm.Has(memid.FromFileID("small")) {
+	if !fm.Has(mid("small")) {
 		t.Error("small file should be ingested")
 	}
-	if fm.Has(memid.FromFileID("big")) {
+	if fm.Has(mid("big")) {
 		t.Error("oversized file must be skipped, not ingested")
 	}
 }
@@ -165,10 +164,10 @@ func TestIntegration_FolderScope(t *testing.T) {
 	if res.Added != 2 {
 		t.Fatalf("folder scope: added=%d, want 2", res.Added)
 	}
-	if fm.Has(memid.FromFileID("root1")) {
+	if fm.Has(mid("root1")) {
 		t.Fatal("root file must not be synced under folder scope")
 	}
-	if !fm.Has(memid.FromFileID("rep1")) || !fm.Has(memid.FromFileID("rep2")) {
+	if !fm.Has(mid("rep1")) || !fm.Has(mid("rep2")) {
 		t.Fatal("both Reports files should be synced")
 	}
 }
@@ -196,7 +195,7 @@ func TestIntegration_Delta(t *testing.T) {
 	if res.Added != 1 || res.Updated != 1 || res.Deleted != 1 {
 		t.Fatalf("delta: added=%d updated=%d deleted=%d, want 1/1/1", res.Added, res.Updated, res.Deleted)
 	}
-	if !fm.Has(memid.FromFileID("c")) || fm.Has(memid.FromFileID("b")) {
+	if !fm.Has(mid("c")) || fm.Has(mid("b")) {
 		t.Fatal("c should exist, b should be gone")
 	}
 }
@@ -209,7 +208,7 @@ func TestIntegration_PendingRetry(t *testing.T) {
 
 	// First delta: Goodmem create fails → the add is dropped from this run but
 	// queued in the pending-add set.
-	fm.FailCreateIDs[memid.FromFileID("a")] = true
+	fm.FailCreateIDs[mid("a")] = true
 	fg.SetDeltas(fakes.Delta{ID: "a"})
 	if _, res, err := RunDelta(ctx, s, gmc, spaceID, fg.DeltaLink(), Options{Retry: r}); err != nil {
 		t.Fatal(err)
@@ -231,7 +230,7 @@ func TestIntegration_PendingRetry(t *testing.T) {
 	if _, _, err := RunDelta(ctx, s, gmc, spaceID, fg.DeltaLink(), Options{Retry: r}); err != nil {
 		t.Fatal(err)
 	}
-	if !fm.Has(memid.FromFileID("a")) {
+	if !fm.Has(mid("a")) {
 		t.Fatal("file a should be ingested on the pending retry")
 	}
 	if pending(r.loadAdd(), "a") {

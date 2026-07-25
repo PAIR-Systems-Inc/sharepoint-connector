@@ -24,6 +24,10 @@ type Result struct {
 	Deleted         int
 	Skipped         int      // unsupported MIME / oversized
 	Errors          []string // non-fatal per-item failures
+	// ReconcileRecommended is set by a delta run when a change hinted that a
+	// deletion may have orphaned memories the feed didn't report individually
+	// (e.g. a Google Drive folder trash). The listener responds with a full sync.
+	ReconcileRecommended bool
 }
 
 // Options carries cross-cutting sync settings shared by the full and delta paths.
@@ -57,7 +61,7 @@ func RunFull(ctx context.Context, src source.Source, gm *goodmem.Client, spaceID
 		return nil, fmt.Errorf("list Goodmem memories: %w", err)
 	}
 
-	plan := DiffFull(files, memIDs, stored)
+	plan := DiffFull(files, memIDs, stored, src.MemNamespace())
 	res := &Result{SourceFiles: len(files), GoodmemMemories: len(memIDs), Plan: plan}
 	if opts.DryRun {
 		return res, nil
@@ -134,7 +138,7 @@ func (res *Result) ingest(ctx context.Context, src source.Source, gm *goodmem.Cl
 	if isUpdate {
 		op = "update"
 	}
-	uuid := memid.FromFileID(f.ID)
+	uuid := memid.FromFileID(src.MemNamespace(), f.ID)
 	emit := func(status, msg string) {
 		opts.emit(SyncEvent{FileID: f.ID, FileName: f.Name, MemoryID: uuid, SpaceID: spaceID, Op: op, Status: status, Message: msg})
 	}
@@ -163,12 +167,20 @@ func (res *Result) ingest(ctx context.Context, src source.Source, gm *goodmem.Cl
 	}
 	rc, err := src.Open(ctx, f)
 	if err != nil {
+		// A provider can signal that a file can never be ingested (e.g. a Google
+		// doc whose export exceeds Drive's limit). Record it as a permanent skip
+		// rather than a transient failure, so it isn't retried/dead-lettered forever.
+		if errors.Is(err, source.ErrSkip) {
+			res.Skipped++
+			emit("skipped", err.Error())
+			return resSkipped
+		}
 		res.Errors = append(res.Errors, fmt.Sprintf("fetch %s: %v", f.Name, err))
 		emit("failure", "fetch: "+err.Error())
 		return resTransient
 	}
 	defer rc.Close()
-	mem, err := createMemory(ctx, gm, spaceID, f, rc, opts.ExtractPageImages)
+	mem, err := createMemory(ctx, gm, spaceID, uuid, f, rc, opts.ExtractPageImages)
 	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: %v", f.Name, err))
 		emit("failure", "create: "+err.Error())
@@ -236,12 +248,11 @@ func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string
 // memoryId and the provider-supplied metadata (guaranteeing modified_datetime is
 // stored, which the diff reads back). It returns the created memory so the caller
 // can inspect its processingStatus.
-func createMemory(ctx context.Context, gm *goodmem.Client, spaceID string, f source.FileInfo, content io.Reader, extractPageImages bool) (*gmodels.Memory, error) {
+func createMemory(ctx context.Context, gm *goodmem.Client, spaceID, uuid string, f source.FileInfo, content io.Reader, extractPageImages bool) (*gmodels.Memory, error) {
 	mime := f.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-	uuid := memid.FromFileID(f.ID)
 	filename := f.Name
 	if filename == "" {
 		filename = "upload"

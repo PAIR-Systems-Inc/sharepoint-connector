@@ -142,6 +142,28 @@ goodmem-connectors/                 # module renamed
 - The `.env.example` grows a "Google Drive" section; the docs↔code drift test keeps
   it honest.
 
+## Operational constraints
+
+> ⚠️ **One Goodmem space per source.** Do **not** point a SharePoint listener and a
+> Google Drive listener at the **same** `GOODMEM_SPACE_ID`. Each source's full sync
+> reconciles the space against *its own* file set and deletes everything else as
+> orphaned — so two sources sharing a space form a standing wipe loop: each full
+> sync deletes the other source's memories, which the other side then re-adds, over
+> and over (billing re-embeds each cycle). The `GRAPH_MAX_DELETE_RATIO` guard only
+> trips above its threshold (default 50%), so it won't reliably catch this.
+>
+> The defaults already prevent it: with `GOODMEM_SPACE_ID` unset, each source
+> creates its own space (`SharePoint_<org>_<site>` vs `GDrive_<driveId>`). The trap
+> only appears if you set an explicit shared space id. Give each source its own.
+> (Memory ids are also namespaced per source — `sharepoint.file.id` vs
+> `gdrive.file.id` — so a SharePoint and a Drive file that happen to share an id
+> never collide; but that does **not** rescue a shared space from the delete loop.)
+>
+> Longer-term (not this PR): the gdrive adapter already stamps `source: "gdrive"`
+> into memory metadata; stamping the SharePoint side too and filtering orphan
+> deletion to memories whose `source` matches would make a shared space safe. Until
+> then, one space per source is a hard rule.
+
 ## Productionization parity
 
 Inherited for free by gdrive: mass-delete guard, dead-letter, size cap, coalescing,
@@ -166,7 +188,15 @@ key as a new secret class, `channels.stop` cleanup, and Shared-Drive scoping doc
    config, source-aware `ValidateSync`, per-source space naming; `.env.example` +
    drift test + a validation test. Green.
 6. **Productionize gdrive**: docs (Shared-Drive setup, webhook domain verification),
-   one live pass against a real Shared Drive.
+   one live pass against a real Shared Drive. **Review fixes landed** (from the
+   gdrive PR review): per-source memory-id namespace (`gdrive.file.id`, so Drive
+   memories aren't minted in the SharePoint namespace); renewal cadence honors the
+   lifetime Drive actually grants (not the requested TTL); folder-trash triggers a
+   full reconcile so orphaned descendants are removed promptly; push-channel id +
+   resourceId persisted next to the delta cursor so a restart stops the old channel
+   instead of leaking it; `create-subscription` is source-aware; native-doc exports
+   over Drive's 10 MB limit are a permanent skip, not dead-letter churn; and the
+   "one space per source" constraint above is documented.
 
 Deferred (do alongside gdrive, not blocking): rename the `sharepoint_*` metrics to a
 neutral `connector_*` prefix with a `source` label; generalize the `GRAPH_*`/

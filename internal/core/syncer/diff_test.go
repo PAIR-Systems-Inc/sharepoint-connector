@@ -8,6 +8,13 @@ import (
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 )
 
+// nsTest is the namespace these engine tests run under: the integration tests
+// drive the real SharePoint adapter, so the engine derives memory ids in the
+// SharePoint namespace. mid computes the memory id the engine would for a file id.
+const nsTest = "sharepoint.file.id"
+
+func mid(id string) string { return memid.FromFileID(nsTest, id) }
+
 // TestDiffFull is a characterization test of the full-sync set math + timestamp
 // rules.
 func TestDiffFull(t *testing.T) {
@@ -18,22 +25,22 @@ func TestDiffFull(t *testing.T) {
 		{ID: "D", ModifiedDateTime: "2026-01-01T00:00:00Z"}, // in both, Goodmem newer-> anomaly
 	}
 	gm := []string{
-		memid.FromFileID("A"),
-		memid.FromFileID("C"),
-		memid.FromFileID("D"),
-		memid.FromFileID("X"), // only in Goodmem -> delete
+		mid("A"),
+		mid("C"),
+		mid("D"),
+		mid("X"), // only in Goodmem -> delete
 	}
 	stored := map[string]string{
-		memid.FromFileID("A"): "2026-01-01T00:00:00Z", // older than SP -> update
-		memid.FromFileID("C"): "2026-01-01T00:00:00Z", // equal -> skip
-		memid.FromFileID("D"): "2026-01-02T00:00:00Z", // newer than SP -> anomaly
+		mid("A"): "2026-01-01T00:00:00Z", // older than SP -> update
+		mid("C"): "2026-01-01T00:00:00Z", // equal -> skip
+		mid("D"): "2026-01-02T00:00:00Z", // newer than SP -> anomaly
 	}
 
-	got := DiffFull(sp, gm, stored)
+	got := DiffFull(sp, gm, stored, nsTest)
 	want := Plan{
 		Add:             []string{"B"},
 		Update:          []string{"A"},
-		Delete:          []string{memid.FromFileID("X")},
+		Delete:          []string{mid("X")},
 		UnexpectedNewer: []string{"D"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -43,8 +50,8 @@ func TestDiffFull(t *testing.T) {
 
 func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
 	sp := []source.FileInfo{{ID: "E", ModifiedDateTime: "2026-01-01T00:00:00Z"}}
-	gm := []string{memid.FromFileID("E")}
-	got := DiffFull(sp, gm, map[string]string{}) // no stored ts
+	gm := []string{mid("E")}
+	got := DiffFull(sp, gm, map[string]string{}, nsTest) // no stored ts
 	if len(got.Update) != 1 || got.Update[0] != "E" || len(got.Add) != 0 || len(got.Delete) != 0 {
 		t.Errorf("missing stored timestamp should force update; got %+v", got)
 	}
@@ -60,14 +67,14 @@ func TestDiffDelta(t *testing.T) {
 		{ID: "C", IsFile: true, File: source.FileInfo{ID: "C", ModifiedDateTime: "2026-01-01T00:00:00Z"}}, // present, stored newer -> Update + anomaly
 	}
 	stored := map[string]string{
-		memid.FromFileID("B"): "2026-01-01T00:00:00Z", // older -> update
-		memid.FromFileID("C"): "2026-01-02T00:00:00Z", // newer -> update + anomaly
+		mid("B"): "2026-01-01T00:00:00Z", // older -> update
+		mid("C"): "2026-01-02T00:00:00Z", // newer -> update + anomaly
 	}
-	got := DiffDelta(changes, stored)
+	got := DiffDelta(changes, stored, nsTest)
 	want := Plan{
 		Add:             []string{"A"},
 		Update:          []string{"B", "C"},
-		Delete:          []string{memid.FromFileID("D")},
+		Delete:          []string{mid("D")},
 		UnexpectedNewer: []string{"C"},
 	}
 	if !reflect.DeepEqual(got, want) {

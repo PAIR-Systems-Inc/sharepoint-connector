@@ -21,10 +21,12 @@ import (
 // --- fake Google Drive server ---
 
 type fakeDrive struct {
-	files   map[string]*DriveFile
-	content map[string]string
-	changes []DriveChange
-	gone    bool // next /changes returns 410
+	files      map[string]*DriveFile
+	content    map[string]string
+	changes    []DriveChange
+	gone       bool            // next /changes returns 410
+	exportHuge map[string]bool // file ids whose /export returns 403 exportSizeLimitExceeded
+	stopped    []string        // channel ids stopped via /channels/stop
 }
 
 func newFakeDrive() *fakeDrive {
@@ -69,6 +71,11 @@ func (f *fakeDrive) handler() http.Handler {
 			_ = json.NewDecoder(r.Body).Decode(&ch)
 			writeJSON(w, map[string]any{"id": ch.ID, "resourceId": "res-" + ch.ID, "expiration": "9999999999999"})
 		case p == "/channels/stop":
+			var ch struct {
+				ID string `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&ch)
+			f.stopped = append(f.stopped, ch.ID)
 			w.WriteHeader(http.StatusNoContent)
 		case p == "/changes":
 			if f.gone {
@@ -88,6 +95,12 @@ func (f *fakeDrive) handler() http.Handler {
 			writeJSON(w, map[string]any{"changes": chs, "newStartPageToken": "next-1"})
 		case strings.HasSuffix(p, "/export"):
 			id := strings.TrimSuffix(strings.TrimPrefix(p, "/files/"), "/export")
+			if f.exportHuge[id] {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				io.WriteString(w, `{"error":{"code":403,"message":"This file is too large to be exported.","errors":[{"domain":"global","reason":"exportSizeLimitExceeded","message":"This file is too large to be exported."}]}}`)
+				return
+			}
 			io.WriteString(w, "EXPORT:"+f.content[id]) // fake export marker
 		case strings.HasPrefix(p, "/files/"):
 			id := strings.TrimPrefix(p, "/files/")
@@ -235,6 +248,75 @@ func mustRead(t *testing.T, a *Adapter, ctx context.Context, f source.FileInfo) 
 	return string(b)
 }
 
+// memChannelStore is an in-memory ChannelStore for tests.
+type memChannelStore struct{ id, res string }
+
+func (m *memChannelStore) Load() (string, string, error) { return m.id, m.res, nil }
+func (m *memChannelStore) Save(id, res string) error     { m.id, m.res = id, res; return nil }
+
+// TestChannelStorePersistsAcrossRestart: with a ChannelStore, a fresh adapter
+// (simulating a process restart) stops the channel the previous process created
+// — not leaving it orphaned — before creating its own.
+func TestChannelStorePersistsAcrossRestart(t *testing.T) {
+	fd := newFakeDrive()
+	c := newTestClient(t, fd)
+	store := &memChannelStore{}
+	ctx := context.Background()
+
+	// Process 1: create a channel; the store records it.
+	a1 := NewAdapter(c, "tok").WithChannelStore(store)
+	sub1, err := a1.EnsureSubscription(ctx, "https://x.test/wh", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.id != sub1.ID || store.id == "" {
+		t.Fatalf("store didn't record channel: store=%q sub=%q", store.id, sub1.ID)
+	}
+	if len(fd.stopped) != 0 {
+		t.Fatalf("first subscription should stop nothing, stopped=%v", fd.stopped)
+	}
+
+	// Process 2 (restart): a brand-new adapter with no in-memory channel, sharing
+	// the persisted store, must stop process 1's channel before creating its own.
+	a2 := NewAdapter(c, "tok").WithChannelStore(store)
+	sub2, err := a2.EnsureSubscription(ctx, "https://x.test/wh", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fd.stopped) != 1 || fd.stopped[0] != sub1.ID {
+		t.Errorf("restart should stop the previous channel %q, stopped=%v", sub1.ID, fd.stopped)
+	}
+	if store.id != sub2.ID {
+		t.Errorf("store should now hold the new channel %q, got %q", sub2.ID, store.id)
+	}
+}
+
+// TestAdapterDeltaFolderTrashHint: a trashed folder in the changes feed yields a
+// Deleted change flagged with ReconcileHint (descendants are implicitly trashed
+// but unreported), while a trashed file is a plain delete with no hint.
+func TestAdapterDeltaFolderTrashHint(t *testing.T) {
+	fd := newFakeDrive()
+	fd.changes = []DriveChange{
+		{FileID: "folder1", File: &DriveFile{ID: "folder1", Name: "Docs", MimeType: folderMime, Trashed: true}},
+		{FileID: "file1", File: &DriveFile{ID: "file1", Name: "a.pdf", MimeType: "application/pdf", Trashed: true}},
+	}
+	a := NewAdapter(newTestClient(t, fd), "s")
+	changes, _, err := a.Delta(context.Background(), "start-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]source.Change{}
+	for _, c := range changes {
+		byID[c.ID] = c
+	}
+	if f := byID["folder1"]; !f.Deleted || !f.ReconcileHint {
+		t.Errorf("trashed folder: got %+v, want Deleted+ReconcileHint", f)
+	}
+	if f := byID["file1"]; !f.Deleted || f.ReconcileHint {
+		t.Errorf("trashed file: got %+v, want Deleted without ReconcileHint", f)
+	}
+}
+
 func TestAdapterDeltaCursorExpired(t *testing.T) {
 	fd := newFakeDrive()
 	fd.gone = true
@@ -262,6 +344,29 @@ func TestAdapterValidateWebhook(t *testing.T) {
 	}
 	if res, _ := a.ValidateWebhook(newReq("secret", "change"), nil); res != source.WebhookChange {
 		t.Errorf("change: got %v, want change", res)
+	}
+}
+
+// TestAdapterOpenExportTooLarge: a native doc whose export exceeds Drive's limit
+// (403 exportSizeLimitExceeded) surfaces as source.ErrSkip, so the engine records
+// a permanent skip instead of dead-lettering it. Size=0 on native docs means the
+// byte-size cap can't catch it earlier.
+func TestAdapterOpenExportTooLarge(t *testing.T) {
+	fd := newFakeDrive()
+	fd.exportHuge = map[string]bool{"big": true}
+	fd.put(DriveFile{ID: "big", Name: "Huge", MimeType: "application/vnd.google-apps.document", ModifiedTime: "2026-06-01T00:00:00.000Z"}, "IGNORED")
+
+	a := NewAdapter(newTestClient(t, fd), "s")
+	files, err := a.ListFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("ListFiles = %d, want 1", len(files))
+	}
+	_, err = a.Open(context.Background(), files[0])
+	if !errors.Is(err, source.ErrSkip) {
+		t.Errorf("Open(export-too-large) = %v, want source.ErrSkip", err)
 	}
 }
 

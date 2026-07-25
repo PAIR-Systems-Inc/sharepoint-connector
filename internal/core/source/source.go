@@ -31,12 +31,20 @@ type Change struct {
 	Deleted bool
 	IsFile  bool
 	File    FileInfo // valid when IsFile && !Deleted
+	// ReconcileHint marks a deletion that may have implicitly orphaned other
+	// memories the delta feed won't report individually — e.g. a Google Drive
+	// folder trash, which implicitly trashes every descendant but emits a change
+	// only for the folder. The engine responds by running a full reconcile after
+	// the delta, so the orphaned descendants are deleted promptly instead of
+	// lingering until the next periodic full sync.
+	ReconcileHint bool
 }
 
 // Subscription is a provider push-notification registration.
 type Subscription struct {
 	ID         string
-	Expiration string
+	Expiration string    // provider-native expiration string, for display/logs
+	ExpiresAt  time.Time // parsed expiration; zero if unknown. The renewal loop schedules the next renewal from this — providers (e.g. Google Drive) may grant a shorter lifetime than requested, so the requested TTL alone is not safe to renew against.
 }
 
 // WebhookResult classifies an incoming webhook request.
@@ -60,10 +68,21 @@ var ErrCursorExpired = errors.New("incremental cursor expired; full sync require
 // ErrNotFound means a file no longer exists at the source (analogous to 404).
 var ErrNotFound = errors.New("file not found at source")
 
+// ErrSkip, returned by Open, means the file can never be ingested (e.g. a
+// Google-native doc whose export exceeds Drive's 10 MB export limit). The engine
+// records it as a permanent skip rather than a transient failure, so it is not
+// retried or dead-lettered forever. Wrap it to add detail: fmt.Errorf("...: %w", source.ErrSkip).
+var ErrSkip = errors.New("file cannot be ingested; skipping permanently")
+
 // Source is one content source the shared engine syncs into Goodmem.
 type Source interface {
 	// Label identifies the provider (e.g. "sharepoint", "gdrive") for logs/metrics.
 	Label() string
+	// MemNamespace is the PERMANENT namespace this source uses to derive
+	// deterministic memory ids (memid.FromFileID). It is the idempotency key and
+	// must never change once a tenant is live, or every memory in the space is
+	// re-keyed. Distinct per provider so two sources can't collide.
+	MemNamespace() string
 	// ListFiles returns every file currently in scope (for a full sync).
 	ListFiles(ctx context.Context) ([]FileInfo, error)
 	// LatestCursor returns a cursor positioned at "now" (bootstrap).

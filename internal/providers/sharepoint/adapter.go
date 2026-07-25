@@ -40,6 +40,10 @@ func NewAdapter(c *Client, folderPath, clientState string) *Adapter {
 
 func (a *Adapter) Label() string { return "sharepoint" }
 
+// MemNamespace is the Python-era namespace; preserved verbatim so SharePoint
+// memories already in the wild keep their deterministic ids. Never change it.
+func (a *Adapter) MemNamespace() string { return "sharepoint.file.id" }
+
 // resolve looks up the site and its first document library once.
 func (a *Adapter) resolve() (siteID, driveID string, err error) {
 	a.mu.Lock()
@@ -177,7 +181,11 @@ func (a *Adapter) EnsureSubscription(ctx context.Context, notifyURL string, ttl 
 	if err != nil {
 		return source.Subscription{}, err
 	}
-	return source.Subscription{ID: sub.ID, Expiration: sub.ExpirationDateTime}, nil
+	// Graph returns expirationDateTime as RFC-3339; parse it so the renewal loop
+	// can schedule against the actual granted lifetime (Graph honors the request,
+	// but the neutral contract carries the parsed value regardless of provider).
+	exp, _ := time.Parse(time.RFC3339, sub.ExpirationDateTime)
+	return source.Subscription{ID: sub.ID, Expiration: sub.ExpirationDateTime, ExpiresAt: exp}, nil
 }
 
 func (a *Adapter) SetThrottleHook(fn func(status, attempt int, retryAfter time.Duration)) {

@@ -40,15 +40,16 @@ type Listener struct {
 	RetentionDays     int     // prune sync history older than this many days (<= 0 disables)
 	IgnoredFolderPath string  // set when a folder scope is configured but ignored (listener syncs whole drive)
 
-	delta     deltaStore
-	retry     *syncer.Retrier
-	history   *store.Store
-	eventSink syncer.EventSink
-	server    *Server
-	baseCtx   context.Context
-	syncMu    sync.Mutex    // serialize full/delta syncs
-	notify    chan struct{} // 1-buffered: coalesces notification bursts into one delta run
-	ready     atomic.Bool   // true once the startup full sync + subscription are done (GET /readyz)
+	delta      deltaStore
+	retry      *syncer.Retrier
+	history    *store.Store
+	eventSink  syncer.EventSink
+	server     *Server
+	baseCtx    context.Context
+	syncMu     sync.Mutex    // serialize full/delta syncs
+	notify     chan struct{} // 1-buffered: coalesces notification bursts into one delta run
+	ready      atomic.Bool   // true once the startup full sync + subscription are done (GET /readyz)
+	subExpNano atomic.Int64  // provider-granted subscription expiration (UnixNano); 0 = unknown
 }
 
 // opts builds the sync Options for this listener (durable retry, page images,
@@ -123,9 +124,8 @@ func (l *Listener) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	go l.startup()                 // full sync + delta bootstrap + create subscription
+	go l.startup(ctx)              // full sync + delta bootstrap + create subscription, then renewal loop
 	go l.deltaWorker(ctx)          // single worker draining coalesced notifications
-	go l.subscriptionLoop(ctx)     // periodic renewal (short-backoff retry on failure)
 	go l.periodicFullSyncLoop(ctx) // periodic safety full-sync (repairs missed deltas)
 	go l.retentionLoop(ctx)        // prune old sync-history rows
 
@@ -143,18 +143,48 @@ func (l *Listener) Run(ctx context.Context) error {
 	return nil
 }
 
-// startup runs the boot-time full sync, persists a fresh delta link, then
-// creates/renews the subscription (after the server is listening).
-func (l *Listener) startup() {
+// startup runs the boot-time full sync, persists a fresh delta link, creates the
+// subscription, then runs the renewal loop (blocks until ctx is cancelled).
+func (l *Listener) startup(ctx context.Context) {
 	l.fullSyncLocked("startup")
-	sub, err := l.Src.EnsureSubscription(l.baseCtx, l.NotificationURL, time.Duration(l.SubMinutes)*time.Minute)
+	l.renewSubscription(ctx, "subscription ready")
+	l.subscriptionLoop(ctx)
+}
+
+// renewSubscription (re)creates the change subscription, records the outcome, and
+// stores the provider-granted expiration so the renewal loop can schedule against
+// it. Reports whether it succeeded. On success it marks the listener ready — the
+// startup full sync has already been attempted by the time this runs (a failed
+// startup sync is left to the periodic reconcile, not gated here → /readyz 200).
+func (l *Listener) renewSubscription(ctx context.Context, okMsg string) bool {
+	sub, err := l.Src.EnsureSubscription(ctx, l.NotificationURL, time.Duration(l.SubMinutes)*time.Minute)
 	l.server.Metrics.RecordRenewal(err == nil)
 	if err != nil {
 		l.server.Log("error", "subscription: "+err.Error())
-	} else {
-		l.server.Log("info", "subscription ready (expires "+sub.Expiration+")")
-		l.ready.Store(true) // subscription ensured + startup full sync attempted → /readyz 200 (a failed startup sync is retried by the periodic reconcile, not gated here)
+		return false
 	}
+	l.setSubExp(sub.ExpiresAt)
+	l.server.Log("info", okMsg+" (expires "+sub.Expiration+")")
+	l.ready.Store(true)
+	return true
+}
+
+func (l *Listener) setSubExp(t time.Time) {
+	if t.IsZero() {
+		l.subExpNano.Store(0)
+		return
+	}
+	l.subExpNano.Store(t.UnixNano())
+}
+
+// subExpRemaining is the time until the granted subscription expiry, or 0 if the
+// provider didn't report one (fall back to the configured cadence).
+func (l *Listener) subExpRemaining() time.Duration {
+	n := l.subExpNano.Load()
+	if n == 0 {
+		return 0
+	}
+	return time.Until(time.Unix(0, n))
 }
 
 // fullSyncLocked acquires the sync lock and runs a full sync + delta
@@ -214,37 +244,52 @@ func (l *Listener) periodicFullSyncLoop(ctx context.Context) {
 	}
 }
 
-// subscriptionLoop renews the subscription roughly every half-lifetime, but on a
-// failed renewal retries on a short exponential backoff instead of waiting the
-// full half-lifetime — otherwise a single failed renewal isn't retried until
-// almost exactly expiry, and two in a row let the subscription lapse.
+// subscriptionLoop renews the subscription before it expires. The cadence is the
+// smaller of the configured half-lifetime and half the lifetime the provider
+// actually granted — Google Drive clamps changes.watch server-side, so renewing
+// on the *requested* half-life alone could leave a dead window (channel expired,
+// next renewal not yet due) where notifications are silently dropped. On a failed
+// renewal it retries on a short exponential backoff instead of waiting a full
+// cycle, so one failure isn't retried near expiry and two in a row don't lapse.
 func (l *Listener) subscriptionLoop(ctx context.Context) {
 	normal := time.Duration(max(l.SubMinutes/2, 20)) * time.Minute
 	const retryMin, retryMax = 2 * time.Minute, 15 * time.Minute
 	retry := retryMin
-	t := time.NewTimer(normal)
+	// First interval already honors the startup grant (renewSubscription ran before us).
+	t := time.NewTimer(renewAfter(normal, l.subExpRemaining()))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			sub, err := l.Src.EnsureSubscription(ctx, l.NotificationURL, time.Duration(l.SubMinutes)*time.Minute)
-			l.server.Metrics.RecordRenewal(err == nil)
-			if err != nil {
-				l.server.Log("error", fmt.Sprintf("subscription renew failed: %v; retrying in %s", err, retry))
+			if l.renewSubscription(ctx, "subscription renewed") {
+				retry = retryMin
+				t.Reset(renewAfter(normal, l.subExpRemaining()))
+			} else {
+				l.server.Log("warn", fmt.Sprintf("subscription renew failed; retrying in %s", retry))
 				t.Reset(retry)
 				if retry *= 2; retry > retryMax {
 					retry = retryMax
 				}
-			} else {
-				l.server.Log("info", "subscription renewed (expires "+sub.Expiration+")")
-				l.ready.Store(true) // recovered if the startup subscription had failed
-				retry = retryMin
-				t.Reset(normal)
 			}
 		}
 	}
+}
+
+// renewAfter picks how long to wait before the next renewal: the smaller of the
+// configured half-life (normal) and half the lifetime the provider actually
+// granted (granted). A zero/negative grant means "unknown" → fall back to normal.
+// Floored at one minute so a tiny or already-past grant can't spin the loop.
+func renewAfter(normal, granted time.Duration) time.Duration {
+	next := normal
+	if granted > 0 && granted/2 < next {
+		next = granted / 2
+	}
+	if next < time.Minute {
+		next = time.Minute
+	}
+	return next
 }
 
 // signal requests a delta sync. The 1-buffered channel coalesces a burst of
@@ -291,6 +336,15 @@ func (l *Listener) runDelta() {
 		_ = l.delta.save(newLink)
 	}
 	l.server.Log("info", fmt.Sprintf("[delta] done: +%d ~%d -%d (skipped %d)", res.Added, res.Updated, res.Deleted, res.Skipped))
+
+	// A deletion hinted that descendants may have been orphaned without their own
+	// change entries (e.g. a trashed Drive folder). Reconcile now so those memories
+	// are removed promptly rather than lingering until the periodic full sync. We
+	// still hold syncMu, so call runFull directly.
+	if res.ReconcileRecommended {
+		l.server.Log("info", "[delta] deletion hint → running full reconcile for orphaned descendants")
+		l.runFull("folder-delete-reconcile")
+	}
 }
 
 // retentionLoop prunes sync-history rows older than RetentionDays: once at

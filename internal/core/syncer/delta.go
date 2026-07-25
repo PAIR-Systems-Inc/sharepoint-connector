@@ -20,6 +20,7 @@ func RunDelta(ctx context.Context, src source.Source, gm *goodmem.Client, spaceI
 	if err != nil {
 		return "", nil, err // includes source.ErrCursorExpired
 	}
+	ns := src.MemNamespace()
 
 	// Index the changed (non-deleted) files; the provider returns them ready to
 	// ingest (download ref + metadata already resolved).
@@ -34,7 +35,7 @@ func RunDelta(ctx context.Context, src source.Source, gm *goodmem.Client, spaceI
 			f.RelativePath = f.Name
 		}
 		fileByID[it.ID] = f
-		candidateUUIDs = append(candidateUUIDs, memid.FromFileID(it.ID))
+		candidateUUIDs = append(candidateUUIDs, memid.FromFileID(ns, it.ID))
 	}
 
 	stored, err := goodmemStoredModified(ctx, gm, candidateUUIDs)
@@ -42,7 +43,7 @@ func RunDelta(ctx context.Context, src source.Source, gm *goodmem.Client, spaceI
 		return "", nil, err
 	}
 
-	plan := DiffDelta(changes, stored)
+	plan := DiffDelta(changes, stored, ns)
 	res = &Result{Plan: plan}
 
 	// Assemble the work as file infos / IDs so the durable pending sets (and
@@ -58,6 +59,11 @@ func RunDelta(ctx context.Context, src source.Source, gm *goodmem.Client, spaceI
 	for _, it := range changes {
 		if it.Deleted && it.ID != "" {
 			removeIDs = append(removeIDs, it.ID)
+			if it.ReconcileHint {
+				// e.g. a trashed Drive folder: descendants are implicitly gone but
+				// unreported — ask the caller to run a full reconcile after this delta.
+				res.ReconcileRecommended = true
+			}
 		}
 	}
 
@@ -68,7 +74,7 @@ func RunDelta(ctx context.Context, src source.Source, gm *goodmem.Client, spaceI
 	}
 
 	for _, fid := range removeIDs {
-		uuid := memid.FromFileID(fid)
+		uuid := memid.FromFileID(ns, fid)
 		err := gm.Memories().Delete(ctx, uuid)
 		ok := err == nil || isNotFound(err)
 		if ok {

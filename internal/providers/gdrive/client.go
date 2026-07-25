@@ -45,7 +45,8 @@ type DriveChange struct {
 type Channel struct {
 	ID         string
 	ResourceID string
-	Expiration string
+	Expiration string    // unix-millis string (Drive's native form), for display
+	ExpiresAt  time.Time // parsed expiration; zero if Drive didn't return one
 }
 
 // Client is a Google Drive v3 client scoped to one Shared Drive.
@@ -210,7 +211,13 @@ func (c *Client) Watch(ctx context.Context, channelID, notifyURL, token string, 
 	if err != nil {
 		return Channel{}, err
 	}
-	return Channel{ID: res.Id, ResourceID: res.ResourceId, Expiration: strconv.FormatInt(res.Expiration, 10)}, nil
+	out := Channel{ID: res.Id, ResourceID: res.ResourceId, Expiration: strconv.FormatInt(res.Expiration, 10)}
+	if res.Expiration > 0 {
+		// Drive clamps the channel lifetime server-side and returns the granted
+		// expiration in unix millis — the loop renews against this, not the request.
+		out.ExpiresAt = time.UnixMilli(res.Expiration)
+	}
+	return out, nil
 }
 
 // StopChannel stops a previously-created push channel.
@@ -228,6 +235,25 @@ func IsNotFound(err error) bool {
 func IsCursorExpired(err error) bool {
 	var ge *googleapi.Error
 	return errors.As(err, &ge) && ge.Code == 410
+}
+
+// IsExportTooLarge reports whether err is Drive's "exportSizeLimitExceeded" (a
+// 403 returned by files.export when a Google-native doc's exported form exceeds
+// the ~10 MB export cap). Such a file can never be exported, so retrying is
+// pointless — the caller turns this into a permanent skip. Drive reports Size=0
+// for native docs, so the byte-size cap can't catch this ahead of time.
+func IsExportTooLarge(err error) bool {
+	var ge *googleapi.Error
+	if !errors.As(err, &ge) || ge.Code != 403 {
+		return false
+	}
+	for _, e := range ge.Errors {
+		if e.Reason == "exportSizeLimitExceeded" {
+			return true
+		}
+	}
+	// Fall back to a substring check in case the SDK didn't populate Errors[].
+	return strings.Contains(ge.Message, "exportSizeLimitExceeded") || strings.Contains(ge.Body, "exportSizeLimitExceeded")
 }
 
 // --- Google-native export policy ---

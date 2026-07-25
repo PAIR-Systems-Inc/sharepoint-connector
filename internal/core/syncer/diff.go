@@ -33,11 +33,11 @@ type Plan struct {
 //
 // MIME filtering is intentionally separate (see IsMimeSupported): the returned
 // Add/Update may include unsupported types for the caller to drop at ingest.
-func DiffFull(srcFiles []source.FileInfo, gmMemoryIDs []string, gmStoredModified map[string]string) Plan {
+func DiffFull(srcFiles []source.FileInfo, gmMemoryIDs []string, gmStoredModified map[string]string, namespace string) Plan {
 	srcByUUID := make(map[string]source.FileInfo, len(srcFiles))
 	srcUUIDs := make(map[string]struct{}, len(srcFiles))
 	for _, f := range srcFiles {
-		u := memid.FromFileID(f.ID)
+		u := memid.FromFileID(namespace, f.ID)
 		srcByUUID[u] = f
 		srcUUIDs[u] = struct{}{}
 	}
@@ -102,20 +102,20 @@ func classify(gmModified, srcModified string) (update, newer bool) {
 // unsupported MIME types (see IsMimeSupported). A present file whose stored
 // timestamp is not older than the change timestamp is still updated but flagged
 // in UnexpectedNewer.
-func DiffDelta(changes []source.Change, gmStoredModified map[string]string) Plan {
+func DiffDelta(changes []source.Change, gmStoredModified map[string]string, namespace string) Plan {
 	var p Plan
 	for _, it := range changes {
 		if it.ID == "" {
 			continue
 		}
 		if it.Deleted {
-			p.Delete = append(p.Delete, memid.FromFileID(it.ID))
+			p.Delete = append(p.Delete, memid.FromFileID(namespace, it.ID))
 			continue
 		}
 		if !it.IsFile {
 			continue
 		}
-		u := memid.FromFileID(it.ID)
+		u := memid.FromFileID(namespace, it.ID)
 		if stored, exists := gmStoredModified[u]; exists {
 			p.Update = append(p.Update, it.ID)
 			if s := it.File.ModifiedDateTime; stored != "" && s != "" && stored >= s {

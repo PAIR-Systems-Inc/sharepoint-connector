@@ -1,4 +1,5 @@
-// Command connector syncs a SharePoint site to a Goodmem space.
+// Command connector syncs a content source (a SharePoint site or a Google Drive
+// Shared Drive, selected by SOURCE / --source) to a Goodmem space.
 //
 // It replaces the Python proof-of-concept (listener.py, sync_once.py,
 // watch_listener.py) with a single Go binary exposing subcommands. This is the
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -80,7 +82,7 @@ func runSyncOnce(args []string) error {
 		return err
 	}
 	ctx := context.Background()
-	src, err := buildSource(ctx, cfg, cfg.SharePointFolderPath)
+	src, err := buildSource(ctx, cfg, cfg.SharePointFolderPath, "") // one-shot: no durable channel state
 	if err != nil {
 		return err
 	}
@@ -147,7 +149,11 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	src, err := buildSource(context.Background(), cfg, "") // the listener always syncs the whole drive
+	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "5000")
+	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
+	// The listener always syncs the whole drive; its durable-state dir (delta
+	// cursor + gdrive channel state) is the delta file's directory.
+	src, err := buildSource(context.Background(), cfg, "", filepath.Dir(deltaPath))
 	if err != nil {
 		return err
 	}
@@ -155,9 +161,6 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-
-	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "5000")
-	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
 	subMin := atoiOr(cfg.GraphSubscriptionMinutes, sharepoint.SubMinutesDefault)
 	// Periodic safety full-sync: defaults to the subscription-renewal cadence
 	// (~half the subscription lifetime). Set GRAPH_FULL_SYNC_MINUTES=0 to disable.
@@ -190,21 +193,33 @@ func runServe(args []string) error {
 func runCreateSubscription(args []string) error {
 	fs := flag.NewFlagSet("create-subscription", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: .env if present)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|gdrive (overrides SOURCE)")
 	_ = fs.Parse(args)
+	if *srcFlag != "" {
+		os.Setenv("SOURCE", *srcFlag)
+	}
 
 	cfg, err := loadConfig(*envFile)
 	if err != nil {
 		return err
 	}
 	if cfg.GraphClientState == "" || cfg.GraphNotificationURL == "" {
-		return errors.New("GRAPH_CLIENT_STATE and GRAPH_NOTIFICATION_URL are required")
+		return errors.New("GRAPH_CLIENT_STATE (webhook secret) and GRAPH_NOTIFICATION_URL (public webhook URL) are required")
 	}
-	gc := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
-	sub, err := gc.EnsureSubscription(cfg.GraphNotificationURL, cfg.GraphClientState, atoiOr(cfg.GraphSubscriptionMinutes, sharepoint.SubMinutesDefault))
+	ctx := context.Background()
+	// Route through the configured provider so this works for gdrive too, instead
+	// of silently building a SharePoint client under SOURCE=gdrive. No durable
+	// channel state for a one-off manual create.
+	src, err := buildSource(ctx, cfg, "", "")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Subscription ready: id=%s\n  resource=%s\n  expires=%s\n", sub.ID, sub.Resource, sub.ExpirationDateTime)
+	subMin := atoiOr(cfg.GraphSubscriptionMinutes, sharepoint.SubMinutesDefault)
+	sub, err := src.EnsureSubscription(ctx, cfg.GraphNotificationURL, time.Duration(subMin)*time.Minute)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Subscription ready (%s): id=%s   expires=%s\n", src.Label(), sub.ID, sub.Expiration)
 	return nil
 }
 
@@ -271,8 +286,11 @@ func loadConfig(envFile string) (*config.Config, error) {
 
 // buildSource constructs the configured provider adapter (a source.Source).
 // folderPath scopes a one-time SharePoint full sync ("" = whole drive; ignored by
-// gdrive, which syncs the whole Shared Drive).
-func buildSource(ctx context.Context, cfg *config.Config, folderPath string) (source.Source, error) {
+// gdrive, which syncs the whole Shared Drive). stateDir, when non-empty, is the
+// durable-state directory (the listener's); gdrive persists its push-channel pair
+// there so a restart stops the old channel instead of leaking it. One-shot
+// commands pass "".
+func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir string) (source.Source, error) {
 	switch cfg.Source {
 	case "gdrive":
 		var (
@@ -292,7 +310,11 @@ func buildSource(ctx context.Context, cfg *config.Config, folderPath string) (so
 		if err != nil {
 			return nil, fmt.Errorf("gdrive client: %w", err)
 		}
-		return gdrive.NewAdapter(c, cfg.GraphClientState), nil
+		a := gdrive.NewAdapter(c, cfg.GraphClientState)
+		if stateDir != "" {
+			a = a.WithChannelStore(gdrive.FileChannelStore{Path: filepath.Join(stateDir, "gdrive_channel.json")})
+		}
+		return a, nil
 	default: // sharepoint
 		c := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
 		return sharepoint.NewAdapter(c, folderPath, cfg.GraphClientState), nil
@@ -363,14 +385,16 @@ func configureLogging() {
 }
 
 func usage(w *os.File) {
-	fmt.Fprint(w, `connector — SharePoint → Goodmem sync
+	fmt.Fprint(w, `connector — SharePoint / Google Drive → Goodmem sync
 
 Usage: connector <command> [flags]
 
+Source: set SOURCE=sharepoint|gdrive (or --source) on any syncing command.
+
 Commands:
-  sync-once            One-time full sync (flags: --env-file PATH, --dry-run)
-  serve                Run the Graph webhook listener + sync engine (--env-file PATH)
-  create-subscription  Create or renew the Graph change subscription (--env-file PATH)
+  sync-once            One-time full sync (flags: --env-file PATH, --source NAME, --dry-run)
+  serve                Run the webhook listener + sync engine (--env-file PATH, --source NAME)
+  create-subscription  Create or renew the change subscription (--env-file PATH, --source NAME)
   watch                Monitor a listener's activity log (watch [-n SECS] <base-url>)
   help                 Show this help
 `)
