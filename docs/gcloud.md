@@ -11,11 +11,35 @@ To know details of the current profile, you can use `gcloud config list` command
 
 If you do not want back and forth switching between profiles, you can attach the flag `--configuration <profile_name>` to any gcloud command to use a specific profile for that command.
 
+## Application Default Credentials (ADC)
+
+ADC is how Google's **client libraries** (the SDKs your *application code* uses)
+find credentials automatically, so you never hardcode a key in code. When an app
+authenticates "via ADC", the library searches, in order:
+
+1. the **`GOOGLE_APPLICATION_CREDENTIALS`** environment variable — if set, it is a
+   path to a credentials JSON file, and that file is used;
+2. the **well-known gcloud ADC file**, `~/.config/gcloud/application_default_credentials.json`,
+   created by `gcloud auth application-default login`;
+3. on a GCP host (VM, Cloud Run, …), the **attached service account** via the
+   metadata server.
+
+The ADC JSON is one of three shapes: a **service-account key**
+(`"type": "service_account"`), your **user login** (`"type": "authorized_user"` —
+a refresh token from `application-default login`), or an
+**impersonation config** (`"type": "impersonated_service_account"` — your login
+plus a service account to impersonate).
+
+**ADC is separate from the gcloud CLI account.** The gcloud *profile* (§ above)
+decides who `gcloud` commands act as; ADC decides who your *application code* acts
+as. Setting `GOOGLE_APPLICATION_CREDENTIALS` affects apps/SDKs, **not** `gcloud`
+itself. They're independent — you can have `gcloud` on one identity and an app on
+another at the same time.
+
 ## Enabling and authenticating Google Drive
 
 The connector reads a Google **Shared Drive** through the Drive API using
-**Application Default Credentials (ADC)** — the standard way Google SDKs
-authenticate. There are three ways to provide credentials; which one you can use
+**Application Default Credentials (ADC)** — see above. There are three ways to provide credentials; which one you can use
 depends on your org's policy:
 
 | Option | How the connector authenticates | When to use |
@@ -64,20 +88,42 @@ On each machine that runs the connector, mint an ADC file that impersonates the 
 with Drive scope (the login itself only uses the allowed `cloud-platform` scope;
 the Drive scope is applied to the *impersonated* SA token):
 
+`gcloud auth application-default login` has **no flag to choose the output file** —
+it always writes to the default ADC path in the *active gcloud config directory*.
+So there are three ways to end up with a dedicated gdrive credentials file:
+
+**Option 1 — isolated config dir (cleanest; no copy, never touches your default ADC).**
+Point `CLOUDSDK_CONFIG` at a separate directory just for the login:
+
+```bash
+CLOUDSDK_CONFIG=~/.config/gcloud-gdrive gcloud auth application-default login \
+  --impersonate-service-account="$SA_EMAIL" \
+  --scopes=https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/cloud-platform
+# → writes ~/.config/gcloud-gdrive/application_default_credentials.json
+# Point the connector there (see § C):
+#   GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud-gdrive/application_default_credentials.json
+```
+
+**Option 2 — login normally, then copy to a stable name.** Because the login
+overwrites the *default* ADC (which other tools may rely on), copy it out:
+
 ```bash
 gcloud auth application-default login \
   --impersonate-service-account="$SA_EMAIL" \
   --scopes=https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/cloud-platform
-
-# gcloud writes this to the default ADC path; copy it somewhere stable so it does
-# not get overwritten by other `application-default login` runs:
 cp ~/.config/gcloud/application_default_credentials.json ~/.config/gcloud/adc-gdrive.json
+# then restore your normal default ADC:  gcloud auth application-default login   (no --impersonate…)
 ```
 
-> Keep the URL on **one line** — terminals wrapping it break the scope list.
-> Restore your normal default ADC afterwards with a plain
-> `gcloud auth application-default login` (no `--impersonate…`); the connector uses
-> the saved file via the env var below, so it doesn't need the default ADC.
+**Option 3 — no separate file at all.** If this machine runs nothing else that
+uses ADC, just do the impersonation login and let it be the *default* ADC — the
+connector reads the default with no `GOOGLE_APPLICATION_CREDENTIALS` needed. Simplest,
+but every ADC app on the box then impersonates the SA.
+
+> Keep the `--scopes` URL on **one line** — terminals wrapping it break the list.
+> Option 1 is recommended: the copy is only needed because the login can't target a
+> file, and an isolated `CLOUDSDK_CONFIG` sidesteps both the copy and clobbering
+> your default ADC.
 
 ### C. Point the connector at it (`.env`)
 
