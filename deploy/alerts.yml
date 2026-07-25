@@ -1,0 +1,80 @@
+# Recommended Prometheus alerting rules for the SharePoint connector listener.
+#
+# These key on the series exposed at GET /metrics. Several connector failure
+# modes are otherwise silent for up to ~GRAPH_FULL_SYNC_MINUTES, so wire at least
+# the "warning"/"critical" rules into Alertmanager. Thresholds are starting
+# points — tune to your tenant's volume and your GRAPH_* settings.
+#
+# Load into Prometheus via rule_files: [ alerts.yml ]. Assumes the listener is a
+# scrape target; `job`/`instance` labels come from your scrape_config.
+groups:
+  - name: sharepoint-connector
+    rules:
+      # The listener is down or unscrapeable. `up` is synthesized by Prometheus
+      # per target; sharepoint_up is emitted by the process itself.
+      - alert: SharePointListenerDown
+        expr: up{job="sharepoint-connector"} == 0 or sharepoint_up == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "SharePoint listener is down"
+          description: "No successful scrape / sharepoint_up==0 for 5m — the connector is not syncing."
+
+      # A file has been parked after exhausting its retries (oversized, corrupt,
+      # or Goodmem always marks it FAILED). It will never sync without action.
+      - alert: SharePointDeadLetter
+        expr: sharepoint_pending_dead > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "SharePoint connector has parked (dead-lettered) files"
+          description: "{{ $value }} file(s) parked after exhausting retries. Inspect GET /syncs?status=dead."
+
+      # Subscription renewal is failing. Two consecutive failures let the Graph
+      # subscription lapse and notifications stop silently.
+      - alert: SharePointSubscriptionRenewalFailing
+        expr: increase(sharepoint_subscription_renewal_failures_total[2h]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "SharePoint subscription renewal failing"
+          description: "Renewal(s) failed in the last 2h — the change subscription may lapse and stop delivering notifications."
+
+      # Retries are accumulating and not draining — a systemic ingest problem.
+      - alert: SharePointRetryBacklog
+        expr: (sharepoint_pending_add + sharepoint_pending_update + sharepoint_pending_remove) > 50
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "SharePoint connector retry backlog not draining"
+          description: "{{ $value }} items pending retry for 30m — Goodmem or Graph may be persistently failing."
+
+      # Per-item sync errors are occurring.
+      - alert: SharePointSyncErrors
+        expr: increase(sharepoint_sync_errors_total[1h]) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "SharePoint connector sync errors"
+          description: "{{ $value }} per-item sync error(s) in the last hour. Check GET /syncs?status=failure."
+
+      # Sustained Graph throttling — approaching rate limits.
+      - alert: SharePointThrottleStorm
+        expr: increase(sharepoint_graph_throttle_events_total[15m]) > 20
+        for: 5m
+        labels: { severity: info }
+        annotations:
+          summary: "SharePoint connector is being throttled by Graph"
+          description: "{{ $value }} throttle/backoff events in 15m — Graph is rate-limiting; syncs will be slow."
+
+      # No sync has happened in a long time. IMPORTANT: set the threshold ABOVE
+      # your GRAPH_FULL_SYNC_MINUTES (the periodic reconcile updates last_sync),
+      # or a quiet site will false-alarm. Example below assumes the ~36h default;
+      # raise it if you lengthen GRAPH_FULL_SYNC_MINUTES.
+      - alert: SharePointSyncStale
+        expr: time() - sharepoint_last_sync_timestamp_seconds > 172800  # 48h
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "SharePoint connector has not synced recently"
+          description: "No full/delta sync for >48h — even the periodic reconcile hasn't run. Check the listener."

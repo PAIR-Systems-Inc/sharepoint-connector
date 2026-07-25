@@ -1,0 +1,83 @@
+# Go CI for the connector binary (SharePoint → Goodmem).
+#
+# The core `build-test` job is the merge gate: it builds, vets, checks
+# formatting, and runs the race-enabled test suite. `lint` and `vuln` are
+# advisory (continue-on-error) so their findings surface as annotations without
+# blocking merges; flip continue-on-error to false to promote them to gates.
+name: Go CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: go-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Goodmem SDK is served from the pairsys Gemfury proxy (public-read).
+  # GONOSUMDB scopes the checksum-DB bypass to that one module (it isn't in the
+  # public sum DB) so every other dependency stays verified; GOTOOLCHAIN=local
+  # pins the setup-go toolchain (no auto-upgrade downloads).
+  GOPROXY: https://go-proxy.fury.io/pairsys/,https://proxy.golang.org,direct
+  GONOSUMDB: "fury.io/*"
+  GOTOOLCHAIN: local
+
+jobs:
+  build-test:
+    name: build · vet · fmt · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt (must be clean)
+        run: |
+          unformatted=$(gofmt -l cmd/ internal/)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"; echo "$unformatted"
+            exit 1
+          fi
+      - name: go test -race
+        run: go test -race ./...
+
+  lint:
+    name: golangci-lint (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62.2
+
+  vuln:
+    name: govulncheck (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        continue-on-error: true
+        run: |
+          # Pinned to a release whose go directive is <= the module's Go version,
+          # so GOTOOLCHAIN=local needs no toolchain download (which GOSUMDB=off
+          # would otherwise block).
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.3
+          "$(go env GOPATH)/bin/govulncheck" ./...
