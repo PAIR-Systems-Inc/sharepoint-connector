@@ -82,58 +82,59 @@ Then in the browser (Workspace required for Shared Drives):
 3. Add your files.
 4. Copy the **Drive ID** from the URL `…/drive/folders/<DRIVE_ID>`.
 
-### B. Per-machine: create the ADC credentials file
+### B. Per-machine: create the ADC credentials
 
-On each machine that runs the connector, mint an ADC file that impersonates the SA
-with Drive scope (the login itself only uses the allowed `cloud-platform` scope;
-the Drive scope is applied to the *impersonated* SA token):
-
-`gcloud auth application-default login` has **no flag to choose the output file** —
-it always writes to the default ADC path in the *active gcloud config directory*.
-So there are three ways to end up with a dedicated gdrive credentials file:
-
-**Option 1 — isolated config dir (cleanest; no copy, never touches your default ADC).**
-Point `CLOUDSDK_CONFIG` at a separate directory just for the login:
-
-```bash
-CLOUDSDK_CONFIG=~/.config/gcloud-gdrive gcloud auth application-default login \
-  --impersonate-service-account="$SA_EMAIL" \
-  --scopes=https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/cloud-platform
-# → writes ~/.config/gcloud-gdrive/application_default_credentials.json
-# Point the connector there (see § C):
-#   GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud-gdrive/application_default_credentials.json
-```
-
-**Option 2 — login normally, then copy to a stable name.** Because the login
-overwrites the *default* ADC (which other tools may rely on), copy it out:
+On each machine that runs the connector, do an impersonation login — it mints an
+ADC that reads the Drive as the SA (the login itself uses only the allowed
+`cloud-platform` scope; the Drive scope is applied to the *impersonated* SA token):
 
 ```bash
 gcloud auth application-default login \
   --impersonate-service-account="$SA_EMAIL" \
   --scopes=https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/cloud-platform
-cp ~/.config/gcloud/application_default_credentials.json ~/.config/gcloud/adc-gdrive.json
-# then restore your normal default ADC:  gcloud auth application-default login   (no --impersonate…)
 ```
 
-**Option 3 — no separate file at all.** If this machine runs nothing else that
-uses ADC, just do the impersonation login and let it be the *default* ADC — the
-connector reads the default with no `GOOGLE_APPLICATION_CREDENTIALS` needed. Simplest,
-but every ADC app on the box then impersonates the SA.
+> Keep the `--scopes` value on **one line** — terminals wrapping the URLs break it.
 
-> Keep the `--scopes` URL on **one line** — terminals wrapping it break the list.
-> Option 1 is recommended: the copy is only needed because the login can't target a
-> file, and an isolated `CLOUDSDK_CONFIG` sidesteps both the copy and clobbering
-> your default ADC.
+This writes the **default** ADC file (`~/.config/gcloud/application_default_credentials.json`);
+`application-default login` has no flag to target a different path. What you do next
+depends on whether anything else on the machine also uses ADC:
+
+**Default case — the connector is the only ADC app (e.g. a standalone listener
+instance): do nothing.** The connector reads the default ADC automatically — no
+`GOOGLE_APPLICATION_CREDENTIALS`, no separate file. Simplest, and what we use.
+Caveat: the impersonation creds now live *only* in the default ADC file, so if you
+later run a plain `gcloud auth application-default login` (no `--impersonate…`) it
+overwrites them — just re-run the impersonation login to restore.
+
+**Other apps also use ADC:** keep the connector's creds in a *separate* file so the
+default ADC stays free for them, and point the connector at it (`GOOGLE_APPLICATION_CREDENTIALS`,
+see § C). Two ways to get that file:
+
+```bash
+# (a) copy the default out after logging in:
+cp ~/.config/gcloud/application_default_credentials.json ~/.config/gcloud/adc-gdrive.json
+gcloud auth application-default login          # then restore your normal default ADC (no --impersonate…)
+
+# (b) or write it straight to an isolated dir at login time (no copy, never touches the default):
+CLOUDSDK_CONFIG=~/.config/gcloud-gdrive gcloud auth application-default login \
+  --impersonate-service-account="$SA_EMAIL" \
+  --scopes=https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/cloud-platform
+#   → ~/.config/gcloud-gdrive/application_default_credentials.json
+```
 
 ### C. Point the connector at it (`.env`)
 
 ```dotenv
 SOURCE=gdrive
 GDRIVE_DRIVE_ID=<DRIVE_ID>
-# Credentials — choose ONE:
-#   (a) impersonation / user ADC:
-GOOGLE_APPLICATION_CREDENTIALS=/home/you/.config/gcloud/adc-gdrive.json
-#   (b) a service-account key file (only if your org allows keys):
+
+# Credentials:
+#   • Default case (§ B) — the connector uses the DEFAULT ADC automatically, so
+#     set NOTHING here.
+#   • Separate-file case — point at it (absolute path recommended):
+# GOOGLE_APPLICATION_CREDENTIALS=/home/you/.config/gcloud/adc-gdrive.json
+#   • Service-account key (only if your org allows keys):
 # GDRIVE_SA_JSON_FILE=/home/you/keys/goodmem-connector.json
 
 # Goodmem (as for any sync):
@@ -142,11 +143,13 @@ GOODMEM_API_KEY=...
 GOODMEM_SPACE_ID=...        # or leave unset to create GDrive_<DRIVE_ID>
 ```
 
-`GOOGLE_APPLICATION_CREDENTIALS` is a standard Google SDK variable, not a connector
-one — but the connector loads `.env` into the process environment before the Drive
-client starts, so setting it in `.env` works. You can equally set it inline
-(`GOOGLE_APPLICATION_CREDENTIALS=… ./connector sync-once --source gdrive`) or export
-it in the shell. A real shell env var wins over `.env`.
+In the default case the connector falls back to ADC on its own — no credential
+variable needed. If you do use a separate file, `GOOGLE_APPLICATION_CREDENTIALS` is
+a standard Google SDK variable, not a connector one, but the connector loads `.env`
+into the process environment before the Drive client starts, so setting it in `.env`
+works (equally, set it inline or export it in the shell; a real shell env var wins
+over `.env`). Keep any credentials file out of git — the repo's `.gitignore` covers
+`*adc*.json`, `*-sa.json`, and `secrets/`.
 
 Then run: `./connector sync-once --source gdrive` (or `serve` for the listener).
 
