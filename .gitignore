@@ -3,6 +3,14 @@
 .env.*
 !.env.example
 
+# Credentials — service-account keys & ADC files. NEVER commit these.
+secrets/
+*-sa.json
+sa-*.json
+*service-account*.json
+*adc*.json
+application_default_credentials*.json
+
 # Graph delta token (persisted deltaLink for incremental sync)
 .graph_delta_link
 .graph_pending_removes
