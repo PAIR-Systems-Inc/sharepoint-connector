@@ -4,9 +4,10 @@ Plan to take the SharePoint → Goodmem connector from proof-of-concept (Python)
 to a production-grade service, **rewritten entirely in Go** — a single compiled
 binary — so the distributed code ships as a binary rather than readable source.
 
-Current state: `sync_once.py`, `listener.py` (~1,830 lines), `watch_listener.py`,
-`sharepoint_client.py`, `goodmem_client.py`, deployed to Fly.io via
-`deploy_fly_io.sh`. Design fundamentals are sound (deterministic UUIDs for
+Starting point (PoC, Python): `sync_once.py`, `listener.py` (~1,830 lines),
+`watch_listener.py`, `sharepoint_client.py`, `goodmem_client.py`, run on Fly.io
+via `deploy_fly_io.sh` **only on test/dev clusters — no customer tenant ever ran
+the Python stack**. Design fundamentals are sound (deterministic UUIDs for
 idempotency, delta-vs-full sync, pending-retry sets, auto-renewing Graph
 subscription, `clientState` validation). The gaps are the usual PoC→prod ones,
 plus the source-protection requirement.
@@ -150,19 +151,22 @@ Replace `listener.py` + `sync_once.py` with a single binary (e.g. `connector`):
 > characterization/differential tests were port-time scaffolding and are **not**
 > being built as a maintained suite. Only step 4 (shadow-run → cutover) remains.
 >
-> **Cutover model (decided 2026-07-22).** Python is **not** an ongoing safety net
-> and is **never deployed** — it stays in the repo purely as a historical
-> reference (git). Go is the only production system. So the shadow-run is a
-> pre-prod validation of the **Go** listener, not a live Python-vs-Go parallel:
+> **Cutover model (proposed by @forrestbao 2026-07-22, ratified by @amin3141 in
+> the PR #3 review 2026-07-25).** Python is **not** an ongoing safety net and is
+> **never deployed** — it stays in the repo purely as a historical reference
+> (git). Go is the only production system. So the shadow-run is a pre-prod
+> validation of the **Go** listener, not a live Python-vs-Go parallel:
 >
 > - **Shadow-run:** run the Go listener against a real (or representative)
 >   SharePoint site for a validation window before the first tenant goes live.
->   Pass criteria: every file reaches `COMPLETED` in `GET /syncs` with no
->   unexpected deletes and `sharepoint_pending_dead == 0`; spot-check retrieval
->   quality in the Go-managed space; optionally a one-time offline reference diff
->   (`sync-once --dry-run` plan vs. the Python `sync_once.py` plan on the same
->   fixture) as a final sanity check — Python used as a throwaway oracle for that
->   single comparison, not as a running system.
+>   **Pass criteria (all required):** every file reaches `COMPLETED` in
+>   `GET /syncs` with no unexpected deletes and `sharepoint_pending_dead == 0`;
+>   a retrieval-quality spot-check in the Go-managed space passes; **and** a
+>   one-time offline reference diff — `sync-once --dry-run` plan vs. the Python
+>   `sync_once.py` plan on the same fixture — shows no unexplained divergence.
+>   That offline diff is the **last** use of Python as a throwaway oracle (not a
+>   running system) and is the final cross-check before it is never consulted
+>   again.
 > - **Cutover:** the first real tenant's production Goodmem space goes live on the
 >   Go listener. No Python removal step is needed (it was never in prod); it
 >   simply stops being referenced as an oracle.
@@ -206,8 +210,9 @@ memories.
   cutover). Its job — catching port divergences — was done by the one-time
   module-by-module audit (§0), and the integration tests above are now the living
   spec. No ongoing automated suite is needed (it would force us to keep Python
-  alive to diff against). Optional: a single differential run over shared fixtures
-  right before deleting Python, for extra confidence — not a maintained suite.
+  alive to diff against), but a single differential run over shared fixtures is a
+  **required** one-time pre-cutover check (see §2 pass criteria) — the last use of
+  Python before it's retired, not a maintained suite.
 - **Load/soak**: notification bursts, large drives, throttling behavior. ❌ not started.
 - Wire it all into CI (see §7). ✅ **done.**
 
@@ -278,8 +283,11 @@ memories.
   [`deploy/alerts.yml`](deploy/alerts.yml) covering listener-down, dead-letter,
   renewal failure, retry backlog, sync errors, throttle storms, and stale-sync.
   Wiring to a Prometheus/Alertmanager stack remains per-deployment.
-- `/healthz` (liveness) ✅ done; `/readyz` (readiness) ✅ **done** — `200` only
-  after the startup full sync completed and the subscription is ensured.
+- `/healthz` (liveness) ✅ done; `/readyz` (readiness) ✅ **done** — `200` once
+  the subscription is ensured and the startup full sync has been **attempted**; a
+  failed startup sync is left to the periodic reconcile and does not hold
+  readiness (the delta cursor isn't advanced on a failed sync, so nothing is
+  silently skipped).
 - **Durable, queryable sync history** (@amin3141's ask): ✅ **done** — a
   SQLite log (`internal/store`, pure-Go `modernc.org/sqlite` so it keeps the
   `CGO_ENABLED=0` distroless build) on the `/data` volume records every per-item
@@ -319,9 +327,11 @@ memories.
 
 ## 9. Multi-tenancy & operations
 
-- **Deployment model:** today it's one Fly cluster per customer
-  (`<FLY_CLUSTER>-*`). Fine as a model — document/automate onboarding and
-  teardown; decide whether one deployment should ever serve multiple sites.
+- **Deployment model:** the intended model is one Fly cluster per customer
+  (`<FLY_CLUSTER>-*`) — the shape the Go connector deploys as, though **no
+  customer tenant is live yet** (test/dev clusters only). Fine as a model —
+  document/automate onboarding and teardown; decide whether one deployment
+  should ever serve multiple sites.
 - **Ops:** liveness/readiness probes, graceful shutdown mid-sync, backup/restore
   of the datastore, and runbooks (the "restart a suspended listener" note in
   `docs/usage.md` is a start).

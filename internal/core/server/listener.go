@@ -153,7 +153,7 @@ func (l *Listener) startup() {
 		l.server.Log("error", "subscription: "+err.Error())
 	} else {
 		l.server.Log("info", "subscription ready (expires "+sub.Expiration+")")
-		l.ready.Store(true) // startup full sync done + subscription ensured → serve /readyz 200
+		l.ready.Store(true) // subscription ensured + startup full sync attempted → /readyz 200 (a failed startup sync is retried by the periodic reconcile, not gated here)
 	}
 }
 
