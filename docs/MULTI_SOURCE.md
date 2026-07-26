@@ -187,8 +187,11 @@ key as a new secret class, `channels.stop` cleanup, and Shared-Drive scoping doc
 5. ✅ **CLI/config** source selection (`--source` flag / `SOURCE` env) + `GDRIVE_*`
    config, source-aware `ValidateSync`, per-source space naming; `.env.example` +
    drift test + a validation test. Green.
-6. **Productionize gdrive**: docs (Shared-Drive setup, auth), one live pass against a
-   real Shared Drive. **Poll mode is the gdrive default** (`SYNC_POLL_MINUTES`,
+6. **Productionize gdrive**: docs (Shared-Drive setup, auth). ✅ **Live pass done** —
+   a real Shared Drive synced end-to-end into Goodmem via impersonated ADC: `.pdf`,
+   `.xlsx`, and `.doc` all reached `COMPLETED` with correct content types and
+   `source=gdrive`, under the new `gdrive.file.id` namespace. **Poll mode is the
+   gdrive default** (`SYNC_POLL_MINUTES`,
    default 2) — a timer-driven delta sync that needs **no public webhook**, so
    Google's domain-verified-endpoint requirement for `changes.watch` is no longer a
    deploy blocker; push mode stays available for anyone who owns a verifiable domain
