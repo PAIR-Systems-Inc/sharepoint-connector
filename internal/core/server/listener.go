@@ -31,6 +31,7 @@ type Listener struct {
 	NotificationURL   string
 	SubMinutes        int
 	FullSyncMinutes   int // periodic safety full-sync interval; <= 0 disables it
+	PollMinutes       int // >0 → poll the delta feed on this interval instead of using a push subscription (no webhook needed); 0 → push/webhook mode
 	Port              string
 	DeltaPath         string  // file holding the incremental cursor
 	ExtractPageImages bool    // hint Goodmem to extract page images
@@ -124,10 +125,13 @@ func (l *Listener) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	go l.startup(ctx)              // full sync + delta bootstrap + create subscription, then renewal loop
-	go l.deltaWorker(ctx)          // single worker draining coalesced notifications
-	go l.periodicFullSyncLoop(ctx) // periodic safety full-sync (repairs missed deltas)
+	go l.startup(ctx)              // full sync + delta bootstrap, then push subscription (or nothing in poll mode)
+	go l.deltaWorker(ctx)          // single worker draining coalesced delta triggers (webhook or poll)
+	go l.periodicFullSyncLoop(ctx) // periodic safety full-sync (repairs anything missed)
 	go l.retentionLoop(ctx)        // prune old sync-history rows
+	if l.PollMinutes > 0 {
+		go l.periodicDeltaLoop(ctx) // poll mode: drive delta syncs on a timer instead of push notifications
+	}
 
 	srv := &http.Server{Handler: l.server.Handler()}
 	go func() {
@@ -143,12 +147,41 @@ func (l *Listener) Run(ctx context.Context) error {
 	return nil
 }
 
-// startup runs the boot-time full sync, persists a fresh delta link, creates the
-// subscription, then runs the renewal loop (blocks until ctx is cancelled).
+// startup runs the boot-time full sync and persists a fresh delta link. In push
+// mode it then creates the subscription and runs the renewal loop (blocking until
+// ctx is cancelled); in poll mode there is no subscription — the periodicDeltaLoop
+// drives sync — so it just marks the listener ready.
 func (l *Listener) startup(ctx context.Context) {
 	l.fullSyncLocked("startup")
+	if l.PollMinutes > 0 {
+		// Poll mode: no push subscription (e.g. Google Drive's changes.watch needs a
+		// domain-verified webhook). Ready once the startup full sync has been attempted.
+		l.ready.Store(true)
+		l.server.Log("info", fmt.Sprintf("poll mode: delta sync every %d min (no push subscription)", l.PollMinutes))
+		return
+	}
 	l.renewSubscription(ctx, "subscription ready")
 	l.subscriptionLoop(ctx)
+}
+
+// periodicDeltaLoop drives a delta sync every PollMinutes (poll mode). It signals
+// the same coalescing worker the webhook path uses, so a slow sync can't pile up
+// overlapping runs. Used when there is no push subscription (e.g. Google Drive
+// without a domain-verified webhook). PollMinutes <= 0 disables it (push mode).
+func (l *Listener) periodicDeltaLoop(ctx context.Context) {
+	if l.PollMinutes <= 0 {
+		return
+	}
+	t := time.NewTicker(time.Duration(l.PollMinutes) * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.signal()
+		}
+	}
 }
 
 // renewSubscription (re)creates the change subscription, records the outcome, and

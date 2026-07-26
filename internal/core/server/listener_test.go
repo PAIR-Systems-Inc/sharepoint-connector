@@ -122,6 +122,66 @@ func TestPeriodicFullSyncDisabled(t *testing.T) {
 	}
 }
 
+// TestPeriodicDeltaLoopDisabled: PollMinutes <= 0 (push mode) disables the poll
+// loop, so it returns immediately.
+func TestPeriodicDeltaLoopDisabled(t *testing.T) {
+	l := &Listener{PollMinutes: 0}
+	done := make(chan struct{})
+	go func() { l.periodicDeltaLoop(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("periodicDeltaLoop should return immediately when PollMinutes<=0")
+	}
+}
+
+// TestPollModeStartupNoSubscription: in poll mode, startup runs the full sync and
+// marks the listener ready WITHOUT creating a push subscription or blocking on the
+// renewal loop (which would never return). A subscription-hostile source (Watch
+// would fail against the fake) confirms the subscription path isn't taken.
+func TestPollModeStartupNoSubscription(t *testing.T) {
+	fg := fakes.NewGraph()
+	gsrv := httptest.NewServer(fg.Handler())
+	defer gsrv.Close()
+	fg.SetBase(gsrv.URL)
+	fg.Put(fakes.File{ID: "a", Name: "a.pdf", Mime: "application/pdf", Modified: "2026-01-01T00:00:00Z", Content: "A"})
+
+	fm := fakes.NewGoodmem()
+	msrv := httptest.NewServer(fm.Handler())
+	defer msrv.Close()
+
+	gc := sharepoint.NewClient("cid", "tid", "sec", "https://contoso.sharepoint.com/sites/Test",
+		sharepoint.WithBaseURLs(gsrv.URL, gsrv.URL))
+	gmc, err := gm.New(msrv.URL, "key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := sharepoint.NewAdapter(gc, "", "cs")
+	l := &Listener{
+		Src:         s,
+		GM:          gmc,
+		SpaceID:     "space-1",
+		PollMinutes: 5, // poll mode
+		baseCtx:     context.Background(),
+		delta:       deltaStore{path: filepath.Join(t.TempDir(), "delta")},
+	}
+	l.server = New(s, nil)
+
+	done := make(chan struct{})
+	go func() { l.startup(context.Background()); close(done) }()
+	select {
+	case <-done: // poll-mode startup must return (push-mode would block in subscriptionLoop)
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll-mode startup should return, not block in the renewal loop")
+	}
+	if !l.ready.Load() {
+		t.Error("poll-mode startup should mark the listener ready")
+	}
+	if l.delta.load() == "" {
+		t.Error("startup full sync should have bootstrapped the delta cursor")
+	}
+}
+
 func TestDeltaStore(t *testing.T) {
 	d := deltaStore{path: filepath.Join(t.TempDir(), "delta")}
 

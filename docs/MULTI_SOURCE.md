@@ -187,8 +187,15 @@ key as a new secret class, `channels.stop` cleanup, and Shared-Drive scoping doc
 5. ✅ **CLI/config** source selection (`--source` flag / `SOURCE` env) + `GDRIVE_*`
    config, source-aware `ValidateSync`, per-source space naming; `.env.example` +
    drift test + a validation test. Green.
-6. **Productionize gdrive**: docs (Shared-Drive setup, webhook domain verification),
-   one live pass against a real Shared Drive. **Review fixes landed** (from the
+6. **Productionize gdrive**: docs (Shared-Drive setup, auth), one live pass against a
+   real Shared Drive. **Poll mode is the gdrive default** (`SYNC_POLL_MINUTES`,
+   default 2) — a timer-driven delta sync that needs **no public webhook**, so
+   Google's domain-verified-endpoint requirement for `changes.watch` is no longer a
+   deploy blocker; push mode stays available for anyone who owns a verifiable domain
+   and wants lower latency. Unattended production auth options + limits (ADC
+   impersonation is interactive; SA keys are org-blocked; workload identity
+   federation off-GCP) are documented in [`docs/gcloud.md`](gcloud.md#d-unattended-production-auth-deploys).
+   **Review fixes landed** (from the
    gdrive PR review): per-source memory-id namespace (`gdrive.file.id`, so Drive
    memories aren't minted in the SharePoint namespace); renewal cadence honors the
    lifetime Drive actually grants (not the requested TTL); folder-trash triggers a

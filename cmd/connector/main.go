@@ -137,13 +137,25 @@ func runServe(args []string) error {
 		return err
 	}
 	configureLogging() // structured logs to stderr (Fly logs / shippers)
-	// The webhook secret + public URL are needed regardless of source (they are the
-	// channel token / address for gdrive, the clientState / notificationUrl for SharePoint).
-	if strings.TrimSpace(cfg.GraphClientState) == "" {
-		return errors.New("GRAPH_CLIENT_STATE (webhook secret) is required for serve")
+
+	// Poll vs push. Google Drive's changes.watch requires a domain-verified HTTPS
+	// webhook, so gdrive defaults to POLL mode (periodic delta — no public URL
+	// needed); SharePoint defaults to push (Graph webhooks are easy to stand up).
+	// Override either way with SYNC_POLL_MINUTES (>0 → poll; 0 → push).
+	defaultPoll := 0
+	if cfg.Source == "gdrive" {
+		defaultPoll = 2
 	}
-	if strings.TrimSpace(cfg.GraphNotificationURL) == "" {
-		return errors.New("GRAPH_NOTIFICATION_URL (public webhook URL) is required for serve")
+	pollMin := atoiOr(os.Getenv("SYNC_POLL_MINUTES"), defaultPoll)
+
+	// Push mode needs the webhook secret + public URL; poll mode needs neither.
+	if pollMin <= 0 {
+		if strings.TrimSpace(cfg.GraphClientState) == "" {
+			return errors.New("GRAPH_CLIENT_STATE (webhook secret) is required for push mode; set SYNC_POLL_MINUTES>0 for poll mode")
+		}
+		if strings.TrimSpace(cfg.GraphNotificationURL) == "" {
+			return errors.New("GRAPH_NOTIFICATION_URL (public webhook URL) is required for push mode; set SYNC_POLL_MINUTES>0 for poll mode")
+		}
 	}
 	gmc, err := buildGoodmem(cfg)
 	if err != nil {
@@ -173,6 +185,7 @@ func runServe(args []string) error {
 		NotificationURL:   cfg.GraphNotificationURL,
 		SubMinutes:        subMin,
 		FullSyncMinutes:   fullSyncMin,
+		PollMinutes:       pollMin,
 		Port:              port,
 		DeltaPath:         deltaPath,
 		ExtractPageImages: cfg.ExtractPageImages,
@@ -184,7 +197,11 @@ func runServe(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fmt.Printf("Listener on :%s   space=%s   webhook=%s\n", port, spaceID, cfg.GraphNotificationURL)
+	if pollMin > 0 {
+		fmt.Printf("Listener on :%s   space=%s   mode=poll(%dm)\n", port, spaceID, pollMin)
+	} else {
+		fmt.Printf("Listener on :%s   space=%s   mode=push   webhook=%s\n", port, spaceID, cfg.GraphNotificationURL)
+	}
 	return l.Run(ctx)
 }
 

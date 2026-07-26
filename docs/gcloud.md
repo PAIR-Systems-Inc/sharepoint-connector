@@ -153,10 +153,46 @@ over `.env`). Keep any credentials file out of git — the repo's `.gitignore` c
 
 Then run: `./connector sync-once --source gdrive` (or `serve` for the listener).
 
-> **Deploys (Fly, etc.):** ADC impersonation needs an interactive login, so it is
-> for local/GCP-hosted runs. An unattended off-GCP deploy needs a service-account
-> **key** (option a → `GDRIVE_SA_JSON`), which requires an org that permits keys,
-> or workload identity federation. The event-triggered listener also needs a
-> **domain-verified** HTTPS webhook (Google requirement for `changes.watch`), which
-> a throwaway `*.fly.dev` host cannot satisfy — use a domain you own.
+### D. Unattended production auth (deploys)
+
+The three methods above behave very differently for an **unattended** deploy — a
+long-running listener with no human present to log in:
+
+| Method | Unattended? | Limitation |
+|---|---|---|
+| **ADC impersonation** (§ B) | ❌ No | `gcloud auth application-default login --impersonate-service-account` is **interactive** — it opens a browser and mints a *user* refresh token. Great for a laptop or a hands-on GCP VM; a headless container can't perform it, and the credential is tied to your user session. Use it for local runs and one-off syncs, not a deployed listener. |
+| **Service-account key** (`GDRIVE_SA_JSON` / `_FILE`) | ✅ Yes | The straightforward unattended path — **but** many orgs (including ours) block key creation via `iam.managed.disableServiceAccountKeyCreation`, and a downloadable key is a long-lived secret you must store, rotate, and guard. If your org permits keys, ship it as a secret (e.g. a Fly secret) and you're done. |
+| **GCP-attached service account** (metadata server) | ✅ Yes | Zero secrets on disk — but only when the listener **runs on GCP** (Cloud Run / GKE / GCE) with the SA attached to the workload. Not available off-GCP. |
+| **Workload Identity Federation (WIF)** | ✅ Yes | Keyless *even off-GCP*: the host platform's own OIDC token is exchanged for short-lived SA credentials, so there's no downloadable key — it satisfies the key-block policy. Costs more setup (an identity pool + provider + a credential-config JSON) and requires the platform to issue an OIDC token to the workload. |
+
+**Pick by where the listener runs:**
+
+- **On GCP** (Cloud Run / GKE / GCE): attach the Drive service account to the
+  workload — nothing to store or rotate. Simplest.
+- **Off GCP, keys allowed**: a service-account key in `GDRIVE_SA_JSON` (as a
+  platform secret).
+- **Off GCP, keys blocked** (our situation): **workload identity federation** is
+  the only keyless, unattended option.
+
+**Workload identity federation, in brief.** Create a workload identity pool +
+provider that trusts your platform's OIDC issuer; let the pool's principal
+impersonate the Drive SA (grant it `roles/iam.serviceAccountTokenCreator`, or bind
+it directly on the SA); then generate an ADC *credential-configuration* file
+(`gcloud iam workload-identity-pools create-cred-config …`) and point
+`GOOGLE_APPLICATION_CREDENTIALS` at it. At runtime the Google SDK reads that config,
+exchanges the platform's OIDC token for a short-lived Drive-scoped SA token, and no
+key ever touches disk. Caveat: the platform must actually issue a workload OIDC
+token — GCP, GitHub Actions, AWS, and Azure do; a plain **Fly.io** app does not
+today, so on Fly the realistic choices remain a **key** (if the org allowed one) or
+running the listener on a **GCP host**. Track this as the blocker for a fully
+keyless off-GCP gdrive deploy.
+
+### E. Push vs poll for the listener
+
+The gdrive listener defaults to **poll mode** (`SYNC_POLL_MINUTES`, default 2), which
+runs a delta sync on a timer and needs **no public webhook**. Google's push channels
+(`changes.watch`) require a **domain-verified** HTTPS endpoint — a throwaway
+`*.fly.dev` host can't satisfy it — so push mode is only worth it when you own a
+verifiable domain and want sub-minute latency. Poll mode removes that blocker
+entirely; it is the recommended default for gdrive.
 
