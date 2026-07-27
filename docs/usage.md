@@ -190,9 +190,35 @@ latency.
 
 Either way the listener also runs a periodic full reconcile as a safety net.
 
-### Deploy the listener to Fly.io
+### Where to run the listener
 
-`./deploy_fly_io.sh` is the supported path; `--help` lists all modes.
+It's a single static binary (also shipped as a distroless image), so **any host
+that can run a Linux binary or a container works**. `./deploy_fly_io.sh` is a
+convenience wrapper for *one* host, not a requirement.
+
+Requirements for any host: outbound HTTPS to the source API and to Goodmem; a
+**persistent writable directory** for durable state (delta cursor, pending-retry
+sets, sync history — `GRAPH_DELTA_TOKEN_FILE`'s directory); and, **only in push
+mode**, a public HTTPS URL.
+
+| Host | SharePoint | Google Drive |
+|---|---|---|
+| **Fly.io** via `./deploy_fly_io.sh` | ✅ push or poll | ⚠️ poll + **service-account key** only |
+| **GCP** — GCE VM / GKE | ✅ | ✅ **best fit**: keyless via the attached service account |
+| **Cloud Run** | ✅ | ⚠️ key or workload identity federation (its token is `cloud-platform`-only, which doesn't cover Drive) |
+| **Any VM / on-prem / Docker / Kubernetes** | ✅ | ✅ key, or WIF where the platform issues an OIDC token |
+
+**Does `deploy_fly_io.sh` work for both sources?** Yes — the script is
+source-agnostic: it only requires `FLY_CLUSTER`, imports your whole `.env` as Fly
+secrets, and never inspects `SOURCE`. Two Google-Drive caveats on Fly, though:
+auth must be **Path 1 (a key)**, because Fly provides no attached service account
+and issues no OIDC token for federation; and **push mode is impossible** because
+`*.fly.dev` cannot be domain-verified — so it runs in poll mode (already the
+Drive default). If you want a keyless Drive deployment, run it on GCP instead.
+
+### Deploy to Fly.io with the script
+
+`./deploy_fly_io.sh` automates the Fly.io option; `--help` lists all modes.
 
 **Listener only (Goodmem already exists):** set your source's credentials plus
 the **Goodmem** group and `FLY_CLUSTER` (optionally `FLY_ORG` / `FLY_REGION`).

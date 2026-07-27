@@ -46,6 +46,7 @@
 
   <rect x="522" y="180" width="88" height="58" rx="8" fill="#ecfdf5" stroke="#475569"/>
   <text x="566" y="213" text-anchor="middle">Goodmem</text>
+  <text x="566" y="252" text-anchor="middle" fill="#94a3b8" font-size="10">reachable from listener</text>
 
   <!-- 1 · inbound webhook: push mode only (in poll mode the listener wakes itself) -->
   <line x1="156" y1="200" x2="236" y2="200" stroke="#334155" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
@@ -54,7 +55,7 @@
   <!-- 2 · the listener reads the source: a delta, or a full list on reconcile -->
   <line x1="236" y1="216" x2="156" y2="216" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="196" y="230" text-anchor="middle" fill="#64748b" font-size="11">2 · pull</text>
-  <text x="196" y="252" text-anchor="middle" fill="#64748b" font-size="10">delta / full list</text>
+  <text x="196" y="243" text-anchor="middle" fill="#64748b" font-size="10">delta / full list</text>
 
   <line x1="440" y1="209" x2="520" y2="209" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="480" y="200" text-anchor="middle" fill="#64748b" font-size="11">3 · apply</text>
@@ -62,16 +63,15 @@
   <!-- ============ Optional side-cars ============ -->
   <rect x="30" y="284" width="250" height="62" rx="8" fill="#eef2ff" stroke="#475569" stroke-dasharray="6 4"/>
   <text x="155" y="304" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">Monitoring (optional)</text>
-  <text x="155" y="320" text-anchor="middle" fill="#64748b" font-size="10">Prometheus scrapes /metrics</text>
-  <text x="155" y="334" text-anchor="middle" fill="#64748b" font-size="10">connector watch tails /activity</text>
+  <text x="155" y="320" text-anchor="middle" fill="#64748b" font-size="10">GET /metrics · /syncs · /activity</text>
+  <text x="155" y="334" text-anchor="middle" fill="#64748b" font-size="10">Prometheus · connector watch</text>
 
   <rect x="360" y="284" width="250" height="62" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-dasharray="6 4"/>
   <text x="485" y="304" text-anchor="middle" font-size="13" font-weight="600" fill="#1e3a8a">Deploy (one option)</text>
-  <text x="485" y="320" text-anchor="middle" fill="#1e3a8a" font-size="10">./deploy_fly_io.sh — any host works</text>
-  <text x="485" y="334" text-anchor="middle" fill="#1e3a8a" font-size="10">--hands-free also deploys Goodmem</text>
+  <text x="485" y="320" text-anchor="middle" fill="#1e3a8a" font-size="10">./deploy_fly_io.sh — Fly.io</text>
+  <text x="485" y="334" text-anchor="middle" fill="#1e3a8a" font-size="10">both sources · or any other host</text>
 
   <line x1="270" y1="282" x2="320" y2="240" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="150" y="268" text-anchor="middle" fill="#64748b" font-size="10">GET /metrics · /syncs · /activity</text>
 
   <line x1="395" y1="282" x2="372" y2="240" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#barrow)"/>
   <text x="462" y="268" text-anchor="middle" fill="#1d4ed8" font-size="10">deploys the listener</text>

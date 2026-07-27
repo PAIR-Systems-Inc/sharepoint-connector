@@ -6,7 +6,7 @@ Keep a Goodmem space in sync with your content. One binary syncs from
 
 ## How it works
 
-![Connector sync modes — manual/periodic one-time sync, and event-triggered via a listener (push webhook for SharePoint, poll for Google Drive), with deploy_fly_io.sh provisioning Fly.io](docs/sync_architecture.svg)
+![Connector sync modes — manual/periodic one-time sync, and event-triggered via a listener (push webhook for SharePoint, poll timer for Google Drive); monitoring and Fly.io deployment are optional](docs/sync_architecture.svg)
 
 The connector is a single Go binary, **`connector`**, with subcommands
 (`sync-once`, `serve`, `create-subscription`, `watch`). Build it with
@@ -21,9 +21,13 @@ Goodmem up to date as files change. It gets changes either by **push** (the
 provider POSTs a webhook — the SharePoint default, needs a public HTTPS URL) or by
 **poll** (the listener pulls the delta on a timer — the Google Drive default,
 needs nothing public). It exposes `/metrics` (Prometheus) and `/syncs` (durable
-sync history) for monitoring. `./deploy_fly_io.sh` stands it up on Fly.io: with no
-flag it deploys the listener; `--hands-free` deploys a Goodmem server alongside
-it. (Railway support is coming.)
+sync history) for monitoring.
+
+Run it on **any host** — it's a single static binary. `./deploy_fly_io.sh`
+automates one option (Fly.io) and works for both sources; `--hands-free` also
+deploys a Goodmem server. For a *keyless* Google Drive deployment, run it on GCP
+instead — see [usage.md → Where to run the listener](docs/usage.md#where-to-run-the-listener).
+(Railway support is coming.)
 
 ## Getting started
 
@@ -136,4 +140,3 @@ goodmem-connectors/
 
 * Use a TOML-based config file instead of `.env`.
 * Railway deployment support.
-* Neutral metric names (`connector_*` with a `source` label).
