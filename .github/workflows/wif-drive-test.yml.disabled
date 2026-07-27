@@ -53,7 +53,10 @@ jobs:
       - name: Read the Shared Drive through the connector's ADC path
         env:
           GDRIVE_LIVE: "1"
-          GOOGLE_DRIVE_ID: ${{ inputs.drive_id }}
+          GOOGLE_DRIVE_ID: ${{ inputs.drive_id || '0AFuVPqpbmZ2oUk9PVA' }}
           GONOSUMDB: "fury.io/*"
           GOTOOLCHAIN: local
-        run: go test ./internal/providers/googledrive -run TestLive -v
+        run: |
+          test -n "$GOOGLE_DRIVE_ID" || { echo "GOOGLE_DRIVE_ID is empty - the test would skip"; exit 1; }
+          go test ./internal/providers/googledrive -run TestLive -v | tee /tmp/out
+          grep -q -- "--- PASS: TestLive_ListGoogleDrive" /tmp/out || { echo "live test did not run (skipped?)"; exit 1; }
