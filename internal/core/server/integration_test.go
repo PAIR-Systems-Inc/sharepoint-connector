@@ -64,19 +64,21 @@ func TestIntegration_ListenerMetrics(t *testing.T) {
 			b, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			body = string(b)
-			if strings.Contains(body, "\nsharepoint_files_added_total 2\n") {
+			if strings.Contains(body, `connector_files_added_total{source="sharepoint"} 2`) {
 				break
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// End-to-end: the series are connector_* and carry the source label taken
+	// from the provider adapter driving this listener.
 	for _, want := range []string{
-		"\nsharepoint_files_added_total 2\n",
-		"\nsharepoint_full_syncs_total 1\n",
-		"\nsharepoint_up 1\n",
-		"# TYPE sharepoint_files_added_total counter",
-		"# TYPE sharepoint_up gauge",
+		"\nconnector_files_added_total{source=\"sharepoint\"} 2\n",
+		"\nconnector_full_syncs_total{source=\"sharepoint\"} 1\n",
+		"\nconnector_up{source=\"sharepoint\"} 1\n",
+		"# TYPE connector_files_added_total counter",
+		"# TYPE connector_up gauge",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in /metrics output:\n%s", want, body)

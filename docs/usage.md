@@ -226,7 +226,7 @@ creates the push subscription or starts polling. Internals:
 | `POST /sync/webhook` | Provider change notifications (push mode): validation handshake + secret check. |
 | `GET /healthz` | Liveness probe (always `200` once the server is up). |
 | `GET /readyz` | Readiness probe — `200` once the subscription is ensured (push mode) and the startup full sync has been **attempted**; `503` until then. A failed startup sync does **not** hold readiness: the periodic reconcile retries it, and the cursor isn't advanced on failure so nothing is silently skipped. Point your load balancer here. |
-| `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta counts, throttle events, subscription-renewal health, last-sync time, pending-retry depth, and `sharepoint_pending_dead` (parked items — alert on this). |
+| `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta counts, throttle events, subscription-renewal health, last-sync time, pending-retry depth, and `connector_pending_dead` (parked items — alert on this). |
 | `GET /syncs` | **Durable sync history** (SQLite): one JSON record per item — `file_id`, `file_name`, `memory_id`, `space_id`, `op`, `status`, `message`, `ts`. `status` is `success`, `failure`, `skipped`, or `dead`. Query: `?limit=100&status=failure`. Answers "did file X sync, and why did it fail?". |
 | `GET /activity` | In-memory recent-events log (what `connector watch` polls). |
 
@@ -280,7 +280,7 @@ creates the push subscription or starts polling. Internals:
 - **Parked (dead-lettered) files.** A file that keeps failing (corrupt, oversized,
   or one Goodmem always marks FAILED) is parked after `GRAPH_MAX_ITEM_ATTEMPTS`
   tries instead of being re-downloaded every sync. It appears in
-  `GET /syncs?status=dead` and the `sharepoint_pending_dead` gauge — alert on it,
+  `GET /syncs?status=dead` and the `connector_pending_dead` gauge — alert on it,
   investigate, and re-uploading or editing the file queues a fresh attempt.
 - **Shutdown.** On SIGTERM the listener stops accepting work and exits; an
   in-flight provider call may still be sleeping between retries (bounded to a

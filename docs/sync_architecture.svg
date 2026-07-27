@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 344" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="14" role="img">
-  <title>Goodmem connector sync modes: manual/periodic (connector sync-once) and event-triggered (connector serve listener + monitoring + deploy_fly_io.sh), for either source — SharePoint or Google Drive</title>
+  <title>Goodmem connector sync modes: manual/periodic (connector sync-once) and event-triggered (connector serve listener, push webhook or poll), for either source — SharePoint or Google Drive; monitoring and Fly.io deployment are optional</title>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L8,3 L0,6 Z" fill="#334155"/>
@@ -13,8 +13,8 @@
   <text x="30" y="28" font-weight="600" font-size="15" fill="#0f172a">Manual / periodic sync</text>
 
   <rect x="32" y="56" width="96" height="44" rx="8" fill="#eef2ff" stroke="#475569"/>
-  <text x="80" y="72" text-anchor="middle">SharePoint</text>
-  <text x="80" y="89" text-anchor="middle" fill="#64748b" font-size="11">or Google Drive</text>
+  <text x="80" y="73" text-anchor="middle" font-size="12">SharePoint</text>
+  <text x="80" y="90" text-anchor="middle" font-size="12">or Google Drive</text>
 
   <rect x="200" y="56" width="176" height="44" rx="8" fill="#fff7ed" stroke="#475569"/>
   <text x="288" y="82" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">connector sync-once</text>
@@ -23,7 +23,7 @@
   <text x="528" y="82" text-anchor="middle">Goodmem</text>
 
   <line x1="130" y1="78" x2="198" y2="78" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="164" y="68" text-anchor="middle" fill="#64748b" font-size="12">pull changes</text>
+  <text x="164" y="68" text-anchor="middle" fill="#64748b" font-size="12">list all files</text>
 
   <line x1="378" y1="78" x2="489" y2="78" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="433" y="68" text-anchor="middle" fill="#64748b" font-size="12">ingest</text>
@@ -32,30 +32,32 @@
 
   <!-- ============ Panel 2: Event-triggered sync ============ -->
   <text x="30" y="146" font-weight="600" font-size="15" fill="#0f172a">Event-triggered sync</text>
-  <text x="30" y="163" fill="#64748b" font-size="11">push webhook (SharePoint) · poll on a timer (Google Drive)</text>
+  <text x="30" y="163" fill="#64748b" font-size="11">trigger: push webhook (SharePoint default) or poll timer (Google Drive default) · plus a periodic full reconcile</text>
 
   <!-- runtime boxes (center y=201) -->
   <rect x="32" y="176" width="96" height="50" rx="8" fill="#eef2ff" stroke="#475569"/>
-  <text x="80" y="195" text-anchor="middle">SharePoint</text>
-  <text x="80" y="212" text-anchor="middle" fill="#64748b" font-size="11">or Google Drive</text>
+  <text x="80" y="196" text-anchor="middle" font-size="12">SharePoint</text>
+  <text x="80" y="213" text-anchor="middle" font-size="12">or Google Drive</text>
 
   <rect x="200" y="176" width="176" height="50" rx="8" fill="#fff7ed" stroke="#475569"/>
-  <text x="288" y="197" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">connector serve</text>
-  <text x="288" y="212" text-anchor="middle" fill="#94a3b8" font-size="11">listener · public host · HTTPS/TLS</text>
+  <text x="288" y="193" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">connector serve</text>
+  <text x="288" y="207" text-anchor="middle" fill="#64748b" font-size="11">listener · push webhook or poll timer</text>
+  <text x="288" y="219" text-anchor="middle" fill="#94a3b8" font-size="10">public HTTPS needed only for push</text>
 
   <rect x="440" y="176" width="176" height="50" rx="8" fill="#ecfdf5" stroke="#475569"/>
   <text x="528" y="197" text-anchor="middle">Goodmem</text>
   <text x="528" y="212" text-anchor="middle" fill="#94a3b8" font-size="11">accessible to the listener</text>
 
   <!-- runtime arrows (numbered sequence) -->
-  <line x1="130" y1="196" x2="198" y2="196" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="164" y="187" text-anchor="middle" fill="#64748b" font-size="12">1 · change</text>
+  <line x1="130" y1="196" x2="198" y2="196" stroke="#334155" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="158" y="187" text-anchor="middle" fill="#64748b" font-size="12">1 · webhook</text>
 
   <line x1="198" y1="208" x2="130" y2="208" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="164" y="221" text-anchor="middle" fill="#64748b" font-size="12">2 · delta pull</text>
+  <text x="152" y="221" text-anchor="middle" fill="#64748b" font-size="12">2 · delta pull</text>
+  <text x="152" y="240" text-anchor="middle" fill="#94a3b8" font-size="10">(full list on reconcile)</text>
 
   <line x1="378" y1="201" x2="438" y2="201" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="408" y="192" text-anchor="middle" fill="#64748b" font-size="12">3 · sync</text>
+  <text x="408" y="192" text-anchor="middle" fill="#64748b" font-size="12">3 · apply</text>
 
   <!-- monitoring: bottom-left (optional), mirrors deploy about center, y~296 -->
   <rect x="47" y="274" width="212" height="46" rx="8" fill="#eef2ff" stroke="#475569" stroke-dasharray="6 4"/>
@@ -63,8 +65,9 @@
   <text x="153" y="308" text-anchor="middle" fill="#64748b" font-size="11">Prometheus scrapes · <tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace">connector watch</tspan></text>
 
   <!-- deploy_fly_io.sh: bottom-right (mirrors monitoring about center) -->
-  <rect x="392" y="274" width="176" height="46" rx="8" fill="#dbeafe" stroke="#1d4ed8"/>
-  <text x="480" y="302" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1e3a8a">./deploy_fly_io.sh</text>
+  <rect x="392" y="274" width="176" height="46" rx="8" fill="#dbeafe" stroke="#1d4ed8" stroke-dasharray="6 4"/>
+  <text x="480" y="292" text-anchor="middle" font-size="13" font-weight="600" fill="#1e3a8a">Deploy (one option)</text>
+  <text x="480" y="308" text-anchor="middle" font-size="11" fill="#1e3a8a"><tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace">./deploy_fly_io.sh</tspan> · any host works</text>
 
   <!-- monitoring reads listener endpoints -->
   <line x1="210" y1="274" x2="278" y2="228" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
@@ -72,7 +75,7 @@
 
   <!-- deploy connector to listener: always (solid) -->
   <line x1="420" y1="274" x2="345" y2="228" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#barrow)"/>
-  <text x="398" y="264" text-anchor="middle" fill="#1d4ed8" font-size="12">deploys (always)</text>
+  <text x="398" y="264" text-anchor="middle" fill="#1d4ed8" font-size="12">deploys listener</text>
 
   <!-- deploy connector to Goodmem: optional (dashed), label beside deploy -->
   <line x1="528" y1="274" x2="528" y2="228" stroke="#1d4ed8" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#barrow)"/>

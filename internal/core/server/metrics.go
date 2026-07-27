@@ -12,7 +12,14 @@ import (
 // Metrics holds Prometheus-style counters and gauges for the listener, exposed
 // at GET /metrics in the text exposition format. All fields are updated with
 // atomics, so it is safe for concurrent use.
+//
+// Every series is named connector_* and carries a source="<provider>" label, so
+// one dashboard or alert rule serves any provider and two connectors scraped into
+// the same Prometheus stay distinguishable (sum by (source) …).
 type Metrics struct {
+	// source labels every series (e.g. "sharepoint", "google-drive").
+	source string
+
 	filesAdded         atomic.Int64
 	filesUpdated       atomic.Int64
 	filesDeleted       atomic.Int64
@@ -29,8 +36,9 @@ type Metrics struct {
 	pendingFn atomic.Value // func() (add, update, remove int)
 }
 
-// NewMetrics returns a zeroed metrics registry.
-func NewMetrics() *Metrics { return &Metrics{} }
+// NewMetrics returns a zeroed metrics registry whose series are labelled with
+// the given source (the provider's Label(), e.g. "google-drive").
+func NewMetrics(source string) *Metrics { return &Metrics{source: source} }
 
 // SetPendingFn registers a provider for the current pending-retry queue depths
 // and dead-letter count (read at scrape time), e.g. syncer.Retrier.Counts.
@@ -94,25 +102,26 @@ func (m *Metrics) WritePrometheus(w io.Writer) {
 		name, typ, help string
 		val             int64
 	}{
-		{"sharepoint_up", "gauge", "1 while the listener is running.", 1},
-		{"sharepoint_files_added_total", "counter", "Files ingested (created) in Goodmem.", m.filesAdded.Load()},
-		{"sharepoint_files_updated_total", "counter", "Files re-ingested (updated).", m.filesUpdated.Load()},
-		{"sharepoint_files_deleted_total", "counter", "Memories deleted (orphaned or removed).", m.filesDeleted.Load()},
-		{"sharepoint_files_skipped_total", "counter", "Files skipped (unsupported MIME / no download URL).", m.filesSkipped.Load()},
-		{"sharepoint_sync_errors_total", "counter", "Per-item sync errors.", m.syncErrors.Load()},
-		{"sharepoint_full_syncs_total", "counter", "Full syncs run.", m.fullSyncs.Load()},
-		{"sharepoint_delta_syncs_total", "counter", "Delta syncs run.", m.deltaSyncs.Load()},
-		{"sharepoint_graph_throttle_events_total", "counter", "Graph throttle/backoff events.", m.throttleEvents.Load()},
-		{"sharepoint_subscription_renewals_total", "counter", "Subscription renew/ensure calls.", m.subRenewals.Load()},
-		{"sharepoint_subscription_renewal_failures_total", "counter", "Subscription renew/ensure failures.", m.subRenewalFailures.Load()},
-		{"sharepoint_last_sync_timestamp_seconds", "gauge", "Unix time of the last sync.", m.lastSyncUnix.Load()},
-		{"sharepoint_pending_add", "gauge", "Files queued for retry as add.", int64(pAdd)},
-		{"sharepoint_pending_update", "gauge", "Files queued for retry as update (delete-then-add).", int64(pUpd)},
-		{"sharepoint_pending_remove", "gauge", "Files queued for retry as remove.", int64(pRem)},
-		{"sharepoint_pending_dead", "gauge", "Files parked after exhausting retries (need operator attention).", int64(pDead)},
+		{"connector_up", "gauge", "1 while the listener is running.", 1},
+		{"connector_files_added_total", "counter", "Files ingested (created) in Goodmem.", m.filesAdded.Load()},
+		{"connector_files_updated_total", "counter", "Files re-ingested (updated).", m.filesUpdated.Load()},
+		{"connector_files_deleted_total", "counter", "Memories deleted (orphaned or removed).", m.filesDeleted.Load()},
+		{"connector_files_skipped_total", "counter", "Files skipped (unsupported MIME, oversized, or an export that can never succeed).", m.filesSkipped.Load()},
+		{"connector_sync_errors_total", "counter", "Per-item sync errors.", m.syncErrors.Load()},
+		{"connector_full_syncs_total", "counter", "Full syncs run.", m.fullSyncs.Load()},
+		{"connector_delta_syncs_total", "counter", "Delta syncs run.", m.deltaSyncs.Load()},
+		{"connector_throttle_events_total", "counter", "Provider throttle/backoff events.", m.throttleEvents.Load()},
+		{"connector_subscription_renewals_total", "counter", "Subscription renew/ensure calls.", m.subRenewals.Load()},
+		{"connector_subscription_renewal_failures_total", "counter", "Subscription renew/ensure failures.", m.subRenewalFailures.Load()},
+		{"connector_last_sync_timestamp_seconds", "gauge", "Unix time of the last sync.", m.lastSyncUnix.Load()},
+		{"connector_pending_add", "gauge", "Files queued for retry as add.", int64(pAdd)},
+		{"connector_pending_update", "gauge", "Files queued for retry as update (delete-then-add).", int64(pUpd)},
+		{"connector_pending_remove", "gauge", "Files queued for retry as remove.", int64(pRem)},
+		{"connector_pending_dead", "gauge", "Files parked after exhausting retries (need operator attention).", int64(pDead)},
 	}
+	labels := fmt.Sprintf("{source=%q}", m.source)
 	for _, mt := range metrics {
-		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", mt.name, mt.help, mt.name, mt.typ, mt.name, mt.val)
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s%s %d\n", mt.name, mt.help, mt.name, mt.typ, mt.name, labels, mt.val)
 	}
 }
 

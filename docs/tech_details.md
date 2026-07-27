@@ -185,7 +185,7 @@ ordering, which is why unordered sets are sufficient.
 
 **Dead-lettering.** An item that keeps failing is parked after
 `GRAPH_MAX_ITEM_ATTEMPTS` attempts instead of being retried forever; parked items
-appear in `GET /syncs?status=dead` and the `sharepoint_pending_dead` gauge.
+appear in `GET /syncs?status=dead` and the `connector_pending_dead` gauge.
 
 ## Safety guards
 
@@ -273,6 +273,5 @@ be different identities at the same time.
   `sync-once`). See [usage.md → Scope & limits](usage.md#scope--limits).
 - Google Drive is scoped to a **Shared Drive**; personal My Drive content needs
   domain-wide delegation, which is not implemented.
-- Metrics still carry the `sharepoint_` prefix regardless of source; renaming
-  them to a neutral prefix with a `source` label is tracked in
-  [MULTI_SOURCE.md](MULTI_SOURCE.md).
+- Metrics are named `connector_*` and carry a `source="<provider>"` label, so one
+  dashboard/alert covers both providers; see [`deploy/alerts.yml`](../deploy/alerts.yml).

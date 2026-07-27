@@ -64,7 +64,17 @@ type Event struct {
 // New returns a Server. validator classifies webhook requests (provider-specific);
 // onNotify is called (in a goroutine) for each validated change notification.
 func New(validator source.WebhookValidator, onNotify Notifier) *Server {
-	return &Server{validator: validator, onNotify: onNotify, maxLog: 500, Metrics: NewMetrics(), logger: slog.Default()}
+	return &Server{validator: validator, onNotify: onNotify, maxLog: 500, Metrics: NewMetrics(sourceLabel(validator)), logger: slog.Default()}
+}
+
+// sourceLabel reads the provider name off the validator (every source.Source
+// implements Label()) to label the metrics. Falls back to "unknown" for a bare
+// validator that isn't a full Source.
+func sourceLabel(v source.WebhookValidator) string {
+	if l, ok := v.(interface{ Label() string }); ok {
+		return l.Label()
+	}
+	return "unknown"
 }
 
 // SetReadyFn registers a readiness predicate for GET /readyz. Until it returns

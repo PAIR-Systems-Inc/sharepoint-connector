@@ -160,7 +160,7 @@ Replace `listener.py` + `sync_once.py` with a single binary (e.g. `connector`):
 > - **Shadow-run:** run the Go listener against a real (or representative)
 >   SharePoint site for a validation window before the first tenant goes live.
 >   **Pass criteria (all required):** every file reaches `COMPLETED` in
->   `GET /syncs` with no unexpected deletes and `sharepoint_pending_dead == 0`;
+>   `GET /syncs` with no unexpected deletes and `connector_pending_dead == 0`;
 >   a retrieval-quality spot-check in the Go-managed space passes; **and** a
 >   one-time offline reference diff — `sync-once --dry-run` plan vs. the Python
 >   `sync_once.py` plan on the same fixture — shows no unexplained divergence.
@@ -273,7 +273,7 @@ memories.
   exposition, no dep) exposes files added/updated/deleted/skipped, sync errors,
   full/delta sync counts, Graph throttle events (via the `OnThrottle` hook),
   subscription-renewal success/failure, last-sync timestamp, pending-retry
-  queue depth, and `sharepoint_pending_dead` (parked items). Replaces the ad-hoc
+  queue depth, and `connector_pending_dead` (parked items). Replaces the ad-hoc
   `watch`/`/activity` polling for monitoring.
 - **Structured logging** (JSON via `slog`) — ✅ **done** — the listener emits
   structured logs to stderr alongside the `/activity` ring; `LOG_LEVEL` /

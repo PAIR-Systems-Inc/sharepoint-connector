@@ -66,6 +66,10 @@ The per-provider differences that remain are catalogued in
 7. ✅ **Rename to `google-drive`** across code, config and identity values — done
    before any Google Drive tenant went live, since the namespace and space name
    are frozen once one is.
+8. ✅ **Neutral metrics** — every series is now `connector_*` with a
+   `source="<provider>"` label (was `sharepoint_*` regardless of source, including
+   a Graph-specific throttle metric on Drive). `deploy/alerts.yml` is source-
+   agnostic and names the firing connector via `{{ $labels.source }}`.
 
 ### Resolved along the way
 
@@ -96,8 +100,6 @@ The per-provider differences that remain are catalogued in
   `source: "google-drive"` into memory metadata; stamping SharePoint too and
   filtering orphan deletion by it would make a shared space safe and retire the
   one-space-per-source rule.
-- **Neutral metrics names** — `sharepoint_*` should become `connector_*` with a
-  `source` label.
 - **Generalize the env knobs** that aren't provider-specific (`SHAREPOINT_MAX_FILE_MB`,
   the non-Graph `GRAPH_*` settings) to shared names.
 - **Streaming ingest** — hand `Open`'s `io.ReadCloser` straight to
