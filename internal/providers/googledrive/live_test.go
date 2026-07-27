@@ -2,6 +2,7 @@ package googledrive
 
 import (
 	"context"
+	"io"
 	"os"
 	"testing"
 )
@@ -51,4 +52,32 @@ func TestLive_ListGoogleDrive(t *testing.T) {
 		t.Fatal("StartPageToken returned an empty cursor")
 	}
 	t.Logf("changes cursor OK (%d chars)", len(tok))
+
+	// Actually pull bytes. Listing only proves metadata access; downloading uses a
+	// different endpoint (files.get?alt=media, or files.export for native docs), so
+	// credentials that can list are not automatically proven able to fetch content.
+	var picked *DriveFile
+	for i := range files {
+		if IsNativeDoc(files[i].MimeType) && ExportTarget(files[i].MimeType) == "" {
+			continue // no export format; the engine skips these
+		}
+		picked = &files[i]
+		break
+	}
+	if picked == nil {
+		t.Skip("no downloadable file in the Drive to exercise content fetch")
+	}
+	rc, err := c.Open(ctx, picked.ID, picked.MimeType)
+	if err != nil {
+		t.Fatalf("Open(%s): %v", picked.Name, err)
+	}
+	defer rc.Close()
+	n, err := io.Copy(io.Discard, rc)
+	if err != nil {
+		t.Fatalf("reading %s: %v", picked.Name, err)
+	}
+	if n == 0 {
+		t.Fatalf("downloaded %s but got 0 bytes", picked.Name)
+	}
+	t.Logf("downloaded %q: %d bytes", picked.Name, n)
 }
