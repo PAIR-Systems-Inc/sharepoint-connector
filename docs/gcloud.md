@@ -2,8 +2,10 @@
 
 How a **deploying engineer** stands up the connector against a Google **Shared
 Drive**. The connector reads the drive as a **service account** (a read-only robot
-identity) and finds its credentials through **Application Default Credentials
-(ADC)** — see [Reference](#reference-gcloud-profiles--adc).
+identity). Path 1 supplies that identity **directly** (a key you configure); Paths
+2 and 3 are keyless and resolve it through **Application Default Credentials
+(ADC)** — the SDK's automatic credential search (see
+[Reference](#reference-gcloud-profiles--adc)).
 
 Anything that needs admin authority (create the service account, a key, IAM
 bindings, share the drive) is collected in the companion **[Request for
@@ -184,12 +186,17 @@ credentials automatically. The library searches, in order:
    `gcloud auth application-default login`;
 3. on a GCP host, the **attached service account** via the metadata server.
 
-That ordering is exactly why each path above "just works": Path 1/3 set (1), the
-local-testing login writes (2), and Path 2 relies on (3). The ADC JSON is one of a
-few shapes — service-account key (`"type": "service_account"`), user login
-(`"type": "authorized_user"`), impersonation (`"type":
-"impersonated_service_account"`), or external account / WIF (`"type":
-"external_account"`).
+That ordering is why the **keyless** paths "just work": **Path 3** sets (1) — its
+`GOOGLE_APPLICATION_CREDENTIALS` cred-config; the local-testing login writes (2);
+and **Path 2** relies on (3), the attached SA. **Path 1 is the exception** — it does
+*not* go through ADC at all: the connector reads `GDRIVE_SA_JSON` / `_FILE` itself
+and passes the key explicitly. (You *could* instead load a key via ADC by pointing
+`GOOGLE_APPLICATION_CREDENTIALS` at it and leaving `GDRIVE_SA_JSON` unset — step (1)
+— but the documented Path 1 uses the connector's own variable.) The ADC JSON in
+steps (1)–(3) is one of a few shapes — service-account key
+(`"type": "service_account"`), user login (`"type": "authorized_user"`),
+impersonation (`"type": "impersonated_service_account"`), or external account / WIF
+(`"type": "external_account"`).
 
 **ADC is separate from the gcloud CLI account.** The gcloud *profile* decides who
 `gcloud` commands act as; ADC decides who the *application* acts as. You can have
