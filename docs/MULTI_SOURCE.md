@@ -197,7 +197,9 @@ key as a new secret class, `channels.stop` cleanup, and Shared-Drive scoping doc
    deploy blocker; push mode stays available for anyone who owns a verifiable domain
    and wants lower latency. Unattended production auth options + limits (ADC
    impersonation is interactive; SA keys are org-blocked; workload identity
-   federation off-GCP) are documented in [`docs/gcloud.md`](gcloud.md#d-unattended-production-auth-deploys).
+   federation off-GCP) are documented in [`docs/gcloud.md`](gcloud.md#choose-your-auth-path)
+   (deploying-engineer runbook) and [`docs/gcloud-auth.md`](gcloud-auth.md) (the
+   "Request for IT" doc, analogous to SharePoint's [permission.md](permission.md)).
    **Review fixes landed** (from the
    gdrive PR review): per-source memory-id namespace (`gdrive.file.id`, so Drive
    memories aren't minted in the SharePoint namespace); renewal cadence honors the
