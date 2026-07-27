@@ -1,4 +1,4 @@
-// Package gdrive is the Google Drive provider: it reads a Shared Drive via the
+// Package googledrive is the Google Drive provider: it reads a Shared Drive via the
 // official Google Drive v3 SDK (google.golang.org/api/drive/v3) with
 // service-account OAuth2, and adapts it to the connector's core/source.Source.
 // Read-only scope. The SDK is fully contained here — the engine never sees it.

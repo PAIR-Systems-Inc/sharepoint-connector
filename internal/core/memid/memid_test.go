@@ -23,14 +23,14 @@ func TestFromFileID(t *testing.T) {
 // TestNamespaceIsolation locks in that a different namespace yields a different
 // id for the same file id — the whole point of per-source namespacing (a Google
 // Drive file and a SharePoint file that happened to share an id must not collide
-// on the same memory). It also pins the gdrive namespace value so it, too,
+// on the same memory). It also pins the Google Drive namespace value so it, too,
 // becomes a stable contract once live.
 func TestNamespaceIsolation(t *testing.T) {
 	const id = "shared-file-id"
 	sp := FromFileID("sharepoint.file.id", id)
 	gd := FromFileID("google-drive.file.id", id)
 	if sp == gd {
-		t.Fatalf("namespaces collided: sharepoint and gdrive both gave %s", sp)
+		t.Fatalf("namespaces collided: sharepoint and google-drive both gave %s", sp)
 	}
 	// Determinism: same inputs ⇒ same id.
 	if again := FromFileID("google-drive.file.id", id); again != gd {

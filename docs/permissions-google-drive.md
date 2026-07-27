@@ -120,7 +120,7 @@ only the instructions to fetch and exchange the platform's OIDC token.
 - Method 2 → confirmation the **SA is attached** to our workload
 - Method 3 → the **credential-config JSON**
 
-We place these in the connector's `.env` as `GDRIVE_SA_JSON_FILE` (method 1),
+We place these in the connector's `.env` as `GOOGLE_DRIVE_SA_JSON_FILE` (method 1),
 nothing (method 2), or `GOOGLE_APPLICATION_CREDENTIALS` (method 3).
 
 ## Org-policy notes
@@ -141,7 +141,7 @@ nothing (method 2), or `GOOGLE_APPLICATION_CREDENTIALS` (method 3).
 After we receive the values, we run:
 
 ```bash
-connector sync-once --source gdrive --dry-run
+connector sync-once --source google-drive --dry-run
 ```
 
 It authenticates as the service account, lists the Shared Drive's files, and prints

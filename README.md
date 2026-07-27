@@ -1,77 +1,139 @@
-# SharePoint Connector for Goodmem
+# Goodmem Connectors
 
-Keep a Goodmem space in sync with a SharePoint site. This connector (an Azure AD app) offers two ways to sync — **manual/periodic** and **event-triggered** — shown below.
+Keep a Goodmem space in sync with your content. One binary syncs from
+**SharePoint** or **Google Drive**, either **manually/periodically** or
+**event-triggered**.
 
 ## How it works
 
-![SharePoint connector sync modes — manual/periodic one-time sync, and event-triggered via a public listener, with deploy_fly_io.sh provisioning Fly.io](docs/sync_architecture.svg)
+![Connector sync modes — manual/periodic one-time sync, and event-triggered via a listener (push webhook for SharePoint, poll for Google Drive), with deploy_fly_io.sh provisioning Fly.io](docs/sync_architecture.svg)
 
-The connector is a single Go binary, **`connector`**, with subcommands (`sync-once`, `serve`, `create-subscription`, `watch`). Build it with `go build -o connector ./cmd/connector`.
+The connector is a single Go binary, **`connector`**, with subcommands
+(`sync-once`, `serve`, `create-subscription`, `watch`). Build it with
+`go build -o connector ./cmd/connector`.
 
-**Manual / periodic sync** — `connector sync-once` runs between SharePoint and Goodmem: it pulls the current files and ingests them into the Goodmem space. Run it on demand or on a schedule (cron), from anywhere.
+**Manual / periodic sync** — `connector sync-once` pulls the source's current
+files and ingests them into the Goodmem space. Run it on demand or on a schedule
+(cron), from anywhere.
 
-**Event-triggered sync** — a long-running **listener** (`connector serve`) sits between SharePoint and Goodmem. Microsoft Graph sends it a webhook on each change; the listener pulls the delta and syncs it to Goodmem. Graph requires the listener to be **publicly reachable over HTTPS/TLS** — any host works. It exposes `/metrics` (Prometheus) and `/syncs` (a durable SQLite sync history) for monitoring; `connector watch <url>` is an optional local tool that tails the listener's `/activity` log (the listener syncs with or without it). `./deploy_fly_io.sh` is the supported way to stand this up on Fly.io: with no flag it deploys the listener (Goodmem already runs elsewhere); `--hands-free` deploys the listener and a Goodmem server together. Run `./deploy_fly_io.sh --help` to see all modes and options. (Railway support is coming.)
-
-> **Scope:** the listener syncs and subscribes to the site's **first** document library, and **always syncs the whole drive** — `SHAREPOINT_FOLDER_PATH` scopes only a one-time `sync-once`, not the listener. See [usage.md → Scope & limits](docs/usage.md#scope--limits).
+**Event-triggered sync** — a long-running **listener** (`connector serve`) keeps
+Goodmem up to date as files change. It gets changes either by **push** (the
+provider POSTs a webhook — the SharePoint default, needs a public HTTPS URL) or by
+**poll** (the listener pulls the delta on a timer — the Google Drive default,
+needs nothing public). It exposes `/metrics` (Prometheus) and `/syncs` (durable
+sync history) for monitoring. `./deploy_fly_io.sh` stands it up on Fly.io: with no
+flag it deploys the listener; `--hands-free` deploys a Goodmem server alongside
+it. (Railway support is coming.)
 
 ## Getting started
 
-1. **Ask IT** to grant the Azure AD app permissions. Share [permission.md](docs/permission.md) with them.
+**1. Ask IT for credentials.** Hand them the request doc for your source:
 
-2. **Set credentials in `.env`.** Create it from the template:
-   ```bash
-   cp .env.example .env
-   ```
-   Then fill in the variables for the mode you intend to run. 
-   [`.env.example`](.env.example) is very self-documenting, and [usage.md](docs/usage.md) explains which variables are needed for each mode. In general, there are four groups of variables:  
-   * **Azure AD & SharePoint** — always required (ask your IT for the values).
-   * **Goodmem** — required for manual sync and the listener when Goodmem already exists. If you let `./deploy_fly_io.sh --hands-free` provision Goodmem for you, these get filled in automatically.
-   * **Graph webhook** — event-triggered sync only. The deploy script generates `GRAPH_CLIENT_STATE` and writes `GRAPH_NOTIFICATION_URL` for you; set them by hand only for a manual (non-Fly) deployment.
-   * **Fly.io** — event-triggered sync deployed via `deploy_fly_io.sh`; skip for a manual sync.
-3. **Sync**. You have two options:  
-   * **Manual / periodic sync** — run `./connector sync-once` on demand or on a schedule (cron). See [usage.md](docs/usage.md#manual--periodic-sync).  
-   * **Event-triggered sync** — deploy the listener with `./deploy_fly_io.sh` (see [usage.md](docs/usage.md#event-triggered-auto-sync-the-listener)). Optionally tail it locally with `./connector watch https://<listener>`.
+| Source | Give IT | They return |
+|---|---|---|
+| SharePoint | [permissions-sharepoint.md](docs/permissions-sharepoint.md) | client id, client secret, tenant id |
+| Google Drive | [permissions-google-drive.md](docs/permissions-google-drive.md) | service-account email + one of three credentials, Drive ID |
 
+**2. Create `.env`:** `cp .env.example .env`, then fill in your source's group plus
+**Goodmem** (and **Fly.io** if you'll deploy the listener).
+[`.env.example`](.env.example) documents every variable;
+[usage.md](docs/usage.md) explains which ones each mode needs.
+
+<details>
+<summary><b>SharePoint quickstart</b></summary>
+
+```dotenv
+SOURCE=sharepoint
+AZURE_AD_CLIENT_ID=...
+AZURE_AD_TENANT_ID=...
+AZURE_AD_CLIENT_SECRET=...
+SHAREPOINT_SITE_URL=https://your-tenant.sharepoint.com/sites/YourSite
+GOODMEM_BASE_URL=https://your-goodmem
+GOODMEM_API_KEY=...
+```
+
+```bash
+./connector sync-once --dry-run   # verify credentials, see the plan
+./connector sync-once             # sync
+./deploy_fly_io.sh                # or deploy the listener
+```
+</details>
+
+<details>
+<summary><b>Google Drive quickstart</b></summary>
+
+Share the Shared Drive with the service-account email as **Viewer** (Google Cloud
+roles don't grant Drive access), then:
+
+```dotenv
+SOURCE=google-drive
+GOOGLE_DRIVE_ID=<DRIVE_ID>
+GOOGLE_DRIVE_SA_JSON_FILE=/secure/path/goodmem-connector.json   # or a keyless path
+GOODMEM_BASE_URL=https://your-goodmem
+GOODMEM_API_KEY=...
+```
+
+```bash
+./connector sync-once --source google-drive --dry-run
+./connector sync-once --source google-drive
+./connector serve --source google-drive    # listener (poll mode by default)
+```
+
+Three deploy-and-forget auth paths (key / GCP-attached service account / workload
+identity federation) — see [usage.md](docs/usage.md#google-drive-service-account).
+</details>
+
+> ⚠️ **One Goodmem space per source** — never share a `GOODMEM_SPACE_ID` between a
+> SharePoint and a Google Drive listener; leave it unset and each creates its own.
 
 ## Documentation
 
-* **[usage.md](docs/usage.md)** — build/run the `connector` binary, deploy the listener to Fly.io, and monitor via `/metrics` and `/syncs`.
-* **[tech_details.md](docs/tech_details.md)** — internals: the clients, the sync engine, and how the file diff is computed and applied.
+* **[usage.md](docs/usage.md)** — the manual: authentication for both sources,
+  running and deploying, push vs poll, endpoints, monitoring, scope & limits, ops.
+* **[tech_details.md](docs/tech_details.md)** — internals: the `Source` interface,
+  the sync engine, how the diff is computed and applied, safety guards.
+* **[permissions-sharepoint.md](docs/permissions-sharepoint.md)** ·
+  **[permissions-google-drive.md](docs/permissions-google-drive.md)** — hand to IT.
+* **[MULTI_SOURCE.md](docs/MULTI_SOURCE.md)** — multi-source design decisions.
+* **[PRODUCTIONIZATION.md](PRODUCTIONIZATION.md)** — the production roadmap.
 
 ## Repo layout
 
-The connector is being generalized to sync **multiple sources** into Goodmem — a
-shared **core** engine plus one folder per **provider** (SharePoint today, Google
-Drive next; see [MULTI_SOURCE.md](docs/MULTI_SOURCE.md)).
+A shared **core** engine plus one folder per **provider** — the engine depends only
+on the `source.Source` interface, never on a provider.
 
 ```
 goodmem-connectors/
-├── cmd/connector/            # The `connector` binary (subcommands: sync-once, serve, create-subscription, watch).
+├── cmd/connector/            # The `connector` binary (sync-once, serve, create-subscription, watch).
 ├── internal/
 │   ├── core/                 # Provider-agnostic engine (shared by every source):
+│   │   ├── source/           #   The Source interface + neutral types (the contract).
 │   │   ├── syncer/           #   Sync engine: diff, apply, pending-retry, dead-letter, processing-status polling.
-│   │   ├── server/           #   Webhook listener + HTTP endpoints (/sync/webhook, /healthz, /readyz, /metrics, /syncs, /activity) + metrics.
+│   │   ├── server/           #   Listener: webhook + poll loops, HTTP endpoints (/sync/webhook, /healthz, /readyz, /metrics, /syncs, /activity), metrics.
 │   │   ├── store/            #   SQLite durable sync history (behind /syncs).
 │   │   ├── gm/               #   Goodmem SDK wrapper (the destination).
 │   │   ├── config/           #   .env / environment loading.
 │   │   ├── memid/            #   Deterministic memory IDs.
 │   │   └── fakes/            #   In-process fake source/Goodmem servers for integration tests.
 │   └── providers/
-│       └── sharepoint/       # Microsoft Graph client: auth, drive listing, delta, subscriptions, retry/backoff.
+│       ├── sharepoint/       # Microsoft Graph client: auth, drive listing, delta, subscriptions, retry/backoff.
+│       └── googledrive/      # Google Drive v3 SDK client: listing, Changes API, export/download, push channels.
 ├── deploy/alerts.yml         # Recommended Prometheus/Alertmanager rules.
 ├── deploy_fly_io.sh          # Deploy the listener (and optionally Goodmem) to Fly.io.
 ├── Dockerfile                # Builds `connector` into a distroless static image.
-├── fly_io.toml.template      # Fly config template (app/region substituted by the deploy script; mounts the /data volume).
+├── fly_io.toml.template      # Fly config template (mounts the /data volume for durable state).
 ├── .env.example              # Documents every config variable.
-└── docs/                     # usage.md, MULTI_SOURCE.md, tech_details.md, permission.md, PRODUCTIONIZATION.md, architecture diagram.
+└── docs/                     # usage.md, tech_details.md, permissions-*.md, MULTI_SOURCE.md, architecture diagram.
 ```
 
-> A future `internal/providers/gdrive/` will add Google Drive behind the same
-> `core/source.Source` interface — the engine, endpoints, and ops surface are written once.
-
-> **Note:** the Python files (`sharepoint_client.py`, `goodmem_client.py`, `sync_once.py`, `listener.py`, `watch_listener.py`) are the original proof-of-concept, kept **only as a historical reference**. They are **never deployed** and are **not a production fallback or safety net** — the Go `connector` binary is the sole production system. Use the binary, not the Python scripts.
+> **Note:** the Python files (`sharepoint_client.py`, `goodmem_client.py`,
+> `sync_once.py`, `listener.py`, `watch_listener.py`) are the original
+> proof-of-concept, kept **only as a historical reference**. They are **never
+> deployed** and are **not a production fallback** — the Go `connector` binary is
+> the sole production system. Use the binary, not the Python scripts.
 
 ## Roadmap
 
-* Use TOML-based environment file than .env.
+* Use a TOML-based config file instead of `.env`.
 * Railway deployment support.
+* Neutral metric names (`connector_*` with a `source` label).

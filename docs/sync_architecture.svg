@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 344" font-family="-apple-system, Segoe UI, Roboto, sans-serif" font-size="14" role="img">
-  <title>SharePoint connector sync modes: manual/periodic (connector sync-once) and event-triggered (connector serve listener + monitoring + deploy_fly_io.sh)</title>
+  <title>Goodmem connector sync modes: manual/periodic (connector sync-once) and event-triggered (connector serve listener + monitoring + deploy_fly_io.sh), for either source — SharePoint or Google Drive</title>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
       <path d="M0,0 L8,3 L0,6 Z" fill="#334155"/>
@@ -13,8 +13,8 @@
   <text x="30" y="28" font-weight="600" font-size="15" fill="#0f172a">Manual / periodic sync</text>
 
   <rect x="32" y="56" width="96" height="44" rx="8" fill="#eef2ff" stroke="#475569"/>
-  <text x="80" y="74" text-anchor="middle">SharePoint</text>
-  <text x="80" y="89" text-anchor="middle">site</text>
+  <text x="80" y="72" text-anchor="middle">SharePoint</text>
+  <text x="80" y="89" text-anchor="middle" fill="#64748b" font-size="11">or Google Drive</text>
 
   <rect x="200" y="56" width="176" height="44" rx="8" fill="#fff7ed" stroke="#475569"/>
   <text x="288" y="82" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">connector sync-once</text>
@@ -32,11 +32,12 @@
 
   <!-- ============ Panel 2: Event-triggered sync ============ -->
   <text x="30" y="146" font-weight="600" font-size="15" fill="#0f172a">Event-triggered sync</text>
+  <text x="30" y="163" fill="#64748b" font-size="11">push webhook (SharePoint) · poll on a timer (Google Drive)</text>
 
   <!-- runtime boxes (center y=201) -->
   <rect x="32" y="176" width="96" height="50" rx="8" fill="#eef2ff" stroke="#475569"/>
-  <text x="80" y="197" text-anchor="middle">SharePoint</text>
-  <text x="80" y="212" text-anchor="middle">site</text>
+  <text x="80" y="195" text-anchor="middle">SharePoint</text>
+  <text x="80" y="212" text-anchor="middle" fill="#64748b" font-size="11">or Google Drive</text>
 
   <rect x="200" y="176" width="176" height="50" rx="8" fill="#fff7ed" stroke="#475569"/>
   <text x="288" y="197" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">connector serve</text>
@@ -48,7 +49,7 @@
 
   <!-- runtime arrows (numbered sequence) -->
   <line x1="130" y1="196" x2="198" y2="196" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="164" y="187" text-anchor="middle" fill="#64748b" font-size="12">1 · webhook</text>
+  <text x="164" y="187" text-anchor="middle" fill="#64748b" font-size="12">1 · change</text>
 
   <line x1="198" y1="208" x2="130" y2="208" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="164" y="221" text-anchor="middle" fill="#64748b" font-size="12">2 · delta pull</text>
