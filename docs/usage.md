@@ -183,10 +183,18 @@ changes one of two ways:
 | **Poll** | the listener pulls the delta on a timer | Google Drive | nothing public |
 
 Set **`SYNC_POLL_MINUTES`** to choose: `>0` polls on that interval, `0` uses push.
-Google Drive defaults to poll (2 min) because Google's push channels require a
-**domain-verified** HTTPS endpoint — a throwaway `*.fly.dev` host cannot satisfy
-that. Push is worth it only if you own a verifiable domain and want sub-minute
-latency.
+
+**Why the defaults differ.** Both providers support event-based push — this is a
+difference in *policy*, not capability. Microsoft Graph will POST to any public
+HTTPS URL, so push is easy and is the SharePoint default. Google Drive's
+`changes.watch` only delivers to a **domain-verified** endpoint: you must prove
+ownership of the domain (Search Console) and register it for push notifications.
+That is a high enough bar — and impossible on a throwaway host like `*.fly.dev`,
+or on a wildcard-DNS name like `nip.io` that yields a valid certificate but that
+you do not own — that Google Drive defaults to polling instead. Polling uses the
+same incremental Changes API, so it is just as efficient per sync; the only cost
+is up to one interval of latency. If you deploy behind a domain you own and have
+verified, set `SYNC_POLL_MINUTES=0` to switch Drive to push.
 
 Either way the listener also runs a periodic full reconcile as a safety net.
 
@@ -207,6 +215,34 @@ mode**, a public HTTPS URL.
 | **GCP** — GCE VM (`./deploy_gcp.sh`) | ✅ | ✅ **best fit**: keyless via the attached service account |
 | **Cloud Run** | ✅ | ⚠️ key or workload identity federation (its token is `cloud-platform`-only, which doesn't cover Drive) |
 | **Any VM / on-prem / Docker / Kubernetes** | ✅ | ✅ key, or WIF where the platform issues an OIDC token |
+
+#### TLS: terminate at the edge, keep plaintext on loopback
+
+When the connector and Goodmem sit on the same host (the `--with-goodmem`
+layout), the connector reaches Goodmem over **`http://localhost:8080`**. That
+plaintext hop never leaves the machine, so Goodmem needs no certificate of its
+own — and if you put a reverse proxy in front for the *public* surface, that
+proxy holds a normal, publicly-trusted certificate.
+
+Avoid the middle option — a **self-signed** certificate on Goodmem. It shifts the
+problem to every client: each one must install your CA into its trust store, and
+those applications are generally not deployed by whatever provisions Goodmem, so
+that step gets missed. Pick one of:
+
+| Who reaches Goodmem | Do this |
+|---|---|
+| Only processes on the same host | Plain HTTP bound to **loopback** — nothing to certify |
+| Clients on other hosts | A **publicly-trusted** certificate at a reverse proxy (Caddy/nginx + ACME), proxying to Goodmem on localhost |
+
+A reverse proxy such as **Caddy** obtains and renews an ACME certificate
+automatically. If you have no domain, a wildcard-DNS hostname (`<ip>.nip.io` and
+similar) resolves to your IP and is enough for a valid certificate — though *not*
+enough for Google Drive push, which additionally requires domain **ownership
+verification**.
+
+> If you disable TLS on Goodmem, also make sure it is not published on `0.0.0.0`
+> where the network can reach it — plaintext plus a wide bind would put the API
+> key on the wire. Bind to loopback, or keep the port closed at the firewall.
 
 **Does `deploy_fly_io.sh` work for both sources?** Yes — the script is
 source-agnostic: it only requires `FLY_CLUSTER`, imports your whole `.env` as Fly

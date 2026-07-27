@@ -96,6 +96,14 @@ The per-provider differences that remain are catalogued in
 
 ## Still deferred
 
+- **Google Drive push instead of polling.** Drive *does* support event-based push
+  (`changes.watch`) — the adapter already implements it — but Google only delivers
+  to a **domain-verified** HTTPS endpoint, so the default is a 2-minute poll. Once
+  the connector is deployed behind a domain we own and have verified (Search
+  Console + registered for push notifications), setting `SYNC_POLL_MINUTES=0`
+  switches it to push and removes the polling latency. Note a wildcard-DNS
+  hostname (e.g. `nip.io`) yields a valid TLS certificate but **cannot** be
+  domain-verified, so it is not sufficient for push.
 - **Source-filtered orphan deletion** — the Google Drive adapter stamps
   `source: "google-drive"` into memory metadata; stamping SharePoint too and
   filtering orphan deletion by it would make a shared space safe and retire the

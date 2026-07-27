@@ -86,6 +86,40 @@ Nothing to send us — just **confirm the SA is attached** (and that the workloa
 obtain a Drive-scoped token; a `cloud-platform`-only token, as Cloud Run issues,
 does not cover Drive).
 
+**Permissions to create that VM:** **`roles/compute.instanceAdmin.v1`**
+(`compute.instances.create`) plus **`roles/iam.serviceAccountUser`** on
+`goodmem-connector@$PROJECT.iam.gserviceaccount.com` — attaching a service account
+to an instance requires permission to act as it. If org policy blocks external IP
+addresses (`constraints/compute.vmExternalIpAccess`), the VM must be created with
+`--no-address`, which additionally needs Cloud NAT for egress and an IAP firewall
+rule for SSH.
+
+#### If the connector runs on an **existing** VM
+
+Adding the Drive scope to a VM that is already running has three traps worth
+knowing before you schedule it:
+
+1. **Scopes can only be changed while the instance is stopped**, so this needs a
+   maintenance window — you cannot add the scope to a running VM.
+2. **`set-service-account` replaces the scope list, it does not append.** Read the
+   current scopes first and re-list them all, or the VM silently loses logging,
+   monitoring, and storage access:
+   ```bash
+   gcloud compute instances describe VM --zone=Z \
+     --format='value(serviceAccounts[0].scopes)'      # capture these first
+   ```
+3. **Stopping a VM releases an ephemeral external IP.** If anything depends on that
+   address — a DNS record, a TLS certificate, a hard-coded hostname — reserve it as
+   static **before** stopping, which is non-disruptive and keeps the same address:
+   ```bash
+   gcloud compute addresses create NAME --addresses=CURRENT_IP --region=REGION
+   ```
+
+**Additional permissions** beyond the new-VM set above: `compute.instances.stop`,
+`compute.instances.start` and `compute.instances.setServiceAccount` (all in
+**`roles/compute.instanceAdmin.v1`**), plus **`compute.addresses.create`** (in
+`roles/compute.networkAdmin`) for the IP reservation in step 3.
+
 ### Method 3 — workload identity federation *(keyless, off-GCP)*
 
 Create a workload-identity **pool + provider** that trusts our runtime platform's
