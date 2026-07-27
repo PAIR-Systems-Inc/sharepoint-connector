@@ -57,40 +57,24 @@ func TestValidateSyncBySource(t *testing.T) {
 	}
 }
 
-// TestGoogleDriveDeprecatedAliases: the pre-rename spellings must keep working so
-// existing .env files don't break — SOURCE=gdrive normalizes to "google-drive",
-// and the GDRIVE_* variables are read when the GOOGLE_DRIVE_* ones are unset.
-func TestGoogleDriveDeprecatedAliases(t *testing.T) {
+// TestSourceTokenIsCaseInsensitive: SOURCE is normalized (trimmed, lower-cased),
+// and only the canonical "google-drive" spelling selects the Drive provider —
+// there are no legacy aliases.
+func TestSourceTokenIsCaseInsensitive(t *testing.T) {
 	t.Setenv("GOODMEM_BASE_URL", "https://gm")
 	t.Setenv("GOODMEM_API_KEY", "k")
 
-	// Legacy source spellings all normalize to the canonical token.
-	for _, legacy := range []string{"gdrive", "GDrive", "googledrive", "google_drive"} {
-		t.Setenv("SOURCE", legacy)
+	for _, v := range []string{"google-drive", "Google-Drive", "  GOOGLE-DRIVE  "} {
+		t.Setenv("SOURCE", v)
 		if cfg, _ := Load(""); cfg.Source != SourceGoogleDrive {
-			t.Errorf("SOURCE=%q → Source %q, want %q", legacy, cfg.Source, SourceGoogleDrive)
+			t.Errorf("SOURCE=%q → Source %q, want %q", v, cfg.Source, SourceGoogleDrive)
 		}
 	}
-
-	// Legacy variable names still populate the config and satisfy validation.
+	// The pre-rename spelling is no longer accepted.
 	t.Setenv("SOURCE", "gdrive")
-	t.Setenv("GDRIVE_DRIVE_ID", "0LEGACY")
-	t.Setenv("GDRIVE_SA_JSON", `{"client_email":"x","private_key":"y"}`)
-	cfg, _ := Load("")
-	if cfg.GoogleDriveID != "0LEGACY" {
-		t.Errorf("GDRIVE_DRIVE_ID alias not honored: got %q", cfg.GoogleDriveID)
-	}
-	if !cfg.HasServiceAccount() {
-		t.Error("GDRIVE_SA_JSON alias not honored")
-	}
-	if err := cfg.ValidateSync(); err != nil {
-		t.Errorf("legacy-only config should validate: %v", err)
-	}
-
-	// The canonical name wins when both are set.
-	t.Setenv("GOOGLE_DRIVE_ID", "0CANON")
-	if cfg, _ := Load(""); cfg.GoogleDriveID != "0CANON" {
-		t.Errorf("GOOGLE_DRIVE_ID should win over the alias: got %q", cfg.GoogleDriveID)
+	t.Setenv("GOOGLE_DRIVE_ID", "0ABC")
+	if cfg, _ := Load(""); cfg.ValidateSync() == nil {
+		t.Error(`SOURCE="gdrive" should now be rejected as an unknown source`)
 	}
 }
 

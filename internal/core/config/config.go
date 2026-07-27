@@ -62,16 +62,14 @@ func Load(envFile string) (*Config, error) {
 		}
 	}
 	return &Config{
-		Source:            sourceFromEnv(),
-		AzureClientID:     os.Getenv("AZURE_AD_CLIENT_ID"),
-		AzureTenantID:     os.Getenv("AZURE_AD_TENANT_ID"),
-		AzureClientSecret: os.Getenv("AZURE_AD_CLIENT_SECRET"),
-		SharePointSiteURL: os.Getenv("SHAREPOINT_SITE_URL"),
-		// GOOGLE_DRIVE_* are the current names; the GDRIVE_* spellings are accepted
-		// as deprecated aliases so existing .env files keep working.
-		GoogleDriveServiceAccount:     firstEnv("GOOGLE_DRIVE_SA_JSON", "GDRIVE_SA_JSON"),
-		GoogleDriveServiceAccountFile: firstEnv("GOOGLE_DRIVE_SA_JSON_FILE", "GDRIVE_SA_JSON_FILE"),
-		GoogleDriveID:                 firstEnv("GOOGLE_DRIVE_ID", "GDRIVE_DRIVE_ID"),
+		Source:                        sourceFromEnv(),
+		AzureClientID:                 os.Getenv("AZURE_AD_CLIENT_ID"),
+		AzureTenantID:                 os.Getenv("AZURE_AD_TENANT_ID"),
+		AzureClientSecret:             os.Getenv("AZURE_AD_CLIENT_SECRET"),
+		SharePointSiteURL:             os.Getenv("SHAREPOINT_SITE_URL"),
+		GoogleDriveServiceAccount:     os.Getenv("GOOGLE_DRIVE_SA_JSON"),
+		GoogleDriveServiceAccountFile: os.Getenv("GOOGLE_DRIVE_SA_JSON_FILE"),
+		GoogleDriveID:                 os.Getenv("GOOGLE_DRIVE_ID"),
 		GoodmemBaseURL:                os.Getenv("GOODMEM_BASE_URL"),
 		GoodmemAPIKey:                 os.Getenv("GOODMEM_API_KEY"),
 		GoodmemSpaceID:                firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),
@@ -88,27 +86,16 @@ func Load(envFile string) (*Config, error) {
 	}, nil
 }
 
-// SourceGoogleDrive is the canonical Google Drive source token (SOURCE /
-// --source). "gdrive" is accepted as a deprecated alias.
+// SourceGoogleDrive is the Google Drive source token (SOURCE / --source).
 const SourceGoogleDrive = "google-drive"
 
-// sourceFromEnv reads SOURCE, defaulting to "sharepoint". Case-insensitive, and
-// the legacy "gdrive" spelling normalizes to "google-drive".
+// sourceFromEnv reads SOURCE, defaulting to "sharepoint". Case-insensitive.
 func sourceFromEnv() string {
-	return normalizeSource(os.Getenv("SOURCE"))
-}
-
-// normalizeSource lower-cases, trims, and maps deprecated spellings onto the
-// canonical source tokens. An empty value defaults to "sharepoint".
-func normalizeSource(s string) string {
-	switch v := strings.ToLower(strings.TrimSpace(s)); v {
-	case "":
+	s := strings.ToLower(strings.TrimSpace(os.Getenv("SOURCE")))
+	if s == "" {
 		return "sharepoint"
-	case "gdrive", "googledrive", "google_drive": // deprecated aliases
-		return SourceGoogleDrive
-	default:
-		return v
 	}
+	return s
 }
 
 // HasServiceAccount reports whether a Google service-account key is configured

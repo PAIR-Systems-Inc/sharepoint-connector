@@ -16,7 +16,7 @@ system works today see **[tech_details.md](tech_details.md)**; for running it se
 | Module name | `github.com/PAIR-Systems-Inc/goodmem-connectors` |
 | Layout | one shared `core/`, one folder per provider under `providers/` |
 | Binary | **one** — provider chosen by `SOURCE` / `--source` |
-| Provider naming | spelled out in full: `google-drive`, not `gdrive` (legacy spellings still accepted as aliases) |
+| Provider naming | spelled out in full: `google-drive`, not `gdrive` — no legacy aliases |
 | Google Drive scope | a **Shared Drive**, read by a service account added to it as Viewer. My Drive (domain-wide delegation) is out of scope |
 | Google Drive auth | **three** deploy-and-forget paths — service-account key, GCP-attached service account, workload identity federation — so the connector fits any customer IT policy |
 | Google Drive trigger | **poll by default.** Google's `changes.watch` needs a domain-verified HTTPS endpoint; polling the Changes API needs nothing public and is equally incremental |
@@ -63,7 +63,7 @@ The per-provider differences that remain are catalogued in
      descendants go promptly; push-channel id+resourceId persisted so a restart
      stops the old channel; `create-subscription` is source-aware; native-doc
      exports over Drive's 10 MB limit are a permanent skip, not dead-letter churn.
-7. ✅ **Rename to `google-drive`** across code, config and identity values — done
+7. ✅ **Rename to `google-drive`** across code, config, env vars and identity values — done
    before any Google Drive tenant went live, since the namespace and space name
    are frozen once one is.
 8. ✅ **Neutral metrics** — every series is now `connector_*` with a
