@@ -76,7 +76,7 @@ var ErrSkip = errors.New("file cannot be ingested; skipping permanently")
 
 // Source is one content source the shared engine syncs into Goodmem.
 type Source interface {
-	// Label identifies the provider (e.g. "sharepoint", "gdrive") for logs/metrics.
+	// Label identifies the provider (e.g. "sharepoint", "google-drive") for logs/metrics.
 	Label() string
 	// MemNamespace is the PERMANENT namespace this source uses to derive
 	// deterministic memory ids (memid.FromFileID). It is the idempotency key and

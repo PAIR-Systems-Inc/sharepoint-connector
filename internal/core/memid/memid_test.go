@@ -28,12 +28,12 @@ func TestFromFileID(t *testing.T) {
 func TestNamespaceIsolation(t *testing.T) {
 	const id = "shared-file-id"
 	sp := FromFileID("sharepoint.file.id", id)
-	gd := FromFileID("gdrive.file.id", id)
+	gd := FromFileID("google-drive.file.id", id)
 	if sp == gd {
 		t.Fatalf("namespaces collided: sharepoint and gdrive both gave %s", sp)
 	}
 	// Determinism: same inputs ⇒ same id.
-	if again := FromFileID("gdrive.file.id", id); again != gd {
+	if again := FromFileID("google-drive.file.id", id); again != gd {
 		t.Errorf("non-deterministic: %s != %s", again, gd)
 	}
 }

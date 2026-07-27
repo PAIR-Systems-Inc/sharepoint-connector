@@ -6,7 +6,8 @@ import (
 )
 
 // TestValidateSyncBySource checks that required-config validation branches on
-// SOURCE: gdrive needs GDRIVE_*, sharepoint needs Azure/SharePoint, Goodmem always.
+// SOURCE: google-drive needs GOOGLE_DRIVE_*, sharepoint needs Azure/SharePoint,
+// Goodmem always.
 func TestValidateSyncBySource(t *testing.T) {
 	// Goodmem is always required.
 	goodmem := func() {
@@ -30,29 +31,66 @@ func TestValidateSyncBySource(t *testing.T) {
 		t.Errorf("sharepoint with full config should validate: %v", cfg.ValidateSync())
 	}
 
-	// gdrive needs GDRIVE_DRIVE_ID (not Azure). The service-account key is optional
-	// — without it the source falls back to Application Default Credentials.
-	t.Setenv("SOURCE", "gdrive")
+	// google-drive needs GOOGLE_DRIVE_ID (not Azure). The service-account key is
+	// optional — without it the source falls back to Application Default Credentials.
+	t.Setenv("SOURCE", "google-drive")
 	cfg, _ := Load("")
-	if err := cfg.ValidateSync(); err == nil || !strings.Contains(err.Error(), "GDRIVE_DRIVE_ID") {
-		t.Errorf("gdrive without drive id should fail on GDRIVE_DRIVE_ID, got: %v", err)
+	if err := cfg.ValidateSync(); err == nil || !strings.Contains(err.Error(), "GOOGLE_DRIVE_ID") {
+		t.Errorf("google-drive without drive id should fail on GOOGLE_DRIVE_ID, got: %v", err)
 	}
-	t.Setenv("GDRIVE_DRIVE_ID", "0ABC")
+	t.Setenv("GOOGLE_DRIVE_ID", "0ABC")
 	if cfg, _ := Load(""); cfg.ValidateSync() != nil {
-		t.Errorf("gdrive with just the drive id should validate (ADC fallback): %v", cfg.ValidateSync())
+		t.Errorf("google-drive with just the drive id should validate (ADC fallback): %v", cfg.ValidateSync())
 	}
 	if cfg, _ := Load(""); cfg.HasServiceAccount() {
-		t.Error("HasServiceAccount should be false with no GDRIVE_SA_JSON")
+		t.Error("HasServiceAccount should be false with no GOOGLE_DRIVE_SA_JSON")
 	}
-	t.Setenv("GDRIVE_SA_JSON", `{"client_email":"x","private_key":"y"}`)
+	t.Setenv("GOOGLE_DRIVE_SA_JSON", `{"client_email":"x","private_key":"y"}`)
 	if cfg, _ := Load(""); !cfg.HasServiceAccount() {
-		t.Error("HasServiceAccount should be true with GDRIVE_SA_JSON set")
+		t.Error("HasServiceAccount should be true with GOOGLE_DRIVE_SA_JSON set")
 	}
 
 	// An unknown source is rejected.
 	t.Setenv("SOURCE", "dropbox")
 	if cfg, _ := Load(""); cfg.ValidateSync() == nil {
 		t.Error("unknown SOURCE should fail validation")
+	}
+}
+
+// TestGoogleDriveDeprecatedAliases: the pre-rename spellings must keep working so
+// existing .env files don't break — SOURCE=gdrive normalizes to "google-drive",
+// and the GDRIVE_* variables are read when the GOOGLE_DRIVE_* ones are unset.
+func TestGoogleDriveDeprecatedAliases(t *testing.T) {
+	t.Setenv("GOODMEM_BASE_URL", "https://gm")
+	t.Setenv("GOODMEM_API_KEY", "k")
+
+	// Legacy source spellings all normalize to the canonical token.
+	for _, legacy := range []string{"gdrive", "GDrive", "googledrive", "google_drive"} {
+		t.Setenv("SOURCE", legacy)
+		if cfg, _ := Load(""); cfg.Source != SourceGoogleDrive {
+			t.Errorf("SOURCE=%q → Source %q, want %q", legacy, cfg.Source, SourceGoogleDrive)
+		}
+	}
+
+	// Legacy variable names still populate the config and satisfy validation.
+	t.Setenv("SOURCE", "gdrive")
+	t.Setenv("GDRIVE_DRIVE_ID", "0LEGACY")
+	t.Setenv("GDRIVE_SA_JSON", `{"client_email":"x","private_key":"y"}`)
+	cfg, _ := Load("")
+	if cfg.GoogleDriveID != "0LEGACY" {
+		t.Errorf("GDRIVE_DRIVE_ID alias not honored: got %q", cfg.GoogleDriveID)
+	}
+	if !cfg.HasServiceAccount() {
+		t.Error("GDRIVE_SA_JSON alias not honored")
+	}
+	if err := cfg.ValidateSync(); err != nil {
+		t.Errorf("legacy-only config should validate: %v", err)
+	}
+
+	// The canonical name wins when both are set.
+	t.Setenv("GOOGLE_DRIVE_ID", "0CANON")
+	if cfg, _ := Load(""); cfg.GoogleDriveID != "0CANON" {
+		t.Errorf("GOOGLE_DRIVE_ID should win over the alias: got %q", cfg.GoogleDriveID)
 	}
 }
 

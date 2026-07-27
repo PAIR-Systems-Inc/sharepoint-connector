@@ -1,4 +1,4 @@
-package gdrive
+package googledrive
 
 import (
 	"context"
@@ -151,8 +151,8 @@ func TestAdapterSourceMethods(t *testing.T) {
 	a := NewAdapter(newTestClient(t, fd), "chan-secret")
 	ctx := context.Background()
 
-	if a.Label() != "gdrive" {
-		t.Errorf("Label = %q, want gdrive", a.Label())
+	if a.Label() != "google-drive" {
+		t.Errorf("Label = %q, want google-drive", a.Label())
 	}
 
 	// ListFiles → neutral files; native Google Doc reports its export target as the

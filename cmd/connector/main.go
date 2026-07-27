@@ -29,7 +29,7 @@ import (
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/server"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/source"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
-	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/gdrive"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/googledrive"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
 )
 
@@ -66,7 +66,7 @@ func main() {
 func runSyncOnce(args []string) error {
 	fs := flag.NewFlagSet("sync-once", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
-	srcFlag := fs.String("source", "", "content source: sharepoint|gdrive (overrides SOURCE)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive (overrides SOURCE)")
 	dryRun := fs.Bool("dry-run", false, "compute the sync plan without changing Goodmem")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
@@ -126,7 +126,7 @@ func runSyncOnce(args []string) error {
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
-	srcFlag := fs.String("source", "", "content source: sharepoint|gdrive (overrides SOURCE)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive (overrides SOURCE)")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
 		os.Setenv("SOURCE", *srcFlag)
@@ -139,11 +139,11 @@ func runServe(args []string) error {
 	configureLogging() // structured logs to stderr (Fly logs / shippers)
 
 	// Poll vs push. Google Drive's changes.watch requires a domain-verified HTTPS
-	// webhook, so gdrive defaults to POLL mode (periodic delta — no public URL
+	// webhook, so Google Drive defaults to POLL mode (periodic delta — no public URL
 	// needed); SharePoint defaults to push (Graph webhooks are easy to stand up).
 	// Override either way with SYNC_POLL_MINUTES (>0 → poll; 0 → push).
 	defaultPoll := 0
-	if cfg.Source == "gdrive" {
+	if cfg.Source == config.SourceGoogleDrive {
 		defaultPoll = 2
 	}
 	pollMin := atoiOr(os.Getenv("SYNC_POLL_MINUTES"), defaultPoll)
@@ -164,7 +164,7 @@ func runServe(args []string) error {
 	port := firstNonEmpty(os.Getenv("PORT"), cfg.GraphPort, "5000")
 	deltaPath := firstNonEmpty(os.Getenv("GRAPH_DELTA_TOKEN_FILE"), ".graph_delta_link")
 	// The listener always syncs the whole drive; its durable-state dir (delta
-	// cursor + gdrive channel state) is the delta file's directory.
+	// cursor + Google Drive channel state) is the delta file's directory.
 	src, err := buildSource(context.Background(), cfg, "", filepath.Dir(deltaPath))
 	if err != nil {
 		return err
@@ -210,7 +210,7 @@ func runServe(args []string) error {
 func runCreateSubscription(args []string) error {
 	fs := flag.NewFlagSet("create-subscription", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: .env if present)")
-	srcFlag := fs.String("source", "", "content source: sharepoint|gdrive (overrides SOURCE)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive (overrides SOURCE)")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
 		os.Setenv("SOURCE", *srcFlag)
@@ -224,8 +224,8 @@ func runCreateSubscription(args []string) error {
 		return errors.New("GRAPH_CLIENT_STATE (webhook secret) and GRAPH_NOTIFICATION_URL (public webhook URL) are required")
 	}
 	ctx := context.Background()
-	// Route through the configured provider so this works for gdrive too, instead
-	// of silently building a SharePoint client under SOURCE=gdrive. No durable
+	// Route through the configured provider so this works for Google Drive too, instead
+	// of silently building a SharePoint client under SOURCE=google-drive. No durable
 	// channel state for a one-off manual create.
 	src, err := buildSource(ctx, cfg, "", "")
 	if err != nil {
@@ -303,15 +303,15 @@ func loadConfig(envFile string) (*config.Config, error) {
 
 // buildSource constructs the configured provider adapter (a source.Source).
 // folderPath scopes a one-time SharePoint full sync ("" = whole drive; ignored by
-// gdrive, which syncs the whole Shared Drive). stateDir, when non-empty, is the
-// durable-state directory (the listener's); gdrive persists its push-channel pair
+// Google Drive, which syncs the whole Shared Drive). stateDir, when non-empty, is the
+// durable-state directory (the listener's); Google Drive persists its push-channel pair
 // there so a restart stops the old channel instead of leaking it. One-shot
 // commands pass "".
 func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir string) (source.Source, error) {
 	switch cfg.Source {
-	case "gdrive":
+	case config.SourceGoogleDrive:
 		var (
-			c   *gdrive.Client
+			c   *googledrive.Client
 			err error
 		)
 		if cfg.HasServiceAccount() {
@@ -319,17 +319,17 @@ func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir s
 			if sa, err = cfg.ServiceAccountJSON(); err != nil {
 				return nil, err
 			}
-			c, err = gdrive.NewWithServiceAccount(ctx, sa, cfg.GDriveDriveID)
+			c, err = googledrive.NewWithServiceAccount(ctx, sa, cfg.GoogleDriveID)
 		} else {
 			// No key configured — use Application Default Credentials.
-			c, err = gdrive.NewWithADC(ctx, cfg.GDriveDriveID)
+			c, err = googledrive.NewWithADC(ctx, cfg.GoogleDriveID)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("gdrive client: %w", err)
+			return nil, fmt.Errorf("google drive client: %w", err)
 		}
-		a := gdrive.NewAdapter(c, cfg.GraphClientState)
+		a := googledrive.NewAdapter(c, cfg.GraphClientState)
 		if stateDir != "" {
-			a = a.WithChannelStore(gdrive.FileChannelStore{Path: filepath.Join(stateDir, "gdrive_channel.json")})
+			a = a.WithChannelStore(googledrive.FileChannelStore{Path: filepath.Join(stateDir, "google_drive_channel.json")})
 		}
 		return a, nil
 	default: // sharepoint
@@ -341,8 +341,8 @@ func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir s
 // spaceName derives the default Goodmem space name for the configured source
 // (used only when GOODMEM_SPACE_ID is unset).
 func spaceName(cfg *config.Config) string {
-	if cfg.Source == "gdrive" {
-		return "GDrive_" + cfg.GDriveDriveID
+	if cfg.Source == config.SourceGoogleDrive {
+		return "GoogleDrive_" + cfg.GoogleDriveID
 	}
 	return syncer.SpaceNameFromSiteURL(cfg.SharePointSiteURL)
 }
@@ -406,7 +406,7 @@ func usage(w *os.File) {
 
 Usage: connector <command> [flags]
 
-Source: set SOURCE=sharepoint|gdrive (or --source) on any syncing command.
+Source: set SOURCE=sharepoint|google-drive (or --source) on any syncing command.
 
 Commands:
   sync-once            One-time full sync (flags: --env-file PATH, --source NAME, --dry-run)

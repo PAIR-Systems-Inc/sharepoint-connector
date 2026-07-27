@@ -12,7 +12,7 @@ import (
 
 // Config holds runtime configuration. Field names mirror the .env variables.
 type Config struct {
-	// Source selects the content provider: "sharepoint" (default) or "gdrive".
+	// Source selects the content provider: "sharepoint" (default) or "google-drive".
 	Source string
 
 	// Azure AD / SharePoint — required when Source is "sharepoint".
@@ -21,10 +21,10 @@ type Config struct {
 	AzureClientSecret string
 	SharePointSiteURL string
 
-	// Google Drive — required when Source is "gdrive".
-	GDriveServiceAccount     string // inline service-account JSON (e.g. a Fly secret)
-	GDriveServiceAccountFile string // ...or a path to the JSON key file
-	GDriveDriveID            string // the Shared Drive id
+	// Google Drive — required when Source is "google-drive".
+	GoogleDriveServiceAccount     string // inline service-account JSON (e.g. a Fly secret)
+	GoogleDriveServiceAccountFile string // ...or a path to the JSON key file
+	GoogleDriveID                 string // the Shared Drive id
 
 	// Goodmem — required for a sync (unless the deploy provisions it).
 	GoodmemBaseURL    string
@@ -62,60 +62,77 @@ func Load(envFile string) (*Config, error) {
 		}
 	}
 	return &Config{
-		Source:                   sourceFromEnv(),
-		AzureClientID:            os.Getenv("AZURE_AD_CLIENT_ID"),
-		AzureTenantID:            os.Getenv("AZURE_AD_TENANT_ID"),
-		AzureClientSecret:        os.Getenv("AZURE_AD_CLIENT_SECRET"),
-		SharePointSiteURL:        os.Getenv("SHAREPOINT_SITE_URL"),
-		GDriveServiceAccount:     os.Getenv("GDRIVE_SA_JSON"),
-		GDriveServiceAccountFile: os.Getenv("GDRIVE_SA_JSON_FILE"),
-		GDriveDriveID:            os.Getenv("GDRIVE_DRIVE_ID"),
-		GoodmemBaseURL:           os.Getenv("GOODMEM_BASE_URL"),
-		GoodmemAPIKey:            os.Getenv("GOODMEM_API_KEY"),
-		GoodmemSpaceID:           firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),
-		GoodmemEmbedderID:        firstEnv("GOODMEM_EMBEDDER_ID", "EMBEDDER_ID", "DEFAULT_EMBEDDER_ID"),
-		GraphClientState:         os.Getenv("GRAPH_CLIENT_STATE"),
-		GraphNotificationURL:     os.Getenv("GRAPH_NOTIFICATION_URL"),
-		GraphPort:                os.Getenv("GRAPH_PORT"),
-		GraphSubscriptionMinutes: os.Getenv("GRAPH_SUBSCRIPTION_MINUTES"),
-		SharePointSearchScope:    os.Getenv("SHAREPOINT_SEARCH_SCOPE"),
-		SharePointFolderPath:     os.Getenv("SHAREPOINT_FOLDER_PATH"),
-		SharePointStartDate:      os.Getenv("SHAREPOINT_START_DATE"),
-		OpenAIAPIKey:             os.Getenv("OPENAI_API_KEY"),
-		ExtractPageImages:        envTruthy("GOODMEM_EXTRACT_PAGE_IMAGES"),
+		Source:            sourceFromEnv(),
+		AzureClientID:     os.Getenv("AZURE_AD_CLIENT_ID"),
+		AzureTenantID:     os.Getenv("AZURE_AD_TENANT_ID"),
+		AzureClientSecret: os.Getenv("AZURE_AD_CLIENT_SECRET"),
+		SharePointSiteURL: os.Getenv("SHAREPOINT_SITE_URL"),
+		// GOOGLE_DRIVE_* are the current names; the GDRIVE_* spellings are accepted
+		// as deprecated aliases so existing .env files keep working.
+		GoogleDriveServiceAccount:     firstEnv("GOOGLE_DRIVE_SA_JSON", "GDRIVE_SA_JSON"),
+		GoogleDriveServiceAccountFile: firstEnv("GOOGLE_DRIVE_SA_JSON_FILE", "GDRIVE_SA_JSON_FILE"),
+		GoogleDriveID:                 firstEnv("GOOGLE_DRIVE_ID", "GDRIVE_DRIVE_ID"),
+		GoodmemBaseURL:                os.Getenv("GOODMEM_BASE_URL"),
+		GoodmemAPIKey:                 os.Getenv("GOODMEM_API_KEY"),
+		GoodmemSpaceID:                firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),
+		GoodmemEmbedderID:             firstEnv("GOODMEM_EMBEDDER_ID", "EMBEDDER_ID", "DEFAULT_EMBEDDER_ID"),
+		GraphClientState:              os.Getenv("GRAPH_CLIENT_STATE"),
+		GraphNotificationURL:          os.Getenv("GRAPH_NOTIFICATION_URL"),
+		GraphPort:                     os.Getenv("GRAPH_PORT"),
+		GraphSubscriptionMinutes:      os.Getenv("GRAPH_SUBSCRIPTION_MINUTES"),
+		SharePointSearchScope:         os.Getenv("SHAREPOINT_SEARCH_SCOPE"),
+		SharePointFolderPath:          os.Getenv("SHAREPOINT_FOLDER_PATH"),
+		SharePointStartDate:           os.Getenv("SHAREPOINT_START_DATE"),
+		OpenAIAPIKey:                  os.Getenv("OPENAI_API_KEY"),
+		ExtractPageImages:             envTruthy("GOODMEM_EXTRACT_PAGE_IMAGES"),
 	}, nil
 }
 
-// sourceFromEnv reads SOURCE, defaulting to "sharepoint". Case-insensitive.
+// SourceGoogleDrive is the canonical Google Drive source token (SOURCE /
+// --source). "gdrive" is accepted as a deprecated alias.
+const SourceGoogleDrive = "google-drive"
+
+// sourceFromEnv reads SOURCE, defaulting to "sharepoint". Case-insensitive, and
+// the legacy "gdrive" spelling normalizes to "google-drive".
 func sourceFromEnv() string {
-	s := strings.ToLower(strings.TrimSpace(os.Getenv("SOURCE")))
-	if s == "" {
+	return normalizeSource(os.Getenv("SOURCE"))
+}
+
+// normalizeSource lower-cases, trims, and maps deprecated spellings onto the
+// canonical source tokens. An empty value defaults to "sharepoint".
+func normalizeSource(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "":
 		return "sharepoint"
+	case "gdrive", "googledrive", "google_drive": // deprecated aliases
+		return SourceGoogleDrive
+	default:
+		return v
 	}
-	return s
 }
 
 // HasServiceAccount reports whether a Google service-account key is configured
-// (inline or by file). When false, the gdrive source falls back to Application
-// Default Credentials (local `gcloud auth application-default login` / GCP host).
+// (inline or by file). When false, the Google Drive source falls back to
+// Application Default Credentials (a GCP host's attached service account, or a
+// credential file named by GOOGLE_APPLICATION_CREDENTIALS).
 func (c *Config) HasServiceAccount() bool {
-	return strings.TrimSpace(c.GDriveServiceAccount) != "" || strings.TrimSpace(c.GDriveServiceAccountFile) != ""
+	return strings.TrimSpace(c.GoogleDriveServiceAccount) != "" || strings.TrimSpace(c.GoogleDriveServiceAccountFile) != ""
 }
 
 // ServiceAccountJSON returns the Google service-account key bytes, from the
-// inline GDRIVE_SA_JSON if set, else the file at GDRIVE_SA_JSON_FILE.
+// inline GOOGLE_DRIVE_SA_JSON if set, else the file at GOOGLE_DRIVE_SA_JSON_FILE.
 func (c *Config) ServiceAccountJSON() ([]byte, error) {
-	if strings.TrimSpace(c.GDriveServiceAccount) != "" {
-		return []byte(c.GDriveServiceAccount), nil
+	if strings.TrimSpace(c.GoogleDriveServiceAccount) != "" {
+		return []byte(c.GoogleDriveServiceAccount), nil
 	}
-	if p := strings.TrimSpace(c.GDriveServiceAccountFile); p != "" {
+	if p := strings.TrimSpace(c.GoogleDriveServiceAccountFile); p != "" {
 		b, err := os.ReadFile(p)
 		if err != nil {
-			return nil, fmt.Errorf("read GDRIVE_SA_JSON_FILE %q: %w", p, err)
+			return nil, fmt.Errorf("read GOOGLE_DRIVE_SA_JSON_FILE %q: %w", p, err)
 		}
 		return b, nil
 	}
-	return nil, fmt.Errorf("set GDRIVE_SA_JSON or GDRIVE_SA_JSON_FILE for the gdrive source")
+	return nil, fmt.Errorf("set GOOGLE_DRIVE_SA_JSON or GOOGLE_DRIVE_SA_JSON_FILE for the google-drive source")
 }
 
 // firstEnv returns the first non-empty value among the given env var names,
@@ -147,17 +164,17 @@ func (c *Config) ValidateSync() error {
 		"GOODMEM_API_KEY":  c.GoodmemAPIKey,
 	}
 	switch c.Source {
-	case "gdrive":
-		required["GDRIVE_DRIVE_ID"] = c.GDriveDriveID
-		// Auth is a service-account key (GDRIVE_SA_JSON / _FILE) or, if neither is
-		// set, Application Default Credentials — so the key is not required here.
+	case SourceGoogleDrive:
+		required["GOOGLE_DRIVE_ID"] = c.GoogleDriveID
+		// Auth is a service-account key (GOOGLE_DRIVE_SA_JSON / _FILE) or, if neither
+		// is set, Application Default Credentials — so the key is not required here.
 	case "sharepoint":
 		required["AZURE_AD_CLIENT_ID"] = c.AzureClientID
 		required["AZURE_AD_TENANT_ID"] = c.AzureTenantID
 		required["AZURE_AD_CLIENT_SECRET"] = c.AzureClientSecret
 		required["SHAREPOINT_SITE_URL"] = c.SharePointSiteURL
 	default:
-		return fmt.Errorf("unknown SOURCE %q (want \"sharepoint\" or \"gdrive\")", c.Source)
+		return fmt.Errorf("unknown SOURCE %q (want \"sharepoint\" or %q)", c.Source, SourceGoogleDrive)
 	}
 
 	var missing []string

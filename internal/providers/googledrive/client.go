@@ -2,7 +2,7 @@
 // official Google Drive v3 SDK (google.golang.org/api/drive/v3) with
 // service-account OAuth2, and adapts it to the connector's core/source.Source.
 // Read-only scope. The SDK is fully contained here — the engine never sees it.
-package gdrive
+package googledrive
 
 import (
 	"context"

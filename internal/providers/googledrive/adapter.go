@@ -1,4 +1,4 @@
-package gdrive
+package googledrive
 
 import (
 	"context"
@@ -44,12 +44,12 @@ func (a *Adapter) WithChannelStore(s ChannelStore) *Adapter {
 	return a
 }
 
-func (a *Adapter) Label() string { return "gdrive" }
+func (a *Adapter) Label() string { return "google-drive" }
 
 // MemNamespace is Google Drive's own permanent memory-id namespace — distinct
 // from SharePoint's so the two providers never mint colliding ids. Never change
 // it once a Drive tenant is live.
-func (a *Adapter) MemNamespace() string { return "gdrive.file.id" }
+func (a *Adapter) MemNamespace() string { return "google-drive.file.id" }
 
 func (a *Adapter) ListFiles(ctx context.Context) ([]source.FileInfo, error) {
 	files, err := a.c.ListFiles(ctx)
@@ -190,7 +190,7 @@ func toSourceFile(f DriveFile) source.FileInfo {
 		"google_mime":       f.MimeType,
 		"modified_datetime": f.ModifiedTime,
 		"md5":               f.MD5,
-		"source":            "gdrive",
+		"source":            "google-drive",
 	}
 	for k, v := range md {
 		if s, ok := v.(string); ok && s == "" {

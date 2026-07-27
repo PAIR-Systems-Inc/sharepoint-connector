@@ -2,7 +2,7 @@
 // Same (namespace, file id) ⇒ same memory id ⇒ idempotent inserts (no
 // duplicate/orphan memories, and no need to search Goodmem by metadata).
 //
-// The namespace is per-source (e.g. "sharepoint.file.id", "gdrive.file.id") so
+// The namespace is per-source (e.g. "sharepoint.file.id", "google-drive.file.id") so
 // two providers can't collide, and — more importantly — it is PERMANENT: it is
 // the idempotency key, frozen the moment a source's first tenant goes live.
 // Changing a source's namespace re-keys every memory in its space (a full
@@ -45,7 +45,7 @@ func uuidString(u [16]byte) string {
 //
 // For SharePoint the namespace is "sharepoint.file.id" (the Python-era value —
 // preserved so existing memories keep their ids); Google Drive uses
-// "gdrive.file.id". The namespace is PERMANENT (see the package doc).
+// "google-drive.file.id". The namespace is PERMANENT (see the package doc).
 func FromFileID(namespace, fileID string) string {
 	ns := uuidV5(namespaceDNS, []byte(namespace))
 	return uuidString(uuidV5(ns, []byte(fileID)))
