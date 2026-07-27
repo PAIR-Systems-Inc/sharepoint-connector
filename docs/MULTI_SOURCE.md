@@ -18,7 +18,7 @@ system works today see **[tech_details.md](tech_details.md)**; for running it se
 | Binary | **one** — provider chosen by `SOURCE` / `--source` |
 | Provider naming | spelled out in full: `google-drive`, not `gdrive` — no legacy aliases |
 | Google Drive scope | a **Shared Drive**, read by a service account added to it as Viewer. My Drive (domain-wide delegation) is out of scope |
-| Google Drive auth | **three** deploy-and-forget paths — service-account key, GCP-attached service account, workload identity federation — so the connector fits any customer IT policy |
+| Google Drive auth | **three** deploy-and-forget paths — service-account key, GCP-attached service account, workload identity federation — so the connector fits any customer IT policy. Paths 2 and 3 are verified end-to-end against real infrastructure; path 1 is unverified only because our test org forbids key creation |
 | Google Drive trigger | **poll by default.** Google's `changes.watch` needs a domain-verified HTTPS endpoint; polling the Changes API needs nothing public and is equally incremental |
 | Memory-id namespace | per-source and permanent (`sharepoint.file.id`, `google-drive.file.id`) |
 

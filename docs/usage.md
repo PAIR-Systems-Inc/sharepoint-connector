@@ -125,6 +125,12 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/wif-credential-config.json
 > Actions, AWS, Azure and Kubernetes do; a plain **Fly.io** app does **not**
 > today. On Fly, use Path 1 or run on a GCP host.
 
+*Verified:* a GitHub Actions job (a genuine off-GCP workload) exchanged its OIDC
+token for short-lived credentials and read a real Shared Drive — credential type
+`external_account`, no key and no stored secret. The workflow that did it is kept
+in the repo as `.github/workflows/wif-drive-test.yml.disabled`; rename it to
+`.yml` to re-run it.
+
 **Local testing only — impersonation.** For hands-on runs you can impersonate the
 service account with your own Google login instead:
 
