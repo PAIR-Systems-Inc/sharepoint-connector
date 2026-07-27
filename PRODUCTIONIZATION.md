@@ -319,7 +319,7 @@ memories.
   image, validate required config at startup with clear errors, and rotate
   Azure/Goodmem/OpenAI keys.
 - **Least privilege:** review the Graph application permissions in
-  `docs/permission.md` — request the minimum scopes needed.
+  `docs/permissions-sharepoint.md` — request the minimum scopes needed.
 - **Webhook hardening:** `clientState` validation exists (now auto-generated);
   add request size limits and basic rate limiting on `/sync/webhook`.
 

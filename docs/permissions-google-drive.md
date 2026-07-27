@@ -147,4 +147,4 @@ connector sync-once --source gdrive --dry-run
 It authenticates as the service account, lists the Shared Drive's files, and prints
 the sync plan **without changing anything**. No server or webhook is needed for this
 check. (This is the Drive analog of the SharePoint `test_graph_permissions.py`
-check in [permission.md](permission.md).)
+check in [permissions-sharepoint.md](permissions-sharepoint.md).)
