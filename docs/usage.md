@@ -204,7 +204,7 @@ mode**, a public HTTPS URL.
 | Host | SharePoint | Google Drive |
 |---|---|---|
 | **Fly.io** via `./deploy_fly_io.sh` | ✅ push or poll | ⚠️ poll + **service-account key** only |
-| **GCP** — GCE VM / GKE | ✅ | ✅ **best fit**: keyless via the attached service account |
+| **GCP** — GCE VM (`./deploy_gcp.sh`) | ✅ | ✅ **best fit**: keyless via the attached service account |
 | **Cloud Run** | ✅ | ⚠️ key or workload identity federation (its token is `cloud-platform`-only, which doesn't cover Drive) |
 | **Any VM / on-prem / Docker / Kubernetes** | ✅ | ✅ key, or WIF where the platform issues an OIDC token |
 
@@ -215,6 +215,34 @@ auth must be **Path 1 (a key)**, because Fly provides no attached service accoun
 and issues no OIDC token for federation; and **push mode is impossible** because
 `*.fly.dev` cannot be domain-verified — so it runs in poll mode (already the
 Drive default). If you want a keyless Drive deployment, run it on GCP instead.
+
+### Deploy to GCP with the script
+
+`./deploy_gcp.sh` automates the GCP option — the only **keyless** path for Google
+Drive. It creates a GCE VM with the service account attached and the
+`drive.readonly` access scope, ships the binary, and installs a systemd service:
+
+```bash
+./deploy_gcp.sh --project YOUR_PROJECT \
+  --service-account goodmem-connector@YOUR_PROJECT.iam.gserviceaccount.com \
+  --with-goodmem            # optional: also install Goodmem + pgvector on the VM
+```
+
+`--with-goodmem` gives a fully self-contained box: the listener reaches Goodmem
+over `localhost`, so **nothing needs a public address**. Re-run any time to
+redeploy (it is idempotent); `--no-create` skips VM creation, `--delete` tears it
+down.
+
+Three things the script exists to get right, each of which silently breaks a
+hand-rolled VM: the **`drive.readonly` access scope** (a `cloud-platform` token
+does not cover the Drive API), Docker CE **with the compose plugin** (Debian's
+`docker.io` has no `docker compose`, which the Goodmem installer needs), and
+**trusting Goodmem's self-signed localhost certificate** so the connector can
+reach it over HTTPS.
+
+If your org blocks external IPs (`constraints/compute.vmExternalIpAccess`), the
+VM is created with `--no-address`; you then need **Cloud NAT** for egress and an
+**IAP** firewall rule for SSH — the exact commands are printed at the end of a run.
 
 ### Deploy to Fly.io with the script
 

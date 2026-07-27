@@ -23,10 +23,12 @@ provider POSTs a webhook — the SharePoint default, needs a public HTTPS URL) o
 needs nothing public). It exposes `/metrics` (Prometheus) and `/syncs` (durable
 sync history) for monitoring.
 
-Run it on **any host** — it's a single static binary. `./deploy_fly_io.sh`
-automates one option (Fly.io) and works for both sources; `--hands-free` also
-deploys a Goodmem server. For a *keyless* Google Drive deployment, run it on GCP
-instead — see [usage.md → Where to run the listener](docs/usage.md#where-to-run-the-listener).
+Run it on **any host** — it's a single static binary. Two deploy scripts automate
+the common ones: **`./deploy_fly_io.sh`** (Fly.io) and **`./deploy_gcp.sh`** (a GCE
+VM — the only *keyless* option for Google Drive, since the VM runs as an attached
+service account). Both work for either source and can install a Goodmem server
+alongside the listener. See
+[usage.md → Where to run the listener](docs/usage.md#where-to-run-the-listener).
 (Railway support is coming.)
 
 ## Getting started
@@ -124,6 +126,7 @@ goodmem-connectors/
 │       └── googledrive/      # Google Drive v3 SDK client: listing, Changes API, export/download, push channels.
 ├── deploy/alerts.yml         # Recommended Prometheus/Alertmanager rules.
 ├── deploy_fly_io.sh          # Deploy the listener (and optionally Goodmem) to Fly.io.
+├── deploy_gcp.sh             # Deploy to a GCE VM — the keyless path for Google Drive (attached service account).
 ├── Dockerfile                # Builds `connector` into a distroless static image.
 ├── fly_io.toml.template      # Fly config template (mounts the /data volume for durable state).
 ├── .env.example              # Documents every config variable.
