@@ -99,11 +99,14 @@ if $WITH_GOODMEM; then
   "${SSH[@]}" --command='command -v docker >/dev/null && docker compose version >/dev/null 2>&1 || { curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1; }; docker --version; docker compose version | head -1'
 
   echo "=== Installing Goodmem (server + pgvector) ==="
-  DBPW="gm-$(openssl rand -hex 12)"
-  "${SSH[@]}" --command="test -f ~/.goodmem/config.toml || curl -s https://get.goodmem.ai | bash -s -- --handsfree --db-password '$DBPW' >/tmp/goodmem-install.log 2>&1; grep -oE 'gm_[a-z0-9]+' ~/.goodmem/config.toml | head -1 >/tmp/gmkey"
-  # The server presents a self-signed cert for localhost; trust it so the
-  # connector (which uses the system cert pool) can reach it over HTTPS.
-  "${SSH[@]}" --command='openssl s_client -connect localhost:8080 -showcerts </dev/null 2>/dev/null | openssl x509 -outform PEM | sudo tee /usr/local/share/ca-certificates/goodmem-local.crt >/dev/null && sudo update-ca-certificates >/dev/null 2>&1; echo "Goodmem REST: https://localhost:8080"'
+  DBPW="gm$(openssl rand -hex 10)"
+  # --tls-disabled: the connector reaches Goodmem over loopback only, so there is
+  # nothing on the wire to protect and no certificate to distribute. Do NOT use the
+  # default self-signed certificate here: it is a leaf with CA:FALSE, so adding it
+  # to the system trust store does not make Go accept it ("parent certificate
+  # cannot sign this kind of certificate"). If Goodmem must be reachable from other
+  # hosts, put a reverse proxy with a real certificate in front of it instead.
+  "${SSH[@]}" --command="test -f ~/.goodmem/config.toml || curl -s https://get.goodmem.ai | bash -s -- --handsfree --tls-disabled --db-password '$DBPW' >/tmp/goodmem-install.log 2>&1; sudo grep -oE 'gm_[a-z0-9]+' ~/.goodmem/config.toml | head -1 >/tmp/gmkey; echo 'Goodmem REST: http://localhost:8080'"
 fi
 
 # --- 3. Build and ship the connector -----------------------------------------
@@ -126,7 +129,7 @@ grep -q '^GRAPH_DELTA_TOKEN_FILE=' /etc/goodmem-connector.env || \
   echo 'GRAPH_DELTA_TOKEN_FILE=/var/lib/goodmem-connector/.delta' | sudo tee -a /etc/goodmem-connector.env >/dev/null
 if [ '$GOODMEM_LOCAL' = yes ]; then
   sudo sed -i '/^GOODMEM_BASE_URL=/d;/^GOODMEM_API_KEY=/d' /etc/goodmem-connector.env
-  { echo 'GOODMEM_BASE_URL=https://localhost:8080'; echo \"GOODMEM_API_KEY=\$(cat /tmp/gmkey)\"; } | sudo tee -a /etc/goodmem-connector.env >/dev/null
+  { echo 'GOODMEM_BASE_URL=http://localhost:8080'; echo \"GOODMEM_API_KEY=\$(cat /tmp/gmkey)\"; } | sudo tee -a /etc/goodmem-connector.env >/dev/null
 fi
 sudo tee /etc/systemd/system/goodmem-connector.service >/dev/null <<'UNIT'
 [Unit]

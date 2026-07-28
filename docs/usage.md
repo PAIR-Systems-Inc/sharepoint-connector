@@ -125,11 +125,22 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/to/wif-credential-config.json
 > Actions, AWS, Azure and Kubernetes do; a plain **Fly.io** app does **not**
 > today. On Fly, use Path 1 or run on a GCP host.
 
-*Verified:* a GitHub Actions job (a genuine off-GCP workload) exchanged its OIDC
-token for short-lived credentials and read a real Shared Drive — credential type
-`external_account`, no key and no stored secret. The workflow that did it is kept
-in the repo as `.github/workflows/wif-drive-test.yml.disabled`; rename it to
-`.yml` to re-run it.
+*Verified end-to-end.* Two independent runs, no key and no stored secret anywhere:
+a GitHub Actions job (a genuine off-GCP workload) exchanged its OIDC token for
+short-lived credentials and listed, paged and **downloaded** from a real Shared
+Drive; and a GCE VM using an `external_account` credential ran a complete
+`sync-once` — 4 files listed, downloaded and ingested, all reaching `COMPLETED`.
+The GitHub workflow is kept as `.github/workflows/wif-drive-test.yml.disabled`;
+rename it to `.yml` to re-run.
+
+> **Scope elevation via WIF (the Cloud Run workaround).** The VM in that test was
+> attached to a service account with **only** `cloud-platform` — a token that
+> returns **403** against the Drive API. Federating that same identity back through
+> WIF and impersonating the service account yields a token with `drive.readonly`,
+> and Drive then works. So a workload stuck with a `cloud-platform`-only metadata
+> token (Cloud Run, GKE) can reach Drive without a key: grant its identity
+> `roles/iam.workloadIdentityUser` on the target service account and point
+> `GOOGLE_APPLICATION_CREDENTIALS` at a credential config.
 
 **Local testing only — impersonation.** For hands-on runs you can impersonate the
 service account with your own Google login instead:

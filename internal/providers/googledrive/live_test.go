@@ -38,9 +38,17 @@ func TestLive_ListGoogleDrive(t *testing.T) {
 			"check that the identity is a Viewer on the Shared Drive and that its "+
 			"token carries the drive.readonly scope)", err)
 	}
-	t.Logf("listed %d file(s) in Shared Drive %s", len(files), driveID)
-	for _, f := range files {
-		t.Logf("  %-55s %-70s %d bytes", f.Name, f.MimeType, f.Size)
+	// Log shapes, not names: this test runs in CI, and on a public repository the
+	// job log is world-readable — customer document titles do not belong there.
+	// Set GDRIVE_LIVE_VERBOSE=1 locally if you want the actual names.
+	verbose := os.Getenv("GDRIVE_LIVE_VERBOSE") == "1"
+	t.Logf("listed %d file(s) in Shared Drive", len(files))
+	for i, f := range files {
+		if verbose {
+			t.Logf("  %-55s %-70s %d bytes", f.Name, f.MimeType, f.Size)
+		} else {
+			t.Logf("  file[%d] %-70s %d bytes", i, f.MimeType, f.Size)
+		}
 	}
 
 	// A cursor proves the Changes API (the delta path) is reachable too.
@@ -69,15 +77,15 @@ func TestLive_ListGoogleDrive(t *testing.T) {
 	}
 	rc, err := c.Open(ctx, picked.ID, picked.MimeType)
 	if err != nil {
-		t.Fatalf("Open(%s): %v", picked.Name, err)
+		t.Fatalf("Open(%s): %v", picked.MimeType, err)
 	}
 	defer rc.Close()
 	n, err := io.Copy(io.Discard, rc)
 	if err != nil {
-		t.Fatalf("reading %s: %v", picked.Name, err)
+		t.Fatalf("reading %s: %v", picked.MimeType, err)
 	}
 	if n == 0 {
-		t.Fatalf("downloaded %s but got 0 bytes", picked.Name)
+		t.Fatalf("downloaded a %s file but got 0 bytes", picked.MimeType)
 	}
-	t.Logf("downloaded %q: %d bytes", picked.Name, n)
+	t.Logf("downloaded one %s file: %d bytes", picked.MimeType, n)
 }
