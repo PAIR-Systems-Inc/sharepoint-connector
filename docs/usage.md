@@ -293,9 +293,38 @@ does not cover the Drive API), Docker CE **with the compose plugin** (Debian's
 **trusting Goodmem's self-signed localhost certificate** so the connector can
 reach it over HTTPS.
 
-If your org blocks external IPs (`constraints/compute.vmExternalIpAccess`), the
-VM is created with `--no-address`; you then need **Cloud NAT** for egress and an
-**IAP** firewall rule for SSH — the exact commands are printed at the end of a run.
+#### If your VM has no external IP
+
+Many orgs block public IPs on VMs (`constraints/compute.vmExternalIpAccess`), so
+`deploy_gcp.sh` creates the VM with `--no-address`. A private VM has **no route to
+the internet and no reachable SSH port** until two network pieces exist — they are
+a property of the *topology*, not of the auth path, and a VM with a public IP needs
+neither:
+
+| Piece | Why | Without it |
+|---|---|---|
+| **Cloud NAT** (in the VM's region) | outbound access to the Drive API, Goodmem, and package/image registries | installs and syncs hang or time out |
+| **IAP firewall rule** — allow `tcp:22` from `35.235.240.0/20` | Google's IAP relays your SSH through this range | `gcloud compute ssh` hangs with no useful error |
+
+The script **pre-flights both** and refuses to create a VM it could not reach,
+printing what's missing. Add `--setup-network` to have it create them (idempotent):
+
+```bash
+./deploy_gcp.sh --project P --service-account SA --setup-network
+```
+
+Or create them once by hand:
+
+```bash
+gcloud compute routers create goodmem-nat-router --network=default --region=REGION
+gcloud compute routers nats create goodmem-nat --router=goodmem-nat-router --region=REGION \
+  --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges
+gcloud compute firewall-rules create allow-iap-ssh --network=default \
+  --allow=tcp:22 --source-ranges=35.235.240.0/20
+```
+
+Both are shared, one-per-network/region resources: create them once and every
+future private VM in that network reuses them.
 
 ### Deploy to Fly.io with the script
 

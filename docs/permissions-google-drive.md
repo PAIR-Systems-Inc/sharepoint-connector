@@ -91,8 +91,11 @@ does not cover Drive).
 `goodmem-connector@$PROJECT.iam.gserviceaccount.com` — attaching a service account
 to an instance requires permission to act as it. If org policy blocks external IP
 addresses (`constraints/compute.vmExternalIpAccess`), the VM must be created with
-`--no-address`, which additionally needs Cloud NAT for egress and an IAP firewall
-rule for SSH.
+`--no-address`. A private VM additionally needs **Cloud NAT** (outbound access) and
+a firewall rule allowing `tcp:22` from **`35.235.240.0/20`** (IAP-relayed SSH) —
+both one-per-network/region and reusable by every later VM. Creating them needs
+**`roles/compute.networkAdmin`** (`compute.routers.*`) and
+**`roles/compute.securityAdmin`** (`compute.firewalls.create`).
 
 #### If the connector runs on an **existing** VM
 

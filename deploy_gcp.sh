@@ -23,6 +23,8 @@
 #   --vm NAME              Default: goodmem-connector
 #   --with-goodmem         Also install a Goodmem server + pgvector on the VM
 #   --env-file PATH        Env file to ship to the VM (default: .env)
+#   --setup-network        Create the Cloud NAT + IAP firewall rule a no-public-IP
+#                          VM needs (egress and SSH). Safe to re-run.
 #   --no-create            Skip VM creation; just (re)deploy onto an existing VM
 #   --delete               Delete the VM and exit
 #
@@ -30,7 +32,7 @@ set -euo pipefail
 
 PROJECT=""; SA=""; ZONE="us-central1-a"; MACHINE="e2-standard-2"
 VM="goodmem-connector"; WITH_GOODMEM=false; ENV_FILE=".env"
-NO_CREATE=false; DO_DELETE=false; GCLOUD_CONFIG=""
+NO_CREATE=false; DO_DELETE=false; GCLOUD_CONFIG=""; SETUP_NET=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,6 +45,7 @@ while [ $# -gt 0 ]; do
     --env-file) ENV_FILE="$2"; shift 2;;
     --no-create) NO_CREATE=true; shift;;
     --delete) DO_DELETE=true; shift;;
+    --setup-network) SETUP_NET=true; shift;;
     --configuration) GCLOUD_CONFIG="$2"; shift 2;;
     -h|--help) sed -n '2,34p' "$0"; exit 0;;
     *) echo "Unknown option: $1" >&2; exit 2;;
@@ -65,6 +68,50 @@ fi
 
 SSH=("${G[@]}" compute ssh "$VM" --zone="$ZONE" --tunnel-through-iap --quiet)
 SCP=("${G[@]}" compute scp --zone="$ZONE" --tunnel-through-iap --quiet)
+
+# --- 0. Network prerequisites for a VM with no external IP --------------------
+# A --no-address VM has NO route to the internet and NO reachable SSH port until
+# these exist. Without them the symptoms are opaque: `gcloud compute ssh` hangs,
+# and package/image pulls time out. Neither is specific to an auth path — they are
+# what any private VM needs.
+REGION="${ZONE%-*}"
+has_nat=$("${G[@]}" compute routers list --filter="region:$REGION" --format='value(name)' 2>/dev/null \
+  | while read -r r; do "${G[@]}" compute routers nats list --router="$r" --region="$REGION" --format='value(name)' 2>/dev/null; done | head -1)
+has_iap=$("${G[@]}" compute firewall-rules list \
+  --filter="allowed.ports~22 AND sourceRanges~35.235.240.0/20" --format='value(name)' 2>/dev/null | head -1)
+
+if $SETUP_NET; then
+  [ -n "$has_nat" ] || {
+    echo "=== Creating Cloud NAT in $REGION (egress for the private VM) ==="
+    "${G[@]}" compute routers create goodmem-nat-router --network=default --region="$REGION" >/dev/null
+    "${G[@]}" compute routers nats create goodmem-nat --router=goodmem-nat-router --region="$REGION" \
+      --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges >/dev/null
+    has_nat=goodmem-nat; }
+  [ -n "$has_iap" ] || {
+    echo "=== Creating the IAP SSH firewall rule ==="
+    "${G[@]}" compute firewall-rules create allow-iap-ssh --network=default \
+      --allow=tcp:22 --source-ranges=35.235.240.0/20 \
+      --description="Allow IAP TCP forwarding to SSH" >/dev/null
+    has_iap=allow-iap-ssh; }
+fi
+
+if ! $NO_CREATE && { [ -z "$has_nat" ] || [ -z "$has_iap" ]; }; then
+  echo "This script creates the VM with --no-address (private), which requires:" >&2
+  [ -n "$has_nat" ] && echo "  [ok]      Cloud NAT in $REGION: $has_nat" >&2 \
+                    || echo "  [MISSING] Cloud NAT in $REGION  — without it the VM has no internet egress" >&2
+  [ -n "$has_iap" ] && echo "  [ok]      IAP SSH firewall rule: $has_iap" >&2 \
+                    || echo "  [MISSING] IAP SSH firewall rule — without it 'gcloud compute ssh' cannot connect" >&2
+  echo "" >&2
+  echo "Re-run with --setup-network to create the missing pieces, or create them by hand:" >&2
+  echo "  gcloud compute routers create goodmem-nat-router --network=default --region=$REGION" >&2
+  echo "  gcloud compute routers nats create goodmem-nat --router=goodmem-nat-router --region=$REGION \\" >&2
+  echo "    --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges" >&2
+  echo "  gcloud compute firewall-rules create allow-iap-ssh --network=default \\" >&2
+  echo "    --allow=tcp:22 --source-ranges=35.235.240.0/20" >&2
+  echo "" >&2
+  echo "(If your org permits external IPs, a VM with a public address needs neither.)" >&2
+  exit 1
+fi
 
 # --- 1. Create the VM (attached SA + the Drive access scope) ------------------
 if ! $NO_CREATE; then
