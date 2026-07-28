@@ -10,6 +10,27 @@
 #
 # Manual trigger only (workflow_dispatch): it touches a real Drive, so it must not
 # run on every push.
+#
+# DISABLED (.disabled so GitHub ignores it) and the GCP side has been torn down
+# after verification, so re-running needs the pool re-created first:
+#
+#   PROJECT_NUM=<your project number>
+#   REPO=OWNER/REPO
+#   SA=goodmem-connector@<project>.iam.gserviceaccount.com
+#
+#   gcloud iam workload-identity-pools create github-pool --location=global
+#   gcloud iam workload-identity-pools providers create-oidc github-provider \
+#     --location=global --workload-identity-pool=github-pool \
+#     --issuer-uri="https://token.actions.githubusercontent.com" \
+#     --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+#     --attribute-condition="assertion.repository=='$REPO'"
+#   gcloud iam service-accounts add-iam-policy-binding "$SA" \
+#     --role=roles/iam.workloadIdentityUser \
+#     --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUM/locations/global/workloadIdentityPools/github-pool/attribute.repository/$REPO"
+#
+# Then update workload_identity_provider / service_account below and rename to .yml.
+# NOTE: this repo is public, so job logs are world-readable — the live test
+# deliberately logs MIME types and sizes rather than document names.
 name: WIF Google Drive check (manual)
 
 on:
