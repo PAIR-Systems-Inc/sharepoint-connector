@@ -173,6 +173,47 @@ GOODMEM_SPACE_ID=...     # or leave unset to auto-create a per-source space
 > Leave `GOODMEM_SPACE_ID` unset and each source creates its own space
 > (`SharePoint_<org>_<site>` / `GoogleDrive_<driveId>`).
 
+## Verifying a deployment
+
+Credentials are where deployments fail, and the failure is usually silent — the
+listener starts, polls, and syncs nothing. Three checks, cheapest first:
+
+```bash
+# 1. Credentials + Drive share, without touching Goodmem.
+GDRIVE_LIVE=1 GOOGLE_DRIVE_ID=<id> go test ./internal/providers/googledrive -run TestLive -v
+
+# 2. Credentials + Goodmem + the sync plan, without changing anything.
+./connector sync-once --source google-drive --dry-run
+
+# 3. The real thing.
+./connector sync-once --source google-drive
+```
+
+Check 1 is the most useful on a fresh host: it goes through the same ADC path the
+connector uses, lists the Drive, fetches a changes cursor, **and downloads one
+file's bytes** — listing can succeed where downloading fails, so metadata access
+alone does not prove the credential works.
+
+**Prove it is the credential you think it is.** When a host has more than one
+possible identity (a GCE VM has an attached service account *and* whatever
+`GOOGLE_APPLICATION_CREDENTIALS` points at), a passing test does not tell you
+which one did the work. Check the credential type, and confirm the identity you
+expect to be inert really is:
+
+```bash
+# Which credential ADC resolved (external_account = workload identity federation)
+python3 -c "import json,os;print(json.load(open(os.environ['GOOGLE_APPLICATION_CREDENTIALS']))['type'])"
+
+# On GCE: what the attached service account alone can do
+MD=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default
+TOK=$(curl -s -H 'Metadata-Flavor: Google' $MD/token | sed -E 's/.*"access_token":"([^"]*)".*/\1/')
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
+  'https://www.googleapis.com/drive/v3/files?pageSize=1&supportsAllDrives=true'
+```
+
+A `401`/`403` from that last call while the sync succeeds is the proof that the
+federated credential — not the attached service account — is doing the work.
+
 ## Manual / periodic sync
 
 Sync everything once:
@@ -438,3 +479,18 @@ creates the push subscription or starts polling. Internals:
   `.env`, `fly secrets import < .env`, and `fly deploy`. The listener stays up for
   webhooks (`auto_stop_machines = 'off'`, `min_machines_running = 1`) and mounts
   the `/data` volume for durable state.
+
+### Running Goodmem on the same host
+
+- **Ports:** REST is on **8080** (this is the `GOODMEM_BASE_URL` port) and gRPC on
+  **9090**. Pointing the connector at 9090 yields a confusing `415`.
+- **Reinstalling is not idempotent over old data.** The installer keeps the
+  Postgres data directory, so a reinstall with a new DB password leaves the server
+  crash-looping on authentication. To start clean, remove the containers, their
+  volumes, **and** `~/.goodmem` (the data dir is root-owned — `sudo rm -rf`) before
+  re-running.
+- **Prefer `--tls-disabled` for a co-located install.** The default self-signed
+  certificate is a leaf with `CA:FALSE`, so adding it to the system trust store
+  does *not* make Go accept it (`parent certificate cannot sign this kind of
+  certificate`). Loopback plaintext avoids the problem; put a reverse proxy with a
+  real certificate in front if anything off-box needs access.

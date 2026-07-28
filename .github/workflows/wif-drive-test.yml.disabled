@@ -29,6 +29,11 @@
 #     --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUM/locations/global/workloadIdentityPools/github-pool/attribute.repository/$REPO"
 #
 # Then update workload_identity_provider / service_account below and rename to .yml.
+#
+# Dispatching gotcha: GitHub only offers workflow_dispatch for files that exist on
+# the DEFAULT branch. On a feature branch the run button/API returns 404 — either
+# merge it to the default branch first, or temporarily add a push trigger scoped to
+# a throwaway branch.
 # NOTE: this repo is public, so job logs are world-readable — the live test
 # deliberately logs MIME types and sizes rather than document names.
 name: WIF Google Drive check (manual)

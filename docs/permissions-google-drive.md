@@ -125,18 +125,50 @@ knowing before you schedule it:
 
 ### Method 3 — workload identity federation *(keyless, off-GCP)*
 
-Create a workload-identity **pool + provider** that trusts our runtime platform's
-OIDC issuer, let its principal impersonate the SA (grant
-`roles/iam.serviceAccountTokenCreator` on the SA, or a direct `principalSet`
-binding), then generate the credential-configuration file:
+Create a workload-identity **pool + provider** trusting our runtime platform's
+OIDC issuer, bind it to the service account, then generate the credential config.
+The example below is GitHub Actions; substitute the issuer and claim for another
+platform. *(This sequence is verified — we ran it end-to-end.)*
 
 ```bash
+# 0. The Security Token Service API must be enabled, or the exchange fails.
+gcloud services enable sts.googleapis.com --project="$PROJECT"
+
+# 1. Pool + OIDC provider.
+gcloud iam workload-identity-pools create github-pool --location=global --project="$PROJECT"
+
+gcloud iam workload-identity-pools providers create-oidc github-provider \
+  --location=global --workload-identity-pool=github-pool --project="$PROJECT" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="assertion.repository=='OWNER/REPO'"
+
+# 2. Let ONLY that workload impersonate the service account.
+gcloud iam service-accounts add-iam-policy-binding \
+  "goodmem-connector@$PROJECT.iam.gserviceaccount.com" --project="$PROJECT" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/OWNER/REPO"
+
+# 3. The credential config we consume (contains no key).
 gcloud iam workload-identity-pools create-cred-config \
-  projects/$PROJECT/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER> \
+  "projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider" \
   --service-account="goodmem-connector@$PROJECT.iam.gserviceaccount.com" \
   --output-file=wif-credential-config.json
   # + the platform-specific --credential-source-… flag for our host
 ```
+
+> ⚠️ **The `--attribute-condition` is a security control, not a formality.**
+> Without it the provider trusts *every* workload from that issuer — for GitHub
+> that means any repository on github.com could impersonate the service account.
+> Always pin it to the specific repository (or subject).
+
+> **Drive scope must be requested when the token is exchanged.** The default
+> exchange yields a `cloud-platform` token, which does **not** cover the Drive API.
+> In GitHub Actions that means `token_format: access_token` plus
+> `access_token_scopes: https://www.googleapis.com/auth/drive.readonly`; other
+> clients request the scope the same way. A workload whose platform token is
+> `cloud-platform`-only (Cloud Run, GKE) can use exactly this to reach Drive
+> keylessly rather than falling back to a key.
 
 **Send us `wif-credential-config.json`.** It contains **no key** (not a secret) —
 only the instructions to fetch and exchange the platform's OIDC token.
