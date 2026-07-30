@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+	htransport "google.golang.org/api/transport/http"
 )
 
 const (
@@ -53,6 +55,9 @@ type Channel struct {
 type Client struct {
 	svc     *drive.Service
 	driveID string
+	// retry is the rate-limit/backoff transport under the SDK. Set only by the
+	// production constructors; nil when the caller supplied its own HTTP client.
+	retry *retryTransport
 }
 
 // New builds a Drive client from caller-supplied SDK options (prod: service-
@@ -73,7 +78,7 @@ func NewWithServiceAccount(ctx context.Context, serviceAccountJSON []byte, drive
 	if len(serviceAccountJSON) == 0 {
 		return nil, errors.New("empty service account json")
 	}
-	return New(ctx, driveID,
+	return newRetrying(ctx, driveID,
 		option.WithCredentialsJSON(serviceAccountJSON),
 		option.WithScopes(drive.DriveReadonlyScope),
 	)
@@ -85,7 +90,35 @@ func NewWithServiceAccount(ctx context.Context, serviceAccountJSON []byte, drive
 // downloadable service-account keys. The identity must be a member of the Shared
 // Drive. Read-only scope.
 func NewWithADC(ctx context.Context, driveID string) (*Client, error) {
-	return New(ctx, driveID, option.WithScopes(drive.DriveReadonlyScope))
+	return newRetrying(ctx, driveID, option.WithScopes(drive.DriveReadonlyScope))
+}
+
+// newRetrying is the shared production path: it builds Google's auth transport
+// on top of our retry transport, so every SDK call backs off on Drive rate
+// limits (the SDK itself does not — see retry.go). The auth options go to the
+// transport rather than to drive.NewService, which then only needs the finished
+// HTTP client.
+func newRetrying(ctx context.Context, driveID string, opts ...option.ClientOption) (*Client, error) {
+	rt := newRetryTransport(http.DefaultTransport)
+	trans, err := htransport.NewTransport(ctx, rt, opts...)
+	if err != nil {
+		return nil, err
+	}
+	c, err := New(ctx, driveID, option.WithHTTPClient(&http.Client{Transport: trans}))
+	if err != nil {
+		return nil, err
+	}
+	c.retry = rt
+	return c, nil
+}
+
+// SetThrottleHook registers fn, called before each backoff caused by a Drive
+// rate limit or transient failure. No-op on a client built with a caller-
+// supplied HTTP client (the fake-server tests), which has no retry transport.
+func (c *Client) SetThrottleHook(fn func(status, attempt int, retryAfter time.Duration)) {
+	if c.retry != nil {
+		c.retry.setHook(fn)
+	}
 }
 
 func toFile(f *drive.File) *DriveFile {

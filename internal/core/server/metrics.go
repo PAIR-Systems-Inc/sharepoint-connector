@@ -71,7 +71,8 @@ func (m *Metrics) RecordSync(kind string, res *syncer.Result) {
 	m.syncErrors.Add(int64(len(res.Errors)))
 }
 
-// RecordThrottle counts a Graph throttle/backoff event.
+// RecordThrottle counts a provider throttle/backoff event. Both providers report
+// these: SharePoint from its Graph client, Google Drive from its retry transport.
 func (m *Metrics) RecordThrottle() {
 	if m != nil {
 		m.throttleEvents.Add(1)

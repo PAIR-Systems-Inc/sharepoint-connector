@@ -28,7 +28,15 @@ type Adapter struct {
 var (
 	_ source.Source           = (*Adapter)(nil)
 	_ source.WebhookValidator = (*Adapter)(nil)
+	_ source.ThrottleReporter = (*Adapter)(nil)
 )
+
+// SetThrottleHook satisfies source.ThrottleReporter: the listener uses it to
+// surface Drive rate limiting in the activity log and in
+// connector_throttle_events_total, the same way it does for SharePoint.
+func (a *Adapter) SetThrottleHook(fn func(status, attempt int, retryAfter time.Duration)) {
+	a.c.SetThrottleHook(fn)
+}
 
 // NewAdapter wraps a Drive client as a source.Source. channelToken is the secret
 // echoed back in each push notification for validation.

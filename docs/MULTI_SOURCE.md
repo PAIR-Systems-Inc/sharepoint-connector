@@ -71,6 +71,17 @@ The per-provider differences that remain are catalogued in
    a Graph-specific throttle metric on Drive). `deploy/alerts.yml` is source-
    agnostic and names the firing connector via `{{ $labels.source }}`.
 
+9. ✅ **Rate-limit backoff for Google Drive.** The Drive SDK does not retry —
+   every generated call site uses the non-retrying `gensupport.SendRequest` and
+   nothing honors `Retry-After` — so `connector_throttle_events_total` could
+   never be non-zero for Drive and the throttle alert was structurally dead for
+   that source. Drive now gets the same treatment SharePoint has: a retry
+   transport under the SDK that backs off on 429, the rate-limit flavours of 403
+   and 5xx/network errors, honors a (capped) `Retry-After`, and reports every
+   backoff through `source.ThrottleReporter`. Permanent 403s —
+   `exportSizeLimitExceeded`, permission denials — are deliberately *not*
+   retried, so a permanent skip stays permanent.
+
 ### Resolved along the way
 
 - *"Does the Drive webhook address need a verified domain?"* — **Yes.** That is

@@ -82,6 +82,7 @@ Everything below the adapter is identical; these are the only real differences.
 | Notification payload | list of changed resources | header-only ping → then pull `changes.list` |
 | Download bytes | `@microsoft.graph.downloadUrl` | `files.get?alt=media`, or `files.export` for Google-native docs |
 | Deletion signal | delta item `deleted` facet | `removed=true` or `file.trashed=true` |
+| Rate-limit backoff | in the hand-rolled Graph client | in a retry transport under the SDK (the SDK itself never retries) |
 | Memory-id namespace | `sharepoint.file.id` | `google-drive.file.id` |
 | Default space name | `SharePoint_<org>_<site>` | `GoogleDrive_<driveId>` |
 
