@@ -1,6 +1,6 @@
 module github.com/PAIR-Systems-Inc/goodmem-connectors
 
-go 1.23
+go 1.25
 
 require (
 	fury.io/pairsys/goodmem v0.1.0
