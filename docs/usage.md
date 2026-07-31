@@ -28,9 +28,10 @@ By default each command loads `.env` if present; `--env-file` overrides.
 
 ## Choosing the source
 
-Set **`SOURCE=sharepoint`** (default) or **`SOURCE=google-drive`** in `.env`, or
-pass `--source` per run. It selects which credential group below is required;
-everything else — the sync engine, endpoints, retries, metrics — is identical.
+Set **`SOURCE=sharepoint`** (default), **`SOURCE=google-drive`** or
+**`SOURCE=smb`** in `.env`, or pass `--source` per run. It selects which
+credential group below is required; everything else — the sync engine, endpoints,
+retries, metrics — is identical.
 
 ```bash
 ./connector sync-once --source google-drive
@@ -158,6 +159,50 @@ listener would silently stop syncing until a human re-ran the login.
 *(Background on gcloud profiles and how ADC resolves credentials:
 [tech_details.md → Reference](tech_details.md#reference-gcloud-profiles--adc).)*
 
+### Windows network drive (SMB/CIFS)
+
+The connector reads an **SMB2/3 share** as a read-only account. The name is the
+protocol, not the vendor: the same setup works against **Windows Server, Samba,
+and NAS appliances**, and a large share of "Windows network drives" in the wild
+are the latter two.
+
+```dotenv
+SOURCE=smb
+SMB_HOST=fileserver.corp.example.com   # or host:port; default port 445
+SMB_SHARE=Shared                       # the "Shared" in \\fileserver\Shared
+SMB_USER=svc-goodmem
+SMB_PASSWORD=...
+SMB_DOMAIN=CORP                        # optional for standalone servers
+SMB_ROOT=Reports/2026                  # optional; "" syncs the whole share
+```
+
+What IT needs to provide is in
+[permissions-smb.md](permissions-smb.md) — hand them that document.
+
+Three behaviors follow from the protocol rather than from this connector, and
+they are worth knowing before you deploy:
+
+- **Poll only — there is no push mode.** SMB has no change feed a client can
+  subscribe to. `SYNC_POLL_MINUTES` defaults to 2 and cannot be 0; there is no
+  webhook to expose, so the listener needs no public URL at all. (Details and
+  why the protocol's CHANGE_NOTIFY isn't a substitute:
+  [tech_details.md](tech_details.md#why-smb-polls).)
+- **Deletions are found by the periodic full sync, not the poll.** A deleted file
+  is simply absent, which is indistinguishable from "unchanged" when comparing
+  modification times. The poll finds new and modified files quickly; removals wait
+  for the next full reconcile.
+- **A file's identity is its path.** SMB has no stable per-file id, so renaming or
+  moving a file reads as a delete plus an add and the content is re-embedded under
+  the new path. This also means **`SMB_ROOT` is permanent**: paths are stored
+  relative to it, so changing it re-keys every memory in the space.
+
+The connector skips machine noise that would otherwise become memories — Office
+lock files (`~$…`), `Thumbs.db`, `desktop.ini`, dotfiles, `$RECYCLE.BIN` and
+`System Volume Information`. A subdirectory the account cannot read is skipped
+with the rest of the share still syncing; only failing to read **`SMB_ROOT`
+itself** aborts the sync, since an empty listing would otherwise look like an
+empty share.
+
 ### Goodmem (always required)
 
 ```dotenv
@@ -166,12 +211,12 @@ GOODMEM_API_KEY=...
 GOODMEM_SPACE_ID=...     # or leave unset to auto-create a per-source space
 ```
 
-> ⚠️ **One space per source.** Never point a SharePoint listener and a Google
-> Drive listener at the **same** `GOODMEM_SPACE_ID`: each full sync reconciles the
-> space against *its own* files and deletes the rest as orphans, so the two would
-> delete and re-add each other's memories forever (re-embedding every cycle).
-> Leave `GOODMEM_SPACE_ID` unset and each source creates its own space
-> (`SharePoint_<org>_<site>` / `GoogleDrive_<driveId>`).
+> ⚠️ **One space per source.** Never point two listeners at the **same**
+> `GOODMEM_SPACE_ID`: each full sync reconciles the space against *its own* files
+> and deletes the rest as orphans, so they would delete and re-add each other's
+> memories forever (re-embedding every cycle). Leave `GOODMEM_SPACE_ID` unset and
+> each source creates its own space (`SharePoint_<org>_<site>` /
+> `GoogleDrive_<driveId>` / `SMB_<host>_<share>`).
 
 ## Verifying a deployment
 

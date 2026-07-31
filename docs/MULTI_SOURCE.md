@@ -20,7 +20,11 @@ system works today see **[tech_details.md](tech_details.md)**; for running it se
 | Google Drive scope | a **Shared Drive**, read by a service account added to it as Viewer. My Drive (domain-wide delegation) is out of scope |
 | Google Drive auth | **three** deploy-and-forget paths — service-account key, GCP-attached service account, workload identity federation — so the connector fits any customer IT policy. Paths 2 and 3 are verified end-to-end against real infrastructure (full sync, files reaching COMPLETED); path 1 is unverified only because our test org forbids key creation |
 | Google Drive trigger | **poll by default.** Google's `changes.watch` needs a domain-verified HTTPS endpoint; polling the Changes API needs nothing public and is equally incremental |
-| Memory-id namespace | per-source and permanent (`sharepoint.file.id`, `google-drive.file.id`) |
+| SMB naming | source token **`smb`**, not `windows-network-drive` — the same share may be served by Windows Server, Samba or a NAS, so naming it after Windows would be wrong more often than right |
+| SMB identity | the **path** relative to `SMB_ROOT` (namespace `smb.file.path`) — SMB has no stable file id. Not case-normalized: a case-only rename churns one memory, but lowercasing would let two files differing only in case collide on a case-sensitive server, and collision is data loss where churn is not |
+| SMB trigger | **poll only.** No change feed exists; CHANGE_NOTIFY mandates a rescan fallback by design and no Go library implements it, and the NTFS change journal is a local-volume API SMB never exposes |
+| SMB library | `cloudsoda/go-smb2` — actively maintained, NTLM + Kerberos, and the fork rclone depends on. Hand-rolling SMB2 was rejected: unlike the Graph client (750 lines of HTTPS + JSON), it would mean owning NTLMv2, SMB3 signing and encryption, and credit-based flow control |
+| Memory-id namespace | per-source and permanent (`sharepoint.file.id`, `google-drive.file.id`, `smb.file.path`) |
 | Sync direction | **one-way**, cloud drive → Goodmem. The drive is the single source of truth; the space is a *mirror* of it, not a store other writers share. A full sync therefore deletes anything in the space the drive does not have — that is the reconcile working, not data loss. Nothing is ever written back to the drive |
 
 ## Why this was a small conceptual leap
@@ -33,7 +37,7 @@ productionization review (mass-delete guard, dead-letter, size cap, coalescing,
 retention, `/readyz`, `slog`, alerts).
 
 The per-provider differences that remain are catalogued in
-[tech_details.md](tech_details.md#how-the-two-providers-differ).
+[tech_details.md](tech_details.md#how-the-providers-differ).
 
 ## Phased plan
 
@@ -82,6 +86,15 @@ The per-provider differences that remain are catalogued in
    backoff through `source.ThrottleReporter`. Permanent 403s —
    `exportSizeLimitExceeded`, permission denials — are deliberately *not*
    retried, so a permanent skip stays permanent.
+
+10. ✅ **SMB / Windows network drive provider** (`internal/providers/smb`). The
+    share is reached as a standard `io/fs.FS`, which confines the SMB library to
+    one file and lets every layer above it be tested with `fstest.MapFS` — no
+    server required. A live test (`SMB_LIVE=1`) covers the real wire protocol
+    against the Samba container in `docker-compose.smb-test.yml`: enumeration,
+    content download, cursor bootstrap, and `SMB_ROOT` scoping. Required raising
+    the module to **Go 1.25**, the floor every published version of the SMB
+    library declares.
 
 ### Resolved along the way
 

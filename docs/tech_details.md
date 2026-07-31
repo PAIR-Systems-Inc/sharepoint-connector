@@ -67,24 +67,66 @@ Sentinel errors carry provider-independent meaning:
 Two optional capabilities are detected by type assertion: `ThrottleReporter`
 (surface provider back-off in logs/metrics) and `WebhookValidator`.
 
-## How the two providers differ
+## How the providers differ
 
 Everything below the adapter is identical; these are the only real differences.
 
-| Capability | SharePoint (MS Graph) | Google Drive |
-|---|---|---|
-| Full listing | `drives/{id}/root/children`, recursive | `files.list` scoped to `driveId` |
-| Incremental cursor | delta token (`/delta`) | `changes.getStartPageToken` → `changes.list` → `newStartPageToken` |
-| Default trigger | **push** (webhook subscription) | **poll** (`SYNC_POLL_MINUTES`, default 2) |
-| Push mechanism | subscription; PATCH to renew | channel (`changes.watch`); **no in-place renew** — re-watch + `channels.stop` |
-| Push prerequisite | any public HTTPS URL | a **domain-verified** HTTPS endpoint |
-| Webhook secret | `clientState` (in the body) | `token` (header `X-Goog-Channel-Token`) |
-| Notification payload | list of changed resources | header-only ping → then pull `changes.list` |
-| Download bytes | `@microsoft.graph.downloadUrl` | `files.get?alt=media`, or `files.export` for Google-native docs |
-| Deletion signal | delta item `deleted` facet | `removed=true` or `file.trashed=true` |
-| Rate-limit backoff | in the hand-rolled Graph client | in a retry transport under the SDK (the SDK itself never retries) |
-| Memory-id namespace | `sharepoint.file.id` | `google-drive.file.id` |
-| Default space name | `SharePoint_<org>_<site>` | `GoogleDrive_<driveId>` |
+| Capability | SharePoint (MS Graph) | Google Drive | SMB (Windows network drive) |
+|---|---|---|---|
+| Full listing | `drives/{id}/root/children`, recursive | `files.list` scoped to `driveId` | recursive directory walk (`fs.WalkDir`) |
+| Incremental cursor | delta token (`/delta`) | `changes.getStartPageToken` → `changes.list` → `newStartPageToken` | newest modification time seen (RFC-3339 watermark) |
+| Default trigger | **push** (webhook subscription) | **poll** (`SYNC_POLL_MINUTES`, default 2) | **poll only** — no push exists |
+| Push mechanism | subscription; PATCH to renew | channel (`changes.watch`); **no in-place renew** — re-watch + `channels.stop` | none |
+| Push prerequisite | any public HTTPS URL | a **domain-verified** HTTPS endpoint | n/a |
+| Webhook secret | `clientState` (in the body) | `token` (header `X-Goog-Channel-Token`) | n/a |
+| Notification payload | list of changed resources | header-only ping → then pull `changes.list` | n/a |
+| Download bytes | `@microsoft.graph.downloadUrl` | `files.get?alt=media`, or `files.export` for Google-native docs | open the file over SMB |
+| Content type | supplied by Graph | supplied by Drive | **inferred from the extension** (SMB carries none) |
+| Deletion signal | delta item `deleted` facet | `removed=true` or `file.trashed=true` | **none** — found by the periodic full sync |
+| Rate-limit backoff | in the hand-rolled Graph client | in a retry transport under the SDK (the SDK itself never retries) | n/a (no server-side rate limit) |
+| Memory-id namespace | `sharepoint.file.id` | `google-drive.file.id` | `smb.file.path` |
+| Default space name | `SharePoint_<org>_<site>` | `GoogleDrive_<driveId>` | `SMB_<host>_<share>` |
+
+### Why SMB polls
+
+SharePoint and Drive both expose a change feed. SMB has neither a feed nor a
+usable push mechanism, and the two candidates fail for different reasons:
+
+- **SMB2 CHANGE_NOTIFY** is in the protocol and does work remotely, but it cannot
+  stand alone. The server buffers change records against an open directory handle
+  and, when they overflow the client's buffer, returns `STATUS_NOTIFY_ENUM_DIR` —
+  "too many changes, re-enumerate yourself". So the protocol *requires* a rescan
+  fallback, and it gives up precisely when the share is busiest. The watch also
+  dies silently with its handle on any reconnect, support varies across Samba and
+  NAS implementations, and no Go SMB library implements it (verified against both
+  `cloudsoda/go-smb2` and `hirochachacha/go-smb2`).
+- **The NTFS change journal (USN)** is not merely unreliable over the network — it
+  is *unreachable*. It is read with `DeviceIoControl(FSCTL_READ_USN_JOURNAL)`
+  against a **volume** handle, needing local access and administrator rights. SMB
+  never exposes it. It would only be an option if we shipped an agent onto the
+  file server itself, which is a different product shape.
+
+Since a full walk is needed as the fallback in every design, it is the
+foundation rather than the compromise: the walk finds modified files by
+timestamp, and the periodic full sync reconciles deletions. Notification could
+later reduce latency, but it could never replace the walk.
+
+### SMB identity and its consequences
+
+SMB gives a file no stable identifier, so the **path relative to `SMB_ROOT` is the
+identity** (hence the namespace `smb.file.path`). Two consequences fall out of
+that and are properties of the protocol, not bugs:
+
+- **A rename or move is a delete plus an add.** The content is re-embedded under
+  the new path.
+- **`SMB_ROOT` is permanent.** Paths are stored relative to it, so changing it
+  re-keys every memory.
+
+Deliberately *not* case-normalized: Windows is case-insensitive, so a case-only
+rename does churn one memory — but lowercasing the identity would make two files
+differing only in case collide on a case-sensitive server (Samba on Linux), and
+one would silently overwrite the other. Churn is recoverable; collision is data
+loss.
 
 ### Google Drive specifics
 

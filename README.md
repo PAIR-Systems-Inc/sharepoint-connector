@@ -39,6 +39,7 @@ alongside the listener. See
 |---|---|---|
 | SharePoint | [permissions-sharepoint.md](docs/permissions-sharepoint.md) | client id, client secret, tenant id |
 | Google Drive | [permissions-google-drive.md](docs/permissions-google-drive.md) | service-account email + one of three credentials, Drive ID |
+| Windows network drive | [permissions-smb.md](docs/permissions-smb.md) | host, share name, read-only account + password |
 
 **2. Create `.env`:** `cp .env.example .env`, then fill in your source's group plus
 **Goodmem** (and **Fly.io** if you'll deploy the listener).
@@ -89,8 +90,38 @@ Three deploy-and-forget auth paths (key / GCP-attached service account / workloa
 identity federation) — see [usage.md](docs/usage.md#google-drive-service-account).
 </details>
 
-> ⚠️ **One Goodmem space per source** — never share a `GOODMEM_SPACE_ID` between a
-> SharePoint and a Google Drive listener; leave it unset and each creates its own.
+<details>
+<summary><b>Windows network drive (SMB) quickstart</b></summary>
+
+Any SMB2/3 server — Windows Server, Samba or a NAS. Grant the account **Read** on
+*both* the share and NTFS permissions (the effective right is the stricter of the
+two), then:
+
+```dotenv
+SOURCE=smb
+SMB_HOST=fileserver.corp.example.com   # or host:port; default 445
+SMB_SHARE=Shared
+SMB_USER=svc-goodmem
+SMB_PASSWORD=...
+SMB_DOMAIN=CORP                        # optional for standalone servers
+GOODMEM_BASE_URL=https://your-goodmem
+GOODMEM_API_KEY=...
+```
+
+```bash
+./connector sync-once --source smb --dry-run
+./connector sync-once --source smb
+./connector serve --source smb    # listener — poll only, no webhook needed
+```
+
+**Poll only:** SMB has no subscribable change feed, so there is no push mode and
+no public URL to expose. Deletions are picked up by the periodic full sync, and a
+file's identity is its path — see [usage.md](docs/usage.md#windows-network-drive-smbcifs).
+
+</details>
+
+> ⚠️ **One Goodmem space per source** — never share a `GOODMEM_SPACE_ID` between
+> two listeners; leave it unset and each creates its own.
 
 ## Documentation
 
@@ -99,7 +130,8 @@ identity federation) — see [usage.md](docs/usage.md#google-drive-service-accou
 * **[tech_details.md](docs/tech_details.md)** — internals: the `Source` interface,
   the sync engine, how the diff is computed and applied, safety guards.
 * **[permissions-sharepoint.md](docs/permissions-sharepoint.md)** ·
-  **[permissions-google-drive.md](docs/permissions-google-drive.md)** — hand to IT.
+  **[permissions-google-drive.md](docs/permissions-google-drive.md)** ·
+  **[permissions-smb.md](docs/permissions-smb.md)** — hand to IT.
 * **[MULTI_SOURCE.md](docs/MULTI_SOURCE.md)** — multi-source design decisions.
 * **[PRODUCTIONIZATION.md](PRODUCTIONIZATION.md)** — the production roadmap.
 

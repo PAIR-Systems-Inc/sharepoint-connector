@@ -70,3 +70,8 @@ Thumbs.db
 # Go
 /connector
 *.test
+
+# The SMB provider's test fixtures deliberately include the machine noise its
+# walk must skip. The global Thumbs.db rule above would otherwise drop it, and
+# the live test would then silently stop covering the skip path.
+!testdata/smbshare/Thumbs.db

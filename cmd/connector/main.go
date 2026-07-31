@@ -1,5 +1,6 @@
-// Command connector syncs a content source (a SharePoint site or a Google Drive
-// Shared Drive, selected by SOURCE / --source) to a Goodmem space.
+// Command connector syncs a content source (a SharePoint site, a Google Drive
+// Shared Drive, or a Windows network drive / SMB share — selected by
+// SOURCE / --source) to a Goodmem space.
 //
 // It replaces the Python proof-of-concept (listener.py, sync_once.py,
 // watch_listener.py) with a single Go binary exposing subcommands. This is the
@@ -31,6 +32,7 @@ import (
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/core/syncer"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/googledrive"
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/sharepoint"
+	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/smb"
 )
 
 func main() {
@@ -66,7 +68,7 @@ func main() {
 func runSyncOnce(args []string) error {
 	fs := flag.NewFlagSet("sync-once", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
-	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive (overrides SOURCE)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive|smb (overrides SOURCE)")
 	dryRun := fs.Bool("dry-run", false, "compute the sync plan without changing Goodmem")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
@@ -126,7 +128,7 @@ func runSyncOnce(args []string) error {
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
-	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive (overrides SOURCE)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive|smb (overrides SOURCE)")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
 		os.Setenv("SOURCE", *srcFlag)
@@ -142,11 +144,16 @@ func runServe(args []string) error {
 	// webhook, so Google Drive defaults to POLL mode (periodic delta — no public URL
 	// needed); SharePoint defaults to push (Graph webhooks are easy to stand up).
 	// Override either way with SYNC_POLL_MINUTES (>0 → poll; 0 → push).
+	// SMB has no push mechanism at all (no change feed a client can subscribe
+	// to), so it is poll-only rather than poll-by-default.
 	defaultPoll := 0
-	if cfg.Source == config.SourceGoogleDrive {
+	if cfg.Source == config.SourceGoogleDrive || cfg.Source == config.SourceSMB {
 		defaultPoll = 2
 	}
 	pollMin := atoiOr(os.Getenv("SYNC_POLL_MINUTES"), defaultPoll)
+	if cfg.Source == config.SourceSMB && pollMin <= 0 {
+		return errors.New("SOURCE=smb cannot use push mode: SMB has no subscribable change feed; set SYNC_POLL_MINUTES>0")
+	}
 
 	// Push mode needs the webhook secret + public URL; poll mode needs neither.
 	if pollMin <= 0 {
@@ -210,7 +217,7 @@ func runServe(args []string) error {
 func runCreateSubscription(args []string) error {
 	fs := flag.NewFlagSet("create-subscription", flag.ExitOnError)
 	envFile := fs.String("env-file", "", "env file to load (default: .env if present)")
-	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive (overrides SOURCE)")
+	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive|smb (overrides SOURCE)")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
 		os.Setenv("SOURCE", *srcFlag)
@@ -332,6 +339,19 @@ func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir s
 			a = a.WithChannelStore(googledrive.FileChannelStore{Path: filepath.Join(stateDir, "google_drive_channel.json")})
 		}
 		return a, nil
+	case config.SourceSMB:
+		c, err := smb.New(smb.Config{
+			Host:     cfg.SMBHost,
+			Share:    cfg.SMBShare,
+			User:     cfg.SMBUser,
+			Password: cfg.SMBPassword,
+			Domain:   cfg.SMBDomain,
+			Root:     cfg.SMBRoot,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("smb client: %w", err)
+		}
+		return smb.NewAdapter(c), nil
 	default: // sharepoint
 		c := sharepoint.NewClient(cfg.AzureClientID, cfg.AzureTenantID, cfg.AzureClientSecret, cfg.SharePointSiteURL)
 		return sharepoint.NewAdapter(c, folderPath, cfg.GraphClientState), nil
@@ -341,10 +361,28 @@ func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir s
 // spaceName derives the default Goodmem space name for the configured source
 // (used only when GOODMEM_SPACE_ID is unset).
 func spaceName(cfg *config.Config) string {
-	if cfg.Source == config.SourceGoogleDrive {
+	switch cfg.Source {
+	case config.SourceGoogleDrive:
 		return "GoogleDrive_" + cfg.GoogleDriveID
+	case config.SourceSMB:
+		return "SMB_" + sanitizeSpaceName(cfg.SMBHost+"_"+cfg.SMBShare)
 	}
 	return syncer.SpaceNameFromSiteURL(cfg.SharePointSiteURL)
+}
+
+// sanitizeSpaceName reduces a host/share pair to characters that are safe in a
+// Goodmem space name (the SMB default space is derived from them).
+func sanitizeSpaceName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
 
 func buildGoodmem(cfg *config.Config) (*goodmem.Client, error) {
@@ -402,11 +440,11 @@ func configureLogging() {
 }
 
 func usage(w *os.File) {
-	fmt.Fprint(w, `connector — SharePoint / Google Drive → Goodmem sync
+	fmt.Fprint(w, `connector — SharePoint / Google Drive / Windows network drive → Goodmem sync
 
 Usage: connector <command> [flags]
 
-Source: set SOURCE=sharepoint|google-drive (or --source) on any syncing command.
+Source: set SOURCE=sharepoint|google-drive|smb (or --source) on any syncing command.
 
 Commands:
   sync-once            One-time full sync (flags: --env-file PATH, --source NAME, --dry-run)

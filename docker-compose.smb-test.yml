@@ -1,0 +1,34 @@
+# A disposable SMB server for the provider's live test.
+#
+# Samba is not a stand-in for "a real Windows share" — it is an independent
+# implementation of the same protocol, and a large share of the network drives
+# this connector will meet are NAS boxes running exactly this. What it does not
+# cover is noted in docs/permissions-smb.md (Kerberos against a real KDC, DFS
+# namespaces, NT ACL denial semantics, Windows case-insensitivity).
+#
+#   docker compose -f docker-compose.smb-test.yml up -d
+#   SMB_LIVE=1 SMB_HOST=127.0.0.1:1445 SMB_SHARE=data \
+#     SMB_USER=connector SMB_PASSWORD=Passw0rd123 \
+#     go test ./internal/providers/smb -run TestLive -v
+#   docker compose -f docker-compose.smb-test.yml down
+#
+# Port 1445 is used instead of 445 so the container needs no privileged port and
+# does not collide with a host SMB service.
+
+services:
+  smb:
+    image: dperson/samba
+    container_name: goodmem-smb-test
+    ports:
+      - "127.0.0.1:1445:445"
+    volumes:
+      - ./testdata/smbshare:/share:ro
+    command: >
+      -p
+      -u "connector;Passw0rd123"
+      -s "data;/share;yes;yes;no;connector;none;connector"
+    healthcheck:
+      test: ["CMD", "smbclient", "-L", "localhost", "-U", "connector%Passw0rd123"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

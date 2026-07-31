@@ -26,6 +26,14 @@ type Config struct {
 	GoogleDriveServiceAccountFile string // ...or a path to the JSON key file
 	GoogleDriveID                 string // the Shared Drive id
 
+	// SMB / Windows network drive — required when Source is "smb".
+	SMBHost     string // server host, optionally host:port (default port 445)
+	SMBShare    string // share name, from \\host\share
+	SMBUser     string
+	SMBPassword string
+	SMBDomain   string // AD domain or workgroup; optional for standalone servers
+	SMBRoot     string // optional subdirectory within the share ("" = whole share)
+
 	// Goodmem — required for a sync (unless the deploy provisions it).
 	GoodmemBaseURL    string
 	GoodmemAPIKey     string
@@ -70,6 +78,12 @@ func Load(envFile string) (*Config, error) {
 		GoogleDriveServiceAccount:     os.Getenv("GOOGLE_DRIVE_SA_JSON"),
 		GoogleDriveServiceAccountFile: os.Getenv("GOOGLE_DRIVE_SA_JSON_FILE"),
 		GoogleDriveID:                 os.Getenv("GOOGLE_DRIVE_ID"),
+		SMBHost:                       os.Getenv("SMB_HOST"),
+		SMBShare:                      os.Getenv("SMB_SHARE"),
+		SMBUser:                       os.Getenv("SMB_USER"),
+		SMBPassword:                   os.Getenv("SMB_PASSWORD"),
+		SMBDomain:                     os.Getenv("SMB_DOMAIN"),
+		SMBRoot:                       os.Getenv("SMB_ROOT"),
 		GoodmemBaseURL:                os.Getenv("GOODMEM_BASE_URL"),
 		GoodmemAPIKey:                 os.Getenv("GOODMEM_API_KEY"),
 		GoodmemSpaceID:                firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),
@@ -88,6 +102,12 @@ func Load(envFile string) (*Config, error) {
 
 // SourceGoogleDrive is the Google Drive source token (SOURCE / --source).
 const SourceGoogleDrive = "google-drive"
+
+// SourceSMB is the Windows-network-drive (SMB/CIFS) source token. It is named
+// for the protocol, not for Windows: the same share may be served by Windows
+// Server, Samba, or a NAS appliance, and calling it "windows" would be wrong
+// more often than right.
+const SourceSMB = "smb"
 
 // sourceFromEnv reads SOURCE, defaulting to "sharepoint". Case-insensitive.
 func sourceFromEnv() string {
@@ -155,13 +175,18 @@ func (c *Config) ValidateSync() error {
 		required["GOOGLE_DRIVE_ID"] = c.GoogleDriveID
 		// Auth is a service-account key (GOOGLE_DRIVE_SA_JSON / _FILE) or, if neither
 		// is set, Application Default Credentials — so the key is not required here.
+	case SourceSMB:
+		required["SMB_HOST"] = c.SMBHost
+		required["SMB_SHARE"] = c.SMBShare
+		required["SMB_USER"] = c.SMBUser
+		required["SMB_PASSWORD"] = c.SMBPassword
 	case "sharepoint":
 		required["AZURE_AD_CLIENT_ID"] = c.AzureClientID
 		required["AZURE_AD_TENANT_ID"] = c.AzureTenantID
 		required["AZURE_AD_CLIENT_SECRET"] = c.AzureClientSecret
 		required["SHAREPOINT_SITE_URL"] = c.SharePointSiteURL
 	default:
-		return fmt.Errorf("unknown SOURCE %q (want \"sharepoint\" or %q)", c.Source, SourceGoogleDrive)
+		return fmt.Errorf("unknown SOURCE %q (want \"sharepoint\", %q or %q)", c.Source, SourceGoogleDrive, SourceSMB)
 	}
 
 	var missing []string
