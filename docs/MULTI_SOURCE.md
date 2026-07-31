@@ -21,6 +21,7 @@ system works today see **[tech_details.md](tech_details.md)**; for running it se
 | Google Drive auth | **three** deploy-and-forget paths — service-account key, GCP-attached service account, workload identity federation — so the connector fits any customer IT policy. Paths 2 and 3 are verified end-to-end against real infrastructure (full sync, files reaching COMPLETED); path 1 is unverified only because our test org forbids key creation |
 | Google Drive trigger | **poll by default.** Google's `changes.watch` needs a domain-verified HTTPS endpoint; polling the Changes API needs nothing public and is equally incremental |
 | Memory-id namespace | per-source and permanent (`sharepoint.file.id`, `google-drive.file.id`) |
+| Sync direction | **one-way**, cloud drive → Goodmem. The drive is the single source of truth; the space is a *mirror* of it, not a store other writers share. A full sync therefore deletes anything in the space the drive does not have — that is the reconcile working, not data loss. Nothing is ever written back to the drive |
 
 ## Why this was a small conceptual leap
 
@@ -96,8 +97,11 @@ The per-provider differences that remain are catalogued in
 > sync reconciles the space against *its own* file set and deletes everything else
 > as orphaned — so two sources sharing a space form a standing wipe loop: each
 > full sync deletes the other's memories, which the other side re-adds, over and
-> over (re-embedding every cycle). `GRAPH_MAX_DELETE_RATIO` only trips above its
-> threshold (default 50%), so it won't reliably catch this.
+> over (re-embedding every cycle). `GRAPH_MAX_DELETE_RATIO` won't reliably catch
+> it: the guard fires on `deletes > ratio × total`, so two similarly-sized
+> sources sail straight past — 500 memories each means `500 > 0.5 × 1000` is
+> false, and all 500 are deleted. It was built to catch a *partial listing*, not
+> this.
 >
 > The defaults already prevent it: with `GOODMEM_SPACE_ID` unset each source
 > creates its own space (`SharePoint_<org>_<site>` vs `GoogleDrive_<driveId>`). The
@@ -115,10 +119,6 @@ The per-provider differences that remain are catalogued in
   switches it to push and removes the polling latency. Note a wildcard-DNS
   hostname (e.g. `nip.io`) yields a valid TLS certificate but **cannot** be
   domain-verified, so it is not sufficient for push.
-- **Source-filtered orphan deletion** — the Google Drive adapter stamps
-  `source: "google-drive"` into memory metadata; stamping SharePoint too and
-  filtering orphan deletion by it would make a shared space safe and retire the
-  one-space-per-source rule.
 - **Generalize the env knobs** that aren't provider-specific (`SHAREPOINT_MAX_FILE_MB`,
   the non-Graph `GRAPH_*` settings) to shared names.
 - **Streaming ingest** — hand `Open`'s `io.ReadCloser` straight to
