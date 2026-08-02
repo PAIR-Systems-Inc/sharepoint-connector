@@ -36,10 +36,14 @@ func (c Config) validateKerberos() error {
 		return errors.New("SMB_REALM is required for Kerberos (usually the AD domain in upper case, e.g. CORP.EXAMPLE.COM)")
 	}
 	hasKeytab := strings.TrimSpace(c.KeytabPath) != ""
-	hasCCache := strings.TrimSpace(c.CCachePath) != ""
+	// Resolve the cache the same way the initiator will, so a cache supplied via
+	// $KRB5CCNAME is accepted here too. Validating on the raw field instead would
+	// reject a configuration that would actually have worked.
+	hasCCache := resolveCCachePath(c.CCachePath) != ""
 	hasPassword := c.Password != ""
 	if !hasKeytab && !hasCCache && !hasPassword {
-		return errors.New("Kerberos needs one of SMB_KEYTAB (preferred for unattended runs), SMB_CCACHE, or SMB_PASSWORD")
+		return errors.New("Kerberos needs one of SMB_KEYTAB (preferred for unattended runs), " +
+			"SMB_CCACHE (or $KRB5CCNAME), or SMB_PASSWORD")
 	}
 	// A ccache already identifies its principal; the other two do not.
 	if !hasCCache && strings.TrimSpace(c.User) == "" {

@@ -43,6 +43,9 @@ type Config struct {
 	SMBKrb5Conf string // path to krb5.conf; defaults to /etc/krb5.conf
 	SMBSPN      string // override the derived cifs/<host> service principal
 
+	// SMBNamespace pins the identity namespace (default: host/share/root).
+	SMBNamespace string
+
 	// Goodmem — required for a sync (unless the deploy provisions it).
 	GoodmemBaseURL    string
 	GoodmemAPIKey     string
@@ -99,6 +102,7 @@ func Load(envFile string) (*Config, error) {
 		SMBCCache:                     os.Getenv("SMB_CCACHE"),
 		SMBKrb5Conf:                   os.Getenv("SMB_KRB5_CONF"),
 		SMBSPN:                        os.Getenv("SMB_SPN"),
+		SMBNamespace:                  os.Getenv("SMB_NAMESPACE"),
 		GoodmemBaseURL:                os.Getenv("GOODMEM_BASE_URL"),
 		GoodmemAPIKey:                 os.Getenv("GOODMEM_API_KEY"),
 		GoodmemSpaceID:                firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),

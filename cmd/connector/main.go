@@ -353,6 +353,7 @@ func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir s
 			CCachePath:   cfg.SMBCCache,
 			Krb5ConfPath: cfg.SMBKrb5Conf,
 			SPN:          cfg.SMBSPN,
+			Namespace:    cfg.SMBNamespace,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("smb client: %w", err)

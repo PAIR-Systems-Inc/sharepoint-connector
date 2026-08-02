@@ -61,6 +61,12 @@ type Config struct {
 	Domain   string // AD domain / workgroup; empty is fine for standalone servers
 	Root     string // optional subdirectory within the share ("" = whole share)
 
+	// Namespace pins the identity namespace for this share. Leave it empty to
+	// derive one from host/share/root (see Client.NamespaceKey). Set it when the
+	// way you address the server may change — swapping an IP for an FQDN would
+	// otherwise re-key every memory.
+	Namespace string
+
 	// Auth selects the mechanism: "ntlm" (default) or "kerberos". NTLM needs no
 	// infrastructure; Kerberos needs a KDC and is required where NTLM is
 	// disabled. The fields below apply only to Kerberos.
@@ -148,6 +154,38 @@ func (c *Client) Share() string { return c.cfg.Share }
 
 // Host is the configured server.
 func (c *Client) Host() string { return c.cfg.Host }
+
+// NamespaceKey identifies *which share* this client reads, and is folded into
+// the memory-id namespace.
+//
+// It has to be there. A file's identity is its path relative to the sync root,
+// and a relative path is not unique across servers — two shares that both
+// contain `notes.txt` would otherwise mint the same memory id. Goodmem enforces
+// global memory-id uniqueness, so the second share's file is rejected outright;
+// separate Goodmem spaces do not help. (SharePoint and Google Drive are immune:
+// their ids are provider-assigned and globally unique.)
+//
+// The root is included because two roots on the same share can each contain the
+// same relative path.
+//
+// Host is lower-cased and its port dropped, so `FS1:445` and `fs1` agree — but
+// an IP and an FQDN for the same server are still different keys. Set
+// SMB_NAMESPACE to pin the value when that could change.
+func (c *Client) NamespaceKey() string {
+	if s := strings.TrimSpace(c.cfg.Namespace); s != "" {
+		return s
+	}
+	host := c.cfg.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	root := walkRoot(c.cfg.Root)
+	if root == "." {
+		root = ""
+	}
+	return strings.ToLower(strings.TrimSpace(host)) + "/" +
+		strings.ToLower(strings.TrimSpace(c.cfg.Share)) + "/" + root
+}
 
 // Walk visits every readable, non-skipped file under the sync root, calling fn
 // for each. Walking is the only way to enumerate an SMB share, and it is also

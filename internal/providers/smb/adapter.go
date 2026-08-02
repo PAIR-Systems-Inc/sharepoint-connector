@@ -33,8 +33,13 @@ func (a *Adapter) Label() string { return "smb" }
 // so a file's identity is its path relative to the sync root. The practical
 // consequence is that renaming or moving a file reads as a delete plus an add
 // (the content is re-embedded under the new path) — unavoidable without a
-// server-side id. Never change this string once a share is live.
-func (a *Adapter) MemNamespace() string { return "smb.file.path" }
+// server-side id.
+//
+// The namespace is per-*share*, not merely per-provider, because a relative path
+// is not unique across servers — see Client.NamespaceKey. Never change it once a
+// share is live: host, share name and SMB_ROOT are all part of it, so pin
+// SMB_NAMESPACE if any of them might.
+func (a *Adapter) MemNamespace() string { return "smb.file.path:" + a.c.NamespaceKey() }
 
 func (a *Adapter) ListFiles(ctx context.Context) ([]source.FileInfo, error) {
 	var out []source.FileInfo

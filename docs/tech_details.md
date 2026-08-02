@@ -54,7 +54,7 @@ Settled choices, kept so they are not silently re-litigated. Several are
 | Google Drive auth | **three** deploy-and-forget paths — service-account key, GCP-attached service account, workload identity federation — so the connector fits any customer IT policy |
 | Google Drive trigger | **poll by default** — `changes.watch` needs a domain-verified HTTPS endpoint; polling the Changes API needs nothing public and is equally incremental |
 | SMB naming | source token **`smb`**, not `windows-network-drive` — the same share may be served by Windows Server, Samba or a NAS, so naming it after Windows would be wrong more often than right |
-| **SMB identity** | the **path** relative to `SMB_ROOT` — SMB has no stable file id. Not case-normalized (see [above](#smb-identity-and-its-consequences)). `SMB_ROOT` is therefore permanent too |
+| **SMB identity** | the **path** relative to `SMB_ROOT`, namespaced per *share* (`smb.file.path:<host>/<share>/<root>`) — SMB has no stable file id, and a path is not unique across servers while Goodmem memory ids are global. Not case-normalized (see [above](#smb-identity-and-its-consequences)). Host, share and `SMB_ROOT` are therefore all permanent; `SMB_NAMESPACE` pins them |
 | SMB auth | **NTLM and Kerberos.** NTLM needs no infrastructure and covers standalone servers, workgroups and NAS; Kerberos covers domains that have disabled NTLM, which Microsoft is progressively making the default |
 | SMB trigger | **poll only** — no change feed exists (see [above](#why-smb-polls)) |
 | SMB library | `cloudsoda/go-smb2` — maintained, NTLM + Kerberos, and the fork rclone depends on. Hand-rolling SMB2 was rejected: unlike the Graph client (750 lines of HTTPS + JSON) it would mean owning NTLMv2, SMB3 signing and encryption, and credit-based flow control |
@@ -149,6 +149,15 @@ that and are properties of the protocol, not bugs:
   the new path.
 - **`SMB_ROOT` is permanent.** Paths are stored relative to it, so changing it
   re-keys every memory.
+- **The namespace is per-*share*, not merely per-provider** —
+  `smb.file.path:<host>/<share>/<root>`. A relative path is not unique across
+  servers, and Goodmem enforces **global** memory-id uniqueness, so without the
+  share in the namespace two shares that each contain `notes.txt` mint the same
+  id and the second is rejected with a 409. Separate Goodmem spaces do not help.
+  (SharePoint and Drive are immune: their ids are provider-assigned and globally
+  unique.) The host is lower-cased and its port dropped, so `FS1:445` and `fs1`
+  agree — but an IP and an FQDN do not, so set `SMB_NAMESPACE` to pin the value
+  if the way you address the server might change.
 
 Deliberately *not* case-normalized. Verified against a real Windows share:
 `notes.txt`, `NOTES.TXT` and `Notes.Txt` all resolve to the same file, and the

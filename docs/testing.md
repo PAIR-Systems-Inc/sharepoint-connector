@@ -34,10 +34,16 @@ against real infrastructure.
 | Google Drive | 2 — GCP-attached service account | ✅ verified | GCE VM, keyless, full sync into Goodmem |
 | Google Drive | 3 — workload identity federation | ✅ verified | GitHub Actions off-GCP **and** a VM with a 403 negative control proving the attached SA could not have done the work |
 | SMB | NTLM | ✅ verified | Samba container and a real Windows share, over Tailscale |
-| SMB | Kerberos (keytab / ccache / password) | ⚠️ **supported, unverified** | config, SPN derivation, credential precedence, cache resolution and error mapping are unit-tested; **no ticket has been exchanged with a live KDC** |
+| SMB | Kerberos — keytab | ✅ verified | Samba AD DC (a real KDC); server logged `Successful AuthZ: [SMB2,krb5]`, then a full sync into Goodmem |
+| SMB | Kerberos — credential cache | ✅ verified | same KDC, both `SMB_CCACHE` and the `$KRB5CCNAME` fallback |
+| SMB | Kerberos — password | ✅ verified | same KDC |
 
-Two gaps are deliberate and both are recorded above rather than glossed: Drive
-path 1 and SMB Kerberos. Neither is believed broken; neither has been run.
+One gap is deliberate and recorded rather than glossed: Google Drive path 1,
+unverified only because our test org forbids key creation.
+
+**Not covered even by the Kerberos pass:** clock skew was never exercised live
+(the container shares the host clock, so there is nothing to skew), DFS
+namespaces, and Microsoft's own KDC — see the gold standard below.
 
 ---
 
@@ -122,18 +128,28 @@ same file, with the directory listing returning the canonical name).
 A workgroup laptop has no Domain Controller, so this is NTLM only. A client
 edition of Windows **cannot** be promoted to a DC — that needs Windows Server.
 
-### Samba AD DC — the Kerberos test (next)
+### Samba AD DC — the Kerberos test (done)
 
-Samba can run as a full Active Directory Domain Controller, which is a genuine
-Kerberos KDC plus a file server joined to the realm. Self-contained in Docker,
-no Windows required.
+`docker-compose.smb-krb-test.yml` runs Samba as a full Active Directory Domain
+Controller: a genuine Kerberos KDC plus a file server joined to the realm.
+Self-contained, no Windows required. The compose file documents the two
+non-obvious requirements (Debian's separate `samba-ad-provision` package, and
+`CAP_SYS_ADMIN` plus a non-overlayfs volume for the sysvol NT ACLs).
 
-Covers: krb5.conf loading, keytab parsing, the `cifs/<fqdn>` SPN, the ticket
-exchange, SPNEGO session setup, and — by deliberately skewing the clock — that
-the skew hint fires.
+Verified with it: TGT acquisition from a keytab, an AES256 service ticket for
+`cifs/<fqdn>`, SPNEGO session setup, all three credential sources, and a full
+sync into Goodmem. Confirmed **from the server side** — the client's own claim
+proves nothing, and an early run silently authenticated with NTLM while
+appearing to test Kerberos.
 
-Does not cover Microsoft-specific behavior: encryption-type negotiation and PAC
-handling are the plausible divergences.
+It also confirmed empirically that `cifs/<ip>` is refused with
+`KDC_ERR_S_PRINCIPAL_UNKNOWN`, which is why the connector rejects an IP in
+`SMB_HOST` up front.
+
+**Not covered:** clock skew (the container shares the host clock, so there is
+nothing to skew — the hint's text is unit-tested but has never fired against a
+real KDC), and Microsoft-specific behavior, where encryption-type negotiation
+and PAC handling are the plausible divergences.
 
 ### Windows Server AD — the gold standard
 

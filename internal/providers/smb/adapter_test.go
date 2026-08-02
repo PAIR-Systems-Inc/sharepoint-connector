@@ -297,11 +297,56 @@ func TestValidateWebhook_AlwaysRejects(t *testing.T) {
 func TestMemNamespaceIsStable(t *testing.T) {
 	a := newTestAdapter(t, testShare(), "")
 	// This value is permanent: changing it re-keys every memory ever written.
-	if got := a.MemNamespace(); got != "smb.file.path" {
-		t.Errorf("MemNamespace = %q, want smb.file.path", got)
+	if got := a.MemNamespace(); got != "smb.file.path:fs1/data/" {
+		t.Errorf("MemNamespace = %q, want smb.file.path:fs1/data/", got)
 	}
 	if got := a.Label(); got != "smb" {
 		t.Errorf("Label = %q, want smb", got)
+	}
+}
+
+// Memory ids are global in Goodmem, and an SMB identity is only a path relative
+// to the sync root — which is not unique across servers. Without the share in
+// the namespace, two shares that each contain notes.txt mint the same id and the
+// second is rejected with a 409. Found the hard way against a real share.
+func TestMemNamespace_DistinguishesShares(t *testing.T) {
+	ns := func(host, share, root string) string {
+		return NewAdapter(newWithFS(Config{Host: host, Share: share, User: "u", Root: root}, testShare())).MemNamespace()
+	}
+
+	distinct := map[string]string{
+		"different host":  ns("fs2", "data", ""),
+		"different share": ns("fs1", "other", ""),
+		"different root":  ns("fs1", "data", "sub"),
+	}
+	base := ns("fs1", "data", "")
+	for name, got := range distinct {
+		if got == base {
+			t.Errorf("%s: namespace %q collides with the base share", name, got)
+		}
+	}
+
+	// Addressing the same share differently must NOT re-key it.
+	for _, equivalent := range []string{
+		ns("FS1", "data", ""),     // host case
+		ns("fs1:445", "data", ""), // explicit default port
+		ns("fs1", "DATA", ""),     // share case
+		ns("fs1", "data", "/"),    // empty root spelled differently
+	} {
+		if equivalent != base {
+			t.Errorf("namespace %q should equal the base %q — the same share addressed differently", equivalent, base)
+		}
+	}
+}
+
+// SMB_NAMESPACE exists so an operator can pin identity when the way they address
+// the server may change (an IP today, an FQDN later).
+func TestMemNamespace_ExplicitOverride(t *testing.T) {
+	a := NewAdapter(newWithFS(Config{
+		Host: "10.0.0.5", Share: "data", User: "u", Namespace: "fileserver/Shared",
+	}, testShare()))
+	if got := a.MemNamespace(); got != "smb.file.path:fileserver/Shared" {
+		t.Errorf("MemNamespace = %q, want the pinned value", got)
 	}
 }
 

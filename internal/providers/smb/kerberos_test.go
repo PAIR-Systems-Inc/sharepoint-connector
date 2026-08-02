@@ -2,6 +2,7 @@ package smb
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -53,10 +54,22 @@ func TestValidate_AuthMethodSelection(t *testing.T) {
 			c.Realm = "CORP.EXAMPLE.COM"
 			c.CCachePath = "/tmp/krb5cc_1000"
 		}, ""},
+		// $KRB5CCNAME is a legitimate credential source, so it must satisfy the
+		// check too — validating the raw field alone rejected a configuration
+		// that would in fact have worked.
+		{"kerberos with KRB5CCNAME only", func(c *Config) {
+			c.Auth = "kerberos"
+			c.Realm = "CORP.EXAMPLE.COM"
+			os.Setenv("KRB5CCNAME", "FILE:/tmp/krb5cc_env")
+		}, ""},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Isolate each case from a developer's real Kerberos session and from
+			// whatever a previous case set: an inherited KRB5CCNAME satisfies the
+			// credential check and would mask the negative cases.
+			t.Setenv("KRB5CCNAME", "")
 			cfg := base
 			tc.mutate(&cfg)
 			err := cfg.Validate()

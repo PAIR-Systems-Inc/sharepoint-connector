@@ -1,0 +1,3 @@
+# The keytab and credential cache are generated at provision time.
+*
+!.gitignore

@@ -33,9 +33,27 @@ func TestLive_SMBShare(t *testing.T) {
 		Password: os.Getenv("SMB_PASSWORD"),
 		Domain:   os.Getenv("SMB_DOMAIN"),
 		Root:     os.Getenv("SMB_ROOT"),
+		// Kerberos. These must be read here or the test silently authenticates
+		// with NTLM while appearing to exercise Kerberos — which is worse than
+		// failing, because it reports success for a path it never touched.
+		Auth:         os.Getenv("SMB_AUTH"),
+		Realm:        os.Getenv("SMB_REALM"),
+		KeytabPath:   os.Getenv("SMB_KEYTAB"),
+		CCachePath:   os.Getenv("SMB_CCACHE"),
+		Krb5ConfPath: os.Getenv("SMB_KRB5_CONF"),
+		SPN:          os.Getenv("SMB_SPN"),
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Skipf("incomplete SMB config: %v", err)
+	}
+	// Say which mechanism is under test, so a passing run cannot be mistaken for
+	// coverage of the other one.
+	if cfg.usesKerberos() {
+		spn, _ := cfg.targetSPN()
+		t.Logf("auth: KERBEROS (realm=%s spn=%s keytab=%t ccache=%t)",
+			cfg.Realm, spn, cfg.KeytabPath != "", cfg.CCachePath != "")
+	} else {
+		t.Logf("auth: NTLM (user=%s domain=%s)", cfg.User, cfg.Domain)
 	}
 
 	c, err := New(cfg)

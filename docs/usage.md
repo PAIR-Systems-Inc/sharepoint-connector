@@ -223,8 +223,12 @@ they are worth knowing before you deploy:
   for the next full reconcile.
 - **A file's identity is its path.** SMB has no stable per-file id, so renaming or
   moving a file reads as a delete plus an add and the content is re-embedded under
-  the new path. This also means **`SMB_ROOT` is permanent**: paths are stored
-  relative to it, so changing it re-keys every memory in the space.
+  the new path. Because a path is not unique across servers — and Goodmem memory
+  ids are **global**, not per-space — the identity is namespaced by
+  `<host>/<share>/<root>`. So **host, share name and `SMB_ROOT` are all
+  permanent**: changing any of them re-keys every memory. If the way you address
+  the server might change (an IP today, an FQDN later), pin it with
+  `SMB_NAMESPACE=fileserver/Shared`.
 
 The connector skips machine noise that would otherwise become memories — Office
 lock files (`~$…`), `Thumbs.db`, `desktop.ini`, dotfiles, `$RECYCLE.BIN` and
