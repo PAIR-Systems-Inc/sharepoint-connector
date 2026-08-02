@@ -56,22 +56,64 @@ public URL**: it polls the share and pushes to Goodmem outbound only.
 
 ## D. Authentication method
 
-**NTLM** (username + password) is what the connector uses today, and it is what
-the values in the next section describe.
+Both mechanisms are supported. They differ only in the credential; the access
+granted in steps A–C is identical.
 
-*If your policy requires **Kerberos**,* tell us — the underlying library supports
-it via a credentials cache, and we will confirm the setup with you before you
-provision anything.
+| Method | Choose when | What IT provides |
+|---|---|---|
+| **1 — NTLM** | NTLM is permitted (standalone servers, workgroups, NAS, and most domains today) | username + password |
+| **2 — Kerberos** | Your domain has disabled NTLM, or policy requires Kerberos | a **keytab** for the service account |
+
+### Method 1 — NTLM
+
+Nothing further to configure. Send the username and password from step A.
+
+### Method 2 — Kerberos
+
+Export a **keytab** for the service account and send it securely. A keytab lets
+the connector obtain and renew its own tickets, which is what an unattended
+service needs — a credential cache would expire with nothing to renew it.
+
+```powershell
+ktpass -princ svc-goodmem@CORP.EXAMPLE.COM ^
+       -mapuser CORP\svc-goodmem ^
+       -crypto AES256-SHA1 -ptype KRB5_NT_PRINCIPAL ^
+       -pass * -out svc-goodmem.keytab
+```
+
+Please also confirm:
+
+- the **realm** (normally the AD domain in upper case, e.g. `CORP.EXAMPLE.COM`)
+- the **KDC / domain controller** is reachable from where the connector runs —
+  Kerberos needs the KDC as well as the file server
+- the file server's **SPN**, normally `cifs/fileserver.corp.example.com`
+
+> ⚠️ Two Kerberos requirements that cause confusing failures:
+> **the server must be addressed by FQDN** (an IP address has no registered SPN,
+> so the KDC will refuse to issue a ticket), and **clocks must agree** — Kerberos
+> rejects tickets when the client and KDC differ by more than ~5 minutes.
+>
+> Note also that `ktpass -pass *` **resets the account's password**, so export the
+> keytab before handing us credentials, and re-export it if the password is ever
+> changed — a keytab stops working the moment the password rotates.
 
 ---
 
 ## What to send us
 
+**Always:**
+
 - **Server hostname** (e.g. `fileserver.corp.example.com`) — and the port if not 445
 - **Share name** (the `Shared` in `\\fileserver\Shared`)
-- **Account username** and **password** (through your secret-sharing tool, not email)
+- **Account username**
 - **Domain / workgroup** name, if the server is domain-joined
 - *(Optional)* a **subdirectory** to limit the sync to, e.g. `Reports/2026`
+
+**Plus, for the chosen method:**
+
+- Method 1 (NTLM) → the account **password** (through your secret-sharing tool, not email)
+- Method 2 (Kerberos) → the **keytab** file (securely), the **realm**, and the file
+  server's **SPN** if it differs from `cifs/<hostname>`
 
 > ⚠️ Please treat the subdirectory as **permanent**. Each file's identity is its
 > path relative to that directory, so changing it later re-keys every document we

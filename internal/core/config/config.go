@@ -34,6 +34,15 @@ type Config struct {
 	SMBDomain   string // AD domain or workgroup; optional for standalone servers
 	SMBRoot     string // optional subdirectory within the share ("" = whole share)
 
+	// SMB authentication: "ntlm" (default) or "kerberos". The rest apply to
+	// Kerberos only.
+	SMBAuth     string
+	SMBRealm    string // Kerberos realm — normally the AD domain UPPER-CASED
+	SMBKeytab   string // path to a keytab (preferred for unattended runs)
+	SMBCCache   string // path to an existing credential cache; defaults to $KRB5CCNAME
+	SMBKrb5Conf string // path to krb5.conf; defaults to /etc/krb5.conf
+	SMBSPN      string // override the derived cifs/<host> service principal
+
 	// Goodmem — required for a sync (unless the deploy provisions it).
 	GoodmemBaseURL    string
 	GoodmemAPIKey     string
@@ -84,6 +93,12 @@ func Load(envFile string) (*Config, error) {
 		SMBPassword:                   os.Getenv("SMB_PASSWORD"),
 		SMBDomain:                     os.Getenv("SMB_DOMAIN"),
 		SMBRoot:                       os.Getenv("SMB_ROOT"),
+		SMBAuth:                       os.Getenv("SMB_AUTH"),
+		SMBRealm:                      os.Getenv("SMB_REALM"),
+		SMBKeytab:                     os.Getenv("SMB_KEYTAB"),
+		SMBCCache:                     os.Getenv("SMB_CCACHE"),
+		SMBKrb5Conf:                   os.Getenv("SMB_KRB5_CONF"),
+		SMBSPN:                        os.Getenv("SMB_SPN"),
 		GoodmemBaseURL:                os.Getenv("GOODMEM_BASE_URL"),
 		GoodmemAPIKey:                 os.Getenv("GOODMEM_API_KEY"),
 		GoodmemSpaceID:                firstEnv("GOODMEM_SPACE_ID", "SPACE_ID", "DEFAULT_SPACE_ID"),
@@ -170,6 +185,7 @@ func (c *Config) ValidateSync() error {
 		"GOODMEM_BASE_URL": c.GoodmemBaseURL,
 		"GOODMEM_API_KEY":  c.GoodmemAPIKey,
 	}
+	var missing []string
 	switch c.Source {
 	case SourceGoogleDrive:
 		required["GOOGLE_DRIVE_ID"] = c.GoogleDriveID
@@ -178,8 +194,25 @@ func (c *Config) ValidateSync() error {
 	case SourceSMB:
 		required["SMB_HOST"] = c.SMBHost
 		required["SMB_SHARE"] = c.SMBShare
-		required["SMB_USER"] = c.SMBUser
-		required["SMB_PASSWORD"] = c.SMBPassword
+		// Which credentials are needed depends on the mechanism. The provider
+		// re-checks this in depth; this is the early, friendly failure.
+		if strings.EqualFold(strings.TrimSpace(c.SMBAuth), "kerberos") {
+			required["SMB_REALM"] = c.SMBRealm
+			// A credential cache already names its principal; a keytab or a
+			// password does not.
+			if strings.TrimSpace(c.SMBCCache) == "" {
+				required["SMB_USER"] = c.SMBUser
+			}
+			if strings.TrimSpace(c.SMBKeytab) == "" &&
+				strings.TrimSpace(c.SMBCCache) == "" &&
+				strings.TrimSpace(c.SMBPassword) == "" &&
+				strings.TrimSpace(os.Getenv("KRB5CCNAME")) == "" {
+				missing = append(missing, "one of SMB_KEYTAB / SMB_CCACHE / SMB_PASSWORD (Kerberos credential)")
+			}
+		} else {
+			required["SMB_USER"] = c.SMBUser
+			required["SMB_PASSWORD"] = c.SMBPassword
+		}
 	case "sharepoint":
 		required["AZURE_AD_CLIENT_ID"] = c.AzureClientID
 		required["AZURE_AD_TENANT_ID"] = c.AzureTenantID
@@ -189,7 +222,6 @@ func (c *Config) ValidateSync() error {
 		return fmt.Errorf("unknown SOURCE %q (want \"sharepoint\", %q or %q)", c.Source, SourceGoogleDrive, SourceSMB)
 	}
 
-	var missing []string
 	for k, v := range required {
 		if strings.TrimSpace(v) == "" {
 			missing = append(missing, k)

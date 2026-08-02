@@ -341,12 +341,18 @@ func buildSource(ctx context.Context, cfg *config.Config, folderPath, stateDir s
 		return a, nil
 	case config.SourceSMB:
 		c, err := smb.New(smb.Config{
-			Host:     cfg.SMBHost,
-			Share:    cfg.SMBShare,
-			User:     cfg.SMBUser,
-			Password: cfg.SMBPassword,
-			Domain:   cfg.SMBDomain,
-			Root:     cfg.SMBRoot,
+			Host:         cfg.SMBHost,
+			Share:        cfg.SMBShare,
+			User:         cfg.SMBUser,
+			Password:     cfg.SMBPassword,
+			Domain:       cfg.SMBDomain,
+			Root:         cfg.SMBRoot,
+			Auth:         cfg.SMBAuth,
+			Realm:        cfg.SMBRealm,
+			KeytabPath:   cfg.SMBKeytab,
+			CCachePath:   cfg.SMBCCache,
+			Krb5ConfPath: cfg.SMBKrb5Conf,
+			SPN:          cfg.SMBSPN,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("smb client: %w", err)

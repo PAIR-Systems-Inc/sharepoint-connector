@@ -2,7 +2,8 @@
 
 Why this connector became a **multi-provider** one (module `goodmem-connectors`):
 a shared sync/observability **core** plus swappable source **providers**
-(SharePoint and Google Drive today), all shipping as **one binary**. Goodmem is
+(SharePoint, Google Drive and SMB/Windows network drives today), all shipping as
+**one binary**. Goodmem is
 always the destination.
 
 This is the *design record* — the rationale and how we got here. For how the
@@ -22,6 +23,7 @@ system works today see **[tech_details.md](tech_details.md)**; for running it se
 | Google Drive trigger | **poll by default.** Google's `changes.watch` needs a domain-verified HTTPS endpoint; polling the Changes API needs nothing public and is equally incremental |
 | SMB naming | source token **`smb`**, not `windows-network-drive` — the same share may be served by Windows Server, Samba or a NAS, so naming it after Windows would be wrong more often than right |
 | SMB identity | the **path** relative to `SMB_ROOT` (namespace `smb.file.path`) — SMB has no stable file id. Not case-normalized: a case-only rename churns one memory, but lowercasing would let two files differing only in case collide on a case-sensitive server, and collision is data loss where churn is not |
+| SMB auth | **NTLM and Kerberos.** NTLM needs no infrastructure and covers standalone servers, workgroups and NAS; Kerberos (keytab preferred, ccache and password also supported) covers domains that have disabled NTLM — which Microsoft is progressively making the default |
 | SMB trigger | **poll only.** No change feed exists; CHANGE_NOTIFY mandates a rescan fallback by design and no Go library implements it, and the NTFS change journal is a local-volume API SMB never exposes |
 | SMB library | `cloudsoda/go-smb2` — actively maintained, NTLM + Kerberos, and the fork rclone depends on. Hand-rolling SMB2 was rejected: unlike the Graph client (750 lines of HTTPS + JSON), it would mean owning NTLMv2, SMB3 signing and encryption, and credit-based flow control |
 | Memory-id namespace | per-source and permanent (`sharepoint.file.id`, `google-drive.file.id`, `smb.file.path`) |

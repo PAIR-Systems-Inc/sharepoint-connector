@@ -1,8 +1,8 @@
 # Technical details
 
-Internals of the **`connector`** binary: the provider-neutral sync engine, the two
-source providers (SharePoint and Google Drive), and how the file diff is computed
-and applied.
+Internals of the **`connector`** binary: the provider-neutral sync engine, the
+three source providers (SharePoint, Google Drive and SMB/Windows network drives),
+and how the file diff is computed and applied.
 
 See also: [README.md](../README.md) (overview + quickstart) · [usage.md](usage.md)
 (running, deploying, monitoring) · [MULTI_SOURCE.md](MULTI_SOURCE.md) (why the
@@ -26,7 +26,8 @@ internal/
 │   └── fakes/            #   in-process fake servers for integration tests
 └── providers/
     ├── sharepoint/       # Microsoft Graph client + Source adapter
-    └── googledrive/      # Google Drive v3 SDK client + Source adapter
+    ├── googledrive/      # Google Drive v3 SDK client + Source adapter
+    └── smb/              # SMB2/3 client (reached as an io/fs.FS) + Source adapter
 ```
 
 The engine never imports a provider package. Adding a source means implementing
@@ -40,7 +41,7 @@ Google types leak into the engine):
 
 | Method | Purpose |
 |---|---|
-| `Label()` | provider name for logs/metrics (`sharepoint`, `google-drive`) |
+| `Label()` | provider name for logs/metrics (`sharepoint`, `google-drive`, `smb`) |
 | `MemNamespace()` | **permanent** namespace for deterministic memory ids |
 | `ListFiles(ctx)` | every in-scope file — the full sync |
 | `LatestCursor(ctx)` | a cursor positioned at "now" (bootstrap) |
@@ -84,6 +85,7 @@ Everything below the adapter is identical; these are the only real differences.
 | Content type | supplied by Graph | supplied by Drive | **inferred from the extension** (SMB carries none) |
 | Deletion signal | delta item `deleted` facet | `removed=true` or `file.trashed=true` | **none** — found by the periodic full sync |
 | Rate-limit backoff | in the hand-rolled Graph client | in a retry transport under the SDK (the SDK itself never retries) | n/a (no server-side rate limit) |
+| Authentication | Azure AD client credentials | service-account / ADC / workload identity | **NTLM or Kerberos** (SPNEGO-negotiated) |
 | Memory-id namespace | `sharepoint.file.id` | `google-drive.file.id` | `smb.file.path` |
 | Default space name | `SharePoint_<org>_<site>` | `GoogleDrive_<driveId>` | `SMB_<host>_<share>` |
 

@@ -176,6 +176,31 @@ SMB_DOMAIN=CORP                        # optional for standalone servers
 SMB_ROOT=Reports/2026                  # optional; "" syncs the whole share
 ```
 
+**Kerberos**, where a domain has disabled NTLM (`SMB_AUTH` defaults to `ntlm`):
+
+```dotenv
+SMB_AUTH=kerberos
+SMB_HOST=fileserver.corp.example.com   # must be the FQDN — an IP has no registered SPN
+SMB_REALM=CORP.EXAMPLE.COM             # normally the AD domain, UPPER-CASED
+SMB_USER=svc-goodmem
+SMB_KEYTAB=/etc/goodmem/svc.keytab     # preferred: the connector renews its own tickets
+# SMB_CCACHE=/tmp/krb5cc_1000          # ...or an existing cache; defaults to $KRB5CCNAME
+# SMB_KRB5_CONF=/etc/krb5.conf         # default
+# SMB_SPN=cifs/other-name.corp.example.com   # override the derived cifs/<host>
+```
+
+A **keytab** is what an unattended connector wants: it can obtain and renew its own
+tickets. A credential cache works but holds a ticket that expires with nothing to
+renew it. A password also works (`SMB_PASSWORD` with `SMB_AUTH=kerberos`) and is
+fine for testing.
+
+Three Kerberos failures are common and their native errors don't suggest the fix,
+so the connector adds a hint to each: **clock skew** (client and KDC must agree
+within ~5 minutes), **an IP address in `SMB_HOST`** (Kerberos identifies the service
+by name, so use the FQDN), and **a stale keytab** (rotating the account's password
+invalidates it). The connector also needs network access to the **KDC**, not only to
+the file server.
+
 What IT needs to provide is in
 [permissions-smb.md](permissions-smb.md) — hand them that document.
 

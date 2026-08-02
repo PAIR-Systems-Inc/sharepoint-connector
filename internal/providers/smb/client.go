@@ -60,6 +60,21 @@ type Config struct {
 	Password string
 	Domain   string // AD domain / workgroup; empty is fine for standalone servers
 	Root     string // optional subdirectory within the share ("" = whole share)
+
+	// Auth selects the mechanism: "ntlm" (default) or "kerberos". NTLM needs no
+	// infrastructure; Kerberos needs a KDC and is required where NTLM is
+	// disabled. The fields below apply only to Kerberos.
+	Auth         string
+	Realm        string // Kerberos realm, normally the AD domain UPPER-CASED
+	KeytabPath   string // preferred for unattended runs — the connector renews its own tickets
+	CCachePath   string // an existing credential cache; defaults to $KRB5CCNAME
+	Krb5ConfPath string // defaults to /etc/krb5.conf
+	SPN          string // override the derived cifs/<host> service principal
+}
+
+// usesKerberos reports whether this config authenticates with Kerberos.
+func (c Config) usesKerberos() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Auth), AuthKerberos)
 }
 
 func (c Config) address() string {
@@ -76,7 +91,14 @@ func (c Config) Validate() error {
 		return errors.New("SMB_HOST is required")
 	case strings.TrimSpace(c.Share) == "":
 		return errors.New("SMB_SHARE is required")
-	case strings.TrimSpace(c.User) == "":
+	}
+	if c.usesKerberos() {
+		return c.validateKerberos()
+	}
+	if a := strings.TrimSpace(c.Auth); a != "" && !strings.EqualFold(a, AuthNTLM) {
+		return fmt.Errorf("unknown SMB_AUTH %q (want %q or %q)", a, AuthNTLM, AuthKerberos)
+	}
+	if strings.TrimSpace(c.User) == "" {
 		return errors.New("SMB_USER is required")
 	}
 	return nil
@@ -372,6 +394,22 @@ func (s staticMounter) mount(context.Context) (fs.FS, error) { return s.fsys, ni
 func (s staticMounter) invalidate()                          {}
 func (s staticMounter) Close() error                         { return nil }
 
+// newInitiator builds the SPNEGO credential for the configured mechanism.
+// Kerberos is resolved fresh on every (re)connect rather than cached, so a
+// reconnect after a long outage acquires a current ticket instead of replaying
+// an expired one.
+func newInitiator(cfg Config) (smb2.Initiator, error) {
+	if cfg.usesKerberos() {
+		cfg.CCachePath = resolveCCachePath(cfg.CCachePath)
+		return krb5Initiator(cfg)
+	}
+	return &smb2.NTLMInitiator{
+		User:     cfg.User,
+		Password: cfg.Password,
+		Domain:   cfg.Domain,
+	}, nil
+}
+
 // smbMounter holds the live SMB session and re-establishes it on demand.
 type smbMounter struct {
 	cfg Config
@@ -392,11 +430,11 @@ func (m *smbMounter) mount(ctx context.Context) (fs.FS, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
-	d := &smb2.Dialer{Initiator: &smb2.NTLMInitiator{
-		User:     m.cfg.User,
-		Password: m.cfg.Password,
-		Domain:   m.cfg.Domain,
-	}}
+	init, err := newInitiator(m.cfg)
+	if err != nil {
+		return nil, err
+	}
+	d := &smb2.Dialer{Initiator: init}
 	session, err := d.Dial(dialCtx, m.cfg.address())
 	if err != nil {
 		return nil, fmt.Errorf("smb connect %s: %w", m.cfg.address(), err)
