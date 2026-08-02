@@ -132,6 +132,8 @@ file's identity is its path — see [usage.md](docs/usage.md#windows-network-dri
 * **[permissions-sharepoint.md](docs/permissions-sharepoint.md)** ·
   **[permissions-google-drive.md](docs/permissions-google-drive.md)** ·
   **[permissions-smb.md](docs/permissions-smb.md)** — hand to IT.
+* **[testing.md](docs/testing.md)** — what is verified vs merely supported, how to
+  reproduce each check, and the known gaps.
 * **[MULTI_SOURCE.md](docs/MULTI_SOURCE.md)** — multi-source design decisions.
 * **[PRODUCTIONIZATION.md](PRODUCTIONIZATION.md)** — the production roadmap.
 

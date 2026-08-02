@@ -8,7 +8,8 @@ always the destination.
 
 This is the *design record* — the rationale and how we got here. For how the
 system works today see **[tech_details.md](tech_details.md)**; for running it see
-**[usage.md](usage.md)**.
+**[usage.md](usage.md)**; for what has actually been verified see
+**[testing.md](testing.md)**.
 
 ## Decisions (locked)
 

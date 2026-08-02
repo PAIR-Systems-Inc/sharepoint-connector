@@ -5,8 +5,9 @@ three source providers (SharePoint, Google Drive and SMB/Windows network drives)
 and how the file diff is computed and applied.
 
 See also: [README.md](../README.md) (overview + quickstart) · [usage.md](usage.md)
-(running, deploying, monitoring) · [MULTI_SOURCE.md](MULTI_SOURCE.md) (why the
-multi-source design looks the way it does).
+(running, deploying, monitoring) · [testing.md](testing.md) (what is verified vs
+merely supported) · [MULTI_SOURCE.md](MULTI_SOURCE.md) (why the multi-source
+design looks the way it does).
 
 ## Architecture
 

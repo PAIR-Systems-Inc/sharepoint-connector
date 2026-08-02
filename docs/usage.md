@@ -39,6 +39,10 @@ retries, metrics — is identical.
 
 ## Authentication
 
+> Which of the paths below have actually been exercised against real
+> infrastructure — and which are implemented but unproven — is tracked in
+> [testing.md](testing.md#support--verification-matrix).
+
 ### SharePoint (Azure AD)
 
 The connector authenticates as an **Azure AD application** with Microsoft Graph
