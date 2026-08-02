@@ -1,6 +1,7 @@
 # Usage
 
-How to sync a content source — **SharePoint** or **Google Drive** — into Goodmem
+How to sync a content source — **SharePoint**, **Google Drive** or a **Windows
+network drive** — into Goodmem
 with the **`connector`** binary, deploy the event-triggered listener, and monitor
 it. For a five-line quickstart, see [README.md](../README.md); this is the
 detailed reference.
@@ -246,6 +247,11 @@ GOODMEM_SPACE_ID=...     # or leave unset to auto-create a per-source space
 > memories forever (re-embedding every cycle). Leave `GOODMEM_SPACE_ID` unset and
 > each source creates its own space (`SharePoint_<org>_<site>` /
 > `GoogleDrive_<driveId>` / `SMB_<host>_<share>`).
+>
+> `GRAPH_MAX_DELETE_RATIO` will **not** reliably catch this: the guard fires on
+> `deletes > ratio × total`, so two similarly-sized sources sail past it — 500
+> memories each means `500 > 0.5 × 1000` is false, and all 500 are deleted. It was
+> built to catch a *partial listing*, not this.
 
 ## Verifying a deployment
 

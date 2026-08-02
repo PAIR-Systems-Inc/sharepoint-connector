@@ -1,8 +1,8 @@
 # Goodmem Connectors
 
 Keep a Goodmem space in sync with your content. One binary syncs from
-**SharePoint** or **Google Drive**, either **manually/periodically** or
-**event-triggered**.
+**SharePoint**, **Google Drive** or a **Windows network drive (SMB)**, either
+**manually/periodically** or **event-triggered**.
 
 ## How it works
 
@@ -125,7 +125,7 @@ file's identity is its path — see [usage.md](docs/usage.md#windows-network-dri
 
 ## Documentation
 
-* **[usage.md](docs/usage.md)** — the manual: authentication for both sources,
+* **[usage.md](docs/usage.md)** — the manual: authentication for all three sources,
   running and deploying, push vs poll, endpoints, monitoring, scope & limits, ops.
 * **[tech_details.md](docs/tech_details.md)** — internals: the `Source` interface,
   the sync engine, how the diff is computed and applied, safety guards.
@@ -134,8 +134,8 @@ file's identity is its path — see [usage.md](docs/usage.md#windows-network-dri
   **[permissions-smb.md](docs/permissions-smb.md)** — hand to IT.
 * **[testing.md](docs/testing.md)** — what is verified vs merely supported, how to
   reproduce each check, and the known gaps.
-* **[MULTI_SOURCE.md](docs/MULTI_SOURCE.md)** — multi-source design decisions.
-* **[PRODUCTIONIZATION.md](PRODUCTIONIZATION.md)** — the production roadmap.
+* **[roadmap.md](docs/roadmap.md)** — what isn't built yet, and how the connector
+  got here.
 
 ## Repo layout
 
@@ -157,14 +157,16 @@ goodmem-connectors/
 │   │   └── fakes/            #   In-process fake source/Goodmem servers for integration tests.
 │   └── providers/
 │       ├── sharepoint/       # Microsoft Graph client: auth, drive listing, delta, subscriptions, retry/backoff.
-│       └── googledrive/      # Google Drive v3 SDK client: listing, Changes API, export/download, push channels.
+│       ├── googledrive/      # Google Drive v3 SDK client: listing, Changes API, export/download, push channels.
+│       └── smb/              # SMB2/3 client (reached as an io/fs.FS): walk, download, NTLM + Kerberos.
 ├── deploy/alerts.yml         # Recommended Prometheus/Alertmanager rules.
 ├── deploy_fly_io.sh          # Deploy the listener (and optionally Goodmem) to Fly.io.
 ├── deploy_gcp.sh             # Deploy to a GCE VM — the keyless path for Google Drive (attached service account).
+├── docker-compose.smb-test.yml  # Disposable Samba share for the SMB live test.
 ├── Dockerfile                # Builds `connector` into a distroless static image.
 ├── fly_io.toml.template      # Fly config template (mounts the /data volume for durable state).
 ├── .env.example              # Documents every config variable.
-└── docs/                     # usage.md, tech_details.md, permissions-*.md, MULTI_SOURCE.md, architecture diagram.
+└── docs/                     # usage.md, tech_details.md, permissions-*.md, roadmap.md, architecture diagram.
 ```
 
 > **Note:** the Python files (`sharepoint_client.py`, `goodmem_client.py`,

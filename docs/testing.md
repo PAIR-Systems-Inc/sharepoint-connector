@@ -8,7 +8,7 @@ logic; a test against a **real server** proves we speak the protocol; a test
 nothing about the third, so this document tracks them separately.
 
 For internals see [tech_details.md](tech_details.md); for running the connector
-see [usage.md](usage.md).
+see [usage.md](usage.md); for what isn't built yet see [roadmap.md](roadmap.md).
 
 ---
 

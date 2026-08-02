@@ -6,8 +6,8 @@ and how the file diff is computed and applied.
 
 See also: [README.md](../README.md) (overview + quickstart) · [usage.md](usage.md)
 (running, deploying, monitoring) · [testing.md](testing.md) (what is verified vs
-merely supported) · [MULTI_SOURCE.md](MULTI_SOURCE.md) (why the multi-source
-design looks the way it does).
+merely supported) · [roadmap.md](roadmap.md) (what isn't built yet, and how we
+got here).
 
 ## Architecture
 
@@ -34,6 +34,31 @@ internal/
 The engine never imports a provider package. Adding a source means implementing
 one interface — the sync logic, endpoints, retries, metrics and ops surface are
 written once.
+
+## Design decisions & why
+
+Settled choices, kept so they are not silently re-litigated. Several are
+**permanent** once a tenant is live.
+
+| Decision | Choice and reasoning |
+|---|---|
+| Language | **Go**, one compiled binary — chiefly source protection: Python ships as readable source, a stripped binary does not. It also brought a production HTTP server, goroutines matching the webhook→worker model, static typing and a tiny interpreter-free image. *Honest caveat: a binary is a deterrent, not a vault — it still disassembles. Pair it with never embedding secrets, keeping sensitive IP server-side, and licensing terms.* |
+| Module & layout | `github.com/PAIR-Systems-Inc/goodmem-connectors`; one shared `core/`, one folder per provider under `providers/` |
+| Binary | **one**, provider chosen by `SOURCE` / `--source` |
+| Graph client | hand-rolled REST rather than the official SDK — smaller and easier to audit |
+| Provider naming | spelled out in full: `google-drive`, not `gdrive` — no legacy aliases |
+| `.env` precedence | the real process environment wins over `.env` (the Python PoC was the reverse). Deliberate: it matches how Fly and container secrets work |
+| Sync direction | **one-way**, source → Goodmem. The drive is the single source of truth and the space is a *mirror*, so a full sync deleting anything the source lacks is the reconcile working, not data loss. Nothing is ever written back |
+| **Memory-id namespace** | per-source and **permanent**: `sharepoint.file.id`, `google-drive.file.id`, `smb.file.path`. Changing one re-keys every memory |
+| Google Drive scope | a **Shared Drive**, read by a service account added as Viewer. My Drive (domain-wide delegation) is out of scope |
+| Google Drive auth | **three** deploy-and-forget paths — service-account key, GCP-attached service account, workload identity federation — so the connector fits any customer IT policy |
+| Google Drive trigger | **poll by default** — `changes.watch` needs a domain-verified HTTPS endpoint; polling the Changes API needs nothing public and is equally incremental |
+| SMB naming | source token **`smb`**, not `windows-network-drive` — the same share may be served by Windows Server, Samba or a NAS, so naming it after Windows would be wrong more often than right |
+| **SMB identity** | the **path** relative to `SMB_ROOT` — SMB has no stable file id. Not case-normalized (see [above](#smb-identity-and-its-consequences)). `SMB_ROOT` is therefore permanent too |
+| SMB auth | **NTLM and Kerberos.** NTLM needs no infrastructure and covers standalone servers, workgroups and NAS; Kerberos covers domains that have disabled NTLM, which Microsoft is progressively making the default |
+| SMB trigger | **poll only** — no change feed exists (see [above](#why-smb-polls)) |
+| SMB library | `cloudsoda/go-smb2` — maintained, NTLM + Kerberos, and the fork rclone depends on. Hand-rolling SMB2 was rejected: unlike the Graph client (750 lines of HTTPS + JSON) it would mean owning NTLMv2, SMB3 signing and encryption, and credit-based flow control |
+| State store | plain state files on a persistent volume, plus SQLite for sync history — no external datastore at single-tenant scale. Revisit only if HA / >1 machine becomes a goal |
 
 ## The `Source` interface
 
@@ -325,3 +350,14 @@ be different identities at the same time.
   domain-wide delegation, which is not implemented.
 - Metrics are named `connector_*` and carry a `source="<provider>"` label, so one
   dashboard/alert covers both providers; see [`deploy/alerts.yml`](../deploy/alerts.yml).
+
+## References
+
+Google Drive API surfaces the provider depends on:
+
+- [Retrieve changes (Changes API)](https://developers.google.com/workspace/drive/api/guides/manage-changes)
+- [changes.getStartPageToken](https://developers.google.com/workspace/drive/api/reference/rest/v3/changes/getStartPageToken)
+- [Notifications for resource changes (push / watch)](https://developers.google.com/workspace/drive/api/guides/push)
+- [Export MIME types for Google Workspace documents](https://developers.google.com/workspace/drive/api/guides/ref-export-formats)
+- [files.export (10 MB limit)](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/export)
+- [drive/v3 Go package](https://pkg.go.dev/google.golang.org/api/drive/v3)
