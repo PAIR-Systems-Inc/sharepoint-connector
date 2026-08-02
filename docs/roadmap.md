@@ -20,8 +20,10 @@ yet built.
 
 ### Sources & connectivity
 
-- **SMB Kerberos verification.** Implemented and unit-tested; no ticket has been
-  exchanged with a live KDC. See [testing.md](testing.md#samba-ad-dc--the-kerberos-test-next).
+- **SMB Kerberos against Microsoft's KDC.** Verified against a Samba AD DC
+  (keytab, credential cache and password); Microsoft's own KDC, GPO-enforced
+  NTLM blocking, and live clock-skew behavior remain untested. See
+  [testing.md](testing.md#windows-server-ad--the-gold-standard).
 - **DFS namespace support.** Untested against any implementation; our SMB
   library's referral handling is unverified. A direct server path sidesteps it.
 - **Google Drive push instead of polling.** Drive supports `changes.watch` and
