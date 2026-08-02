@@ -122,11 +122,15 @@ that and are properties of the protocol, not bugs:
 - **`SMB_ROOT` is permanent.** Paths are stored relative to it, so changing it
   re-keys every memory.
 
-Deliberately *not* case-normalized: Windows is case-insensitive, so a case-only
-rename does churn one memory — but lowercasing the identity would make two files
-differing only in case collide on a case-sensitive server (Samba on Linux), and
-one would silently overwrite the other. Churn is recoverable; collision is data
-loss.
+Deliberately *not* case-normalized. Verified against a real Windows share:
+`notes.txt`, `NOTES.TXT` and `Notes.Txt` all resolve to the same file, and the
+directory listing returns the canonical on-disk name — which is what feeds the
+identity, so stored paths stay stable. Two files differing only in case therefore
+cannot coexist on Windows, and the case-collision risk exists only on a
+case-sensitive server (Samba on Linux), where lowercasing the identity would make
+one file silently overwrite the other's memory. The cost of not normalizing is
+that a case-only rename churns one memory. Churn is recoverable; collision is
+data loss.
 
 ### Google Drive specifics
 

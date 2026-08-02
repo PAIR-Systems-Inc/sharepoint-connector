@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,8 +51,20 @@ func TestLive_SMBShare(t *testing.T) {
 
 	files, err := a.ListFiles(ctx)
 	if err != nil {
-		t.Fatalf("ListFiles: %v (authenticated, but enumeration failed — check that "+
-			"the account can read the share and that SMB_ROOT exists)", err)
+		// Distinguish the two failures that look alike from here. Connecting and
+		// enumerating are separate steps, and saying "authenticated, but…" when
+		// the logon itself was rejected sends you looking at share permissions
+		// when the problem is the credentials.
+		if strings.Contains(err.Error(), "smb connect") || strings.Contains(err.Error(), "smb mount") {
+			t.Fatalf("could not connect: %v\n"+
+				"  → the session never came up: check SMB_HOST reachability, and that "+
+				"SMB_USER/SMB_PASSWORD/SMB_DOMAIN are right (a local Windows account's "+
+				"domain is the computer name)", err)
+		}
+		t.Fatalf("ListFiles: %v\n"+
+			"  → connected, but enumeration failed: check that the account has read "+
+			"access at BOTH the share and NTFS layers (the stricter wins), and that "+
+			"SMB_ROOT exists", err)
 	}
 	if len(files) == 0 {
 		t.Fatal("listed 0 files; the test share should contain fixtures")
