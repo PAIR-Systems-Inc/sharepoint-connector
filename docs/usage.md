@@ -212,11 +212,15 @@ What IT needs to provide is in
 Three behaviors follow from the protocol rather than from this connector, and
 they are worth knowing before you deploy:
 
-- **Poll only — there is no push mode.** SMB has no change feed a client can
-  subscribe to. `SYNC_POLL_MINUTES` defaults to 2 and cannot be 0; there is no
-  webhook to expose, so the listener needs no public URL at all. (Details, and
-  why CHANGE_NOTIFY is viable but not yet available to us:
-  [tech_details.md](tech_details.md#why-smb-polls-today).)
+- **Event-driven, with polling underneath.** The listener subscribes to SMB2
+  change notifications, so edits usually sync within seconds rather than waiting
+  for the next poll — and **deletions trigger an immediate reconcile**, which a
+  timestamp-based poll cannot detect on its own. There is still no *webhook*:
+  notifications arrive on the connector's own outbound connection, so no public
+  URL is needed. `SYNC_POLL_MINUTES` cannot be 0, because notifications can drop
+  records (server-side overflow, a dropped connection) and the poll plus the
+  periodic full sync remain the guarantee. See
+  [tech_details.md](tech_details.md#why-smb-polls-today).
 - **Poll cost scales with latency × directory count**, not file count — each poll
   walks the tree, one round trip per directory. On a LAN that is seconds even for
   a large share; over a WAN or VPN it can exceed the poll interval. If syncs

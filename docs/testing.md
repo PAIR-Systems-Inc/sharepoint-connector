@@ -23,7 +23,7 @@ against real infrastructure.
 |---|---|---|---|
 | SharePoint | push (webhook) + poll | ✅ live Graph test | ✅ |
 | Google Drive | poll (push needs a domain-verified endpoint) | ✅ live Drive test | ✅ `.pdf`, `.xlsx`, `.doc` → `COMPLETED` |
-| SMB / Windows network drive | poll only | ✅ Samba **and** real Windows | ✅ all files `COMPLETED`, content retrievable |
+| SMB / Windows network drive | **event-driven** (SMB2 CHANGE_NOTIFY) + poll | ✅ Samba **and** real Windows | ✅ all files `COMPLETED`, content retrievable |
 
 ### Authentication paths
 
@@ -197,6 +197,30 @@ What it establishes:
 The probe was scaffolding, not a deliverable: an unsigned `.exe` is a poor thing
 to hand a customer, and once the connector speaks CHANGE_NOTIFY itself the same
 check belongs in the shipped binary as a subcommand.
+
+### Change-notification watcher
+
+Verified end-to-end against **both** Samba and a real Windows share, with
+`SYNC_POLL_MINUTES=30` and the periodic full sync disabled — so any sync within
+seconds proves it was event-driven rather than a timer:
+
+| Server | Event | Reaction |
+|---|---|---|
+| Samba | file added 22:33:22 | `[delta] done: +1` |
+| Samba | file deleted 22:34:09 | `[watch-deletion] full sync starting` **22:34:09**, `done: -1` |
+| Windows | file added 22:35:41 | `[delta] sync starting` **22:35:42**, `done: +1` |
+| Windows | file deleted 22:35:54 | `[watch-deletion] full sync starting` **22:35:55**, `done: -1` |
+
+The deletion cases are the significant ones: a timestamp walk cannot see a
+deleted file, so before this they waited for the periodic full sync.
+
+> ⚠️ **Recursive watching is not requested at the share root.** Windows accepts
+> `SMB2_WATCH_TREE` on a handle opened at the share root and then never completes
+> the request, while the same flag works on a named subdirectory and against
+> Samba. So the watcher only asks for recursion when `SMB_ROOT` names a
+> subdirectory; at the share root it watches shallowly and deeper changes wait
+> for the periodic reconcile. Tracked upstream in
+> [CloudSoda/go-smb2#64](https://github.com/CloudSoda/go-smb2/pull/64).
 
 ### Windows Server AD — the gold standard
 

@@ -129,6 +129,7 @@ func (l *Listener) Run(ctx context.Context) error {
 	go l.deltaWorker(ctx)          // single worker draining coalesced delta triggers (webhook or poll)
 	go l.periodicFullSyncLoop(ctx) // periodic safety full-sync (repairs anything missed)
 	go l.retentionLoop(ctx)        // prune old sync-history rows
+	go l.watchLoop(ctx)            // event-driven syncs where the source supports them (no-op otherwise)
 	if l.PollMinutes > 0 {
 		go l.periodicDeltaLoop(ctx) // poll mode: drive delta syncs on a timer instead of push notifications
 	}
@@ -253,6 +254,68 @@ func (l *Listener) runFull(tag string) error {
 		}
 	}
 	return err
+}
+
+// watchReconnectDelay bounds how fast a lost watch is re-established, so a
+// server that keeps refusing the handle cannot become a spin loop.
+const watchReconnectDelay = 5 * time.Second
+
+// watchLoop drives syncs from provider change notifications instead of waiting
+// for the poll timer, when the source supports it (source.ChangeWatcher).
+//
+// It does not replace the periodic loops, and must not: every notification
+// mechanism can drop records — a server-side buffer overflow, a dropped
+// connection — so the poll and the periodic full sync remain the guarantee while
+// this only lowers latency.
+//
+// A notification that may be a deletion asks for a full reconcile rather than a
+// delta, because a timestamp-based delta cannot see a deleted file: it is simply
+// absent, which is indistinguishable from unchanged.
+func (l *Listener) watchLoop(ctx context.Context) {
+	w, ok := l.Src.(source.ChangeWatcher)
+	if !ok {
+		return
+	}
+	l.server.Log("info", "change notifications enabled: syncing on source events (periodic loops remain as a safety net)")
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		res, err := w.WatchChanges(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			// The watch is gone, so changes during the gap were missed. Reconcile
+			// once the watch is back rather than trusting the delta cursor.
+			l.server.Log("warn", "[watch] lost: "+err.Error()+"; re-establishing")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(watchReconnectDelay):
+			}
+			l.requestReconcile("watch-reestablished")
+			continue
+		}
+		if !res.Changed {
+			continue
+		}
+		if res.ReconcileRecommended {
+			// A deletion, or a notification stream that lost records.
+			l.requestReconcile("watch-deletion")
+			continue
+		}
+		l.signal()
+	}
+}
+
+// requestReconcile runs a full sync, taking the sync lock so it cannot overlap a
+// delta already in flight.
+func (l *Listener) requestReconcile(reason string) {
+	l.syncMu.Lock()
+	defer l.syncMu.Unlock()
+	l.runFull(reason)
 }
 
 // periodicFullSyncLoop runs a safety full sync every FullSyncMinutes to reconcile

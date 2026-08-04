@@ -52,3 +52,5 @@ require (
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
 )
+
+replace github.com/cloudsoda/go-smb2 => github.com/PAIR-Systems-Inc/go-smb2 v0.0.0-20260804214040-0da7f66afdef

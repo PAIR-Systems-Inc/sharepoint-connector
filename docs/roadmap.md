@@ -24,17 +24,12 @@ yet built.
   (keytab, credential cache and password); Microsoft's own KDC, GPO-enforced
   NTLM blocking, and live clock-skew behavior remain untested. See
   [testing.md](testing.md#windows-server-ad--the-gold-standard).
-- **SMB2 CHANGE_NOTIFY** — event-driven SMB instead of a 2-minute walk, and the
-  only mechanism that reports **deletes and renames**, which an mtime walk cannot
-  see. Measured as viable against a real Windows share
-  ([testing.md](testing.md#windows-change-notify-probe)). Blocked only by the Go
-  ecosystem: both Go libraries leave the request/response sections as empty
-  placeholders, while Java, C, C# and Python all ship working implementations.
-  Plan: implement it in a fork of `cloudsoda/go-smb2` and upstream the PR — the
-  async/`STATUS_PENDING` machinery it needs is already there, so the missing
-  pieces are a request encoder, a response decoder, a `FILE_NOTIFY_INFORMATION`
-  parser and the filter constants. Polling stays the fallback regardless:
-  `STATUS_NOTIFY_ENUM_DIR` on overflow, and the watch dies with its handle.
+- **Recursive watching at the SMB share root.** Windows accepts
+  `SMB2_WATCH_TREE` on a handle opened at the share root and never completes the
+  request; it works on a named subdirectory and against Samba, and Windows' own
+  redirector watches a share root recursively without trouble. Likely how `"."`
+  is normalized in the create request. Until it is understood, the watcher is
+  shallow at the root and deeper changes wait for the periodic reconcile.
 - **SMB poll interval default.** SMB inherited Google Drive's 2-minute default,
   but the cost profiles differ completely: Drive's delta is one cheap API call
   proportional to *changes*, while SMB's walks the whole tree. A larger default

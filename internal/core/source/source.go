@@ -101,6 +101,30 @@ type Source interface {
 	ValidateWebhook(r *http.Request, body []byte) (WebhookResult, string)
 }
 
+// WatchResult is what one wait on a ChangeWatcher produced.
+type WatchResult struct {
+	// Changed reports that something changed and a delta sync should run.
+	Changed bool
+	// ReconcileRecommended asks for a full reconcile rather than only a delta.
+	// Set when the change may be a deletion — which a timestamp-based delta
+	// cannot see, because a deleted file is simply absent — or when the
+	// notification stream lost records and its own view is incomplete.
+	ReconcileRecommended bool
+}
+
+// ChangeWatcher is an optional Source capability: a provider that can be *told*
+// about changes instead of polling for them. The engine uses it to trigger
+// syncs promptly, while keeping its periodic loops as a safety net — every
+// notification mechanism this connector has met can drop records (buffer
+// overflow, a dropped connection), so a watcher reduces latency but never
+// replaces the reconcile.
+type ChangeWatcher interface {
+	// WatchChanges blocks until the source reports a change, ctx is cancelled,
+	// or the watch is lost. A returned error means the caller should re-establish
+	// the watch, having possibly missed changes in between.
+	WatchChanges(ctx context.Context) (WatchResult, error)
+}
+
 // ThrottleReporter is an optional Source capability: providers that back off on
 // rate limits call the hook before each backoff so the listener can surface it.
 type ThrottleReporter interface {
