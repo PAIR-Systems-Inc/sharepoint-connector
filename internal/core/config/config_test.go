@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -125,5 +127,65 @@ func TestEnvTruthy(t *testing.T) {
 		if envTruthy("GOODMEM_EXTRACT_PAGE_IMAGES") {
 			t.Errorf("envTruthy(%q) = true, want false", v)
 		}
+	}
+}
+
+// Layering exists so a per-source file can hold only that source's credentials
+// while shared settings live in one place. Precedence must be predictable:
+// the real environment beats every file, and among files the earliest wins —
+// which makes "most specific first" the natural way to order them.
+func TestLoad_LayersEnvFilesLeftToRight(t *testing.T) {
+	dir := t.TempDir()
+	specific := filepath.Join(dir, ".env.smb")
+	shared := filepath.Join(dir, ".env.shared")
+
+	if err := os.WriteFile(specific, []byte(
+		"SMB_HOST=fs-specific\nGOODMEM_BASE_URL=http://from-specific\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte(
+		"GOODMEM_BASE_URL=http://from-shared\nGOODMEM_API_KEY=key-from-shared\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{"SMB_HOST", "GOODMEM_BASE_URL", "GOODMEM_API_KEY", "SOURCE"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+
+	cfg, err := Load(specific, shared)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.SMBHost != "fs-specific" {
+		t.Errorf("SMBHost = %q, want it from the specific file", cfg.SMBHost)
+	}
+	// Defined in both: the earlier (more specific) file must win.
+	if cfg.GoodmemBaseURL != "http://from-specific" {
+		t.Errorf("GoodmemBaseURL = %q, want the earlier file to win", cfg.GoodmemBaseURL)
+	}
+	// Defined only in the later file: still picked up.
+	if cfg.GoodmemAPIKey != "key-from-shared" {
+		t.Errorf("GoodmemAPIKey = %q, want it filled in from the shared file", cfg.GoodmemAPIKey)
+	}
+}
+
+// A variable already present in the real environment must beat every file —
+// that is what makes container/Fly secrets authoritative in production.
+func TestLoad_RealEnvBeatsEveryFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, ".env")
+	if err := os.WriteFile(f, []byte("GOODMEM_API_KEY=from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOODMEM_API_KEY", "from-real-env")
+
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GoodmemAPIKey != "from-real-env" {
+		t.Errorf("GoodmemAPIKey = %q, want the real environment to win", cfg.GoodmemAPIKey)
 	}
 }

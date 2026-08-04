@@ -35,6 +35,19 @@ import (
 	"github.com/PAIR-Systems-Inc/goodmem-connectors/internal/providers/smb"
 )
 
+// envFileList collects repeated --env-file flags in the order given. Layering
+// lets a per-source file hold only that source's credentials while shared
+// settings (Goodmem, listener tuning) live in one place, instead of being copied
+// into every file where they would drift apart.
+type envFileList []string
+
+func (e *envFileList) String() string { return strings.Join(*e, ",") }
+
+func (e *envFileList) Set(v string) error {
+	*e = append(*e, v)
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage(os.Stderr)
@@ -67,7 +80,8 @@ func main() {
 
 func runSyncOnce(args []string) error {
 	fs := flag.NewFlagSet("sync-once", flag.ExitOnError)
-	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
+	var envFile envFileList
+	fs.Var(&envFile, "env-file", "env file to load; repeatable, earlier files win (default: .env if present)")
 	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive|smb (overrides SOURCE)")
 	dryRun := fs.Bool("dry-run", false, "compute the sync plan without changing Goodmem")
 	_ = fs.Parse(args)
@@ -75,7 +89,7 @@ func runSyncOnce(args []string) error {
 		os.Setenv("SOURCE", *srcFlag)
 	}
 
-	cfg, err := loadConfig(*envFile)
+	cfg, err := loadConfig(envFile)
 	if err != nil {
 		return err
 	}
@@ -127,14 +141,15 @@ func runSyncOnce(args []string) error {
 
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	envFile := fs.String("env-file", "", "env file to load (default: process env, plus .env if present)")
+	var envFile envFileList
+	fs.Var(&envFile, "env-file", "env file to load; repeatable, earlier files win (default: .env if present)")
 	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive|smb (overrides SOURCE)")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
 		os.Setenv("SOURCE", *srcFlag)
 	}
 
-	cfg, err := loadConfig(*envFile)
+	cfg, err := loadConfig(envFile)
 	if err != nil {
 		return err
 	}
@@ -216,14 +231,15 @@ func runServe(args []string) error {
 
 func runCreateSubscription(args []string) error {
 	fs := flag.NewFlagSet("create-subscription", flag.ExitOnError)
-	envFile := fs.String("env-file", "", "env file to load (default: .env if present)")
+	var envFile envFileList
+	fs.Var(&envFile, "env-file", "env file to load; repeatable, earlier files win (default: .env if present)")
 	srcFlag := fs.String("source", "", "content source: sharepoint|google-drive|smb (overrides SOURCE)")
 	_ = fs.Parse(args)
 	if *srcFlag != "" {
 		os.Setenv("SOURCE", *srcFlag)
 	}
 
-	cfg, err := loadConfig(*envFile)
+	cfg, err := loadConfig(envFile)
 	if err != nil {
 		return err
 	}
@@ -289,13 +305,13 @@ func runWatch(args []string) error {
 
 // loadConfig loads from envFile (or .env when present) and validates the fields
 // common to all syncing commands.
-func loadConfig(envFile string) (*config.Config, error) {
-	if envFile == "" {
+func loadConfig(files envFileList) (*config.Config, error) {
+	if len(files) == 0 {
 		if _, err := os.Stat(".env"); err == nil {
-			envFile = ".env"
+			files = envFileList{".env"}
 		}
 	}
-	cfg, err := config.Load(envFile)
+	cfg, err := config.Load(files...)
 	if err != nil {
 		return nil, err
 	}
@@ -454,9 +470,9 @@ Usage: connector <command> [flags]
 Source: set SOURCE=sharepoint|google-drive|smb (or --source) on any syncing command.
 
 Commands:
-  sync-once            One-time full sync (flags: --env-file PATH, --source NAME, --dry-run)
-  serve                Run the webhook listener + sync engine (--env-file PATH, --source NAME)
-  create-subscription  Create or renew the change subscription (--env-file PATH, --source NAME)
+  sync-once            One-time full sync (flags: --env-file PATH (repeatable), --source NAME, --dry-run)
+  serve                Run the webhook listener + sync engine (--env-file PATH (repeatable), --source NAME)
+  create-subscription  Create or renew the change subscription (--env-file PATH (repeatable), --source NAME)
   watch                Monitor a listener's activity log (watch [-n SECS] <base-url>)
   help                 Show this help
 `)

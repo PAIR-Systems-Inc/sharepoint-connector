@@ -27,6 +27,48 @@ go build -o connector ./cmd/connector
 
 By default each command loads `.env` if present; `--env-file` overrides.
 
+## Config files
+
+Config comes from the environment. `.env` is loaded automatically when present;
+`--env-file` selects another, and **may be repeated**.
+
+### One file per source
+
+Keeping each source's credentials in its own file avoids one `.env` holding
+secrets for three unrelated systems. `.gitignore` already covers `.env.*`, so
+these are never committed:
+
+```bash
+./connector serve     --env-file .env.smb
+./connector sync-once --env-file .env.sharepoint --source sharepoint
+```
+
+### Layering, to avoid copying shared settings
+
+Goodmem's URL and key, the poll interval, size caps and retention are the same
+whatever the source. Rather than duplicating them into every file — where they
+drift — layer a shared file underneath:
+
+```bash
+./connector serve --env-file .env.smb --env-file .env.shared
+```
+
+Precedence runs **left to right, and the real environment always wins**:
+
+```
+real environment  >  .env.smb  >  .env.shared
+```
+
+So list the **most specific file first**. A variable already set in the process
+environment (a container's environment, a Fly secret) beats every file, which is
+what keeps production secrets authoritative.
+
+[`.env.example`](../.env.example) documents every variable in one place, grouped
+by source — copy the groups you need into whichever files you choose.
+
+> Keep these files readable only by the user running the connector
+> (`chmod 600 .env*`): they hold client secrets, API keys and share passwords.
+
 ## Choosing the source
 
 Set **`SOURCE=sharepoint`** (default), **`SOURCE=google-drive`** or

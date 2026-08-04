@@ -72,12 +72,24 @@ type Config struct {
 	ExtractPageImages bool
 }
 
-// Load reads configuration from the process environment. If envFile is
-// non-empty and exists, its KEY=VALUE lines are loaded first for any variable
-// not already set in the environment (real env wins, matching Fly secrets).
-func Load(envFile string) (*Config, error) {
-	if envFile != "" {
-		if err := loadDotEnv(envFile); err != nil {
+// Load reads configuration from the process environment, optionally layering in
+// one or more env files.
+//
+// A file only sets variables that are not already set, so precedence runs
+// left to right and the real environment always wins:
+//
+//	real env  >  first file  >  second file  >  …
+//
+// That makes "most specific first" the natural order — e.g.
+// `--env-file .env.smb --env-file .env.shared` lets the SMB file override
+// shared defaults, while real environment variables (Fly secrets, a container's
+// environment) still beat both.
+func Load(envFiles ...string) (*Config, error) {
+	for _, f := range envFiles {
+		if f == "" {
+			continue
+		}
+		if err := loadDotEnv(f); err != nil {
 			return nil, err
 		}
 	}
