@@ -214,9 +214,14 @@ they are worth knowing before you deploy:
 
 - **Poll only — there is no push mode.** SMB has no change feed a client can
   subscribe to. `SYNC_POLL_MINUTES` defaults to 2 and cannot be 0; there is no
-  webhook to expose, so the listener needs no public URL at all. (Details and
-  why the protocol's CHANGE_NOTIFY isn't a substitute:
-  [tech_details.md](tech_details.md#why-smb-polls).)
+  webhook to expose, so the listener needs no public URL at all. (Details, and
+  why CHANGE_NOTIFY is viable but not yet available to us:
+  [tech_details.md](tech_details.md#why-smb-polls-today).)
+- **Poll cost scales with latency × directory count**, not file count — each poll
+  walks the tree, one round trip per directory. On a LAN that is seconds even for
+  a large share; over a WAN or VPN it can exceed the poll interval. If syncs
+  start overlapping, **move the listener closer to the file server** before
+  raising the interval, and consider scoping with `SMB_ROOT`.
 - **Deletions are found by the periodic full sync, not the poll.** A deleted file
   is simply absent, which is indistinguishable from "unchanged" when comparing
   modification times. The poll finds new and modified files quickly; removals wait

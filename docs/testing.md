@@ -151,6 +151,53 @@ nothing to skew — the hint's text is unit-tested but has never fired against a
 real KDC), and Microsoft-specific behavior, where encryption-type negotiation
 and PAC handling are the plausible divergences.
 
+### Windows change-notify probe
+
+A one-off Windows probe answered whether SMB2 CHANGE_NOTIFY is worth
+implementing, by watching a UNC path with `ReadDirectoryChangesW` — which is the
+Windows redirector issuing CHANGE_NOTIFY and unpacking the reply. The records it
+prints *are* `FILE_NOTIFY_INFORMATION` structures from the SMB2 response, so this
+also fixes the semantics any Go implementation must reproduce.
+
+Measured against a real Windows share:
+
+```
+16:19:36.350  MODIFIED      notes.txt
+16:19:38.356  ADDED         brand-new.txt
+16:19:38.361  MODIFIED      brand-new.txt
+16:19:40.394  RENAMED_FROM  brand-new.txt
+16:19:40.394  RENAMED_TO    renamed.txt
+16:19:42.398  REMOVED       renamed.txt
+16:19:44.408  MODIFIED      Reports\2026
+16:19:44.455  ADDED         Reports\2026\deep
+16:19:46.413  ADDED         Reports\2026\deep\nested.txt
+```
+
+What it establishes:
+
+- **`REMOVED` is reported.** Deletions are invisible to an mtime walk, so this is
+  the single biggest functional gain — today they surface only on the periodic
+  full reconcile.
+- **Renames arrive as a `RENAMED_FROM` / `RENAMED_TO` pair** in the same
+  millisecond, so a rename need not be a delete plus a re-embed.
+- **`WATCH_TREE` covers directories created *after* the watch starts** —
+  `deep` was created mid-run and its contents were still reported. This is the
+  case a naive implementation misses.
+- Paths are **relative to the watched root**, backslash-separated.
+- **~2 records per logical edit** (`ADDED` then `MODIFIED`), plus a `MODIFIED` on
+  the parent directory — modest, and within what the listener's existing
+  coalescing handles.
+- Latency was **~5 ms**, against a 2-minute poll.
+
+> ⚠️ **Synchronous `ReadDirectoryChangesW` fails over a network redirector** with
+> `ERROR_NOACCESS`. A network watch must use **overlapped I/O** — open the handle
+> with `FILE_FLAG_OVERLAPPED` and wait on an event. This is not called out in the
+> obvious documentation and costs an afternoon to rediscover.
+
+The probe was scaffolding, not a deliverable: an unsigned `.exe` is a poor thing
+to hand a customer, and once the connector speaks CHANGE_NOTIFY itself the same
+check belongs in the shipped binary as a subcommand.
+
 ### Windows Server AD — the gold standard
 
 The faithful test, because it is Microsoft's own KDC and the same GPO machinery a

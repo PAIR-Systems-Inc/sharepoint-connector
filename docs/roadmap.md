@@ -24,6 +24,22 @@ yet built.
   (keytab, credential cache and password); Microsoft's own KDC, GPO-enforced
   NTLM blocking, and live clock-skew behavior remain untested. See
   [testing.md](testing.md#windows-server-ad--the-gold-standard).
+- **SMB2 CHANGE_NOTIFY** — event-driven SMB instead of a 2-minute walk, and the
+  only mechanism that reports **deletes and renames**, which an mtime walk cannot
+  see. Measured as viable against a real Windows share
+  ([testing.md](testing.md#windows-change-notify-probe)). Blocked only by the Go
+  ecosystem: both Go libraries leave the request/response sections as empty
+  placeholders, while Java, C, C# and Python all ship working implementations.
+  Plan: implement it in a fork of `cloudsoda/go-smb2` and upstream the PR — the
+  async/`STATUS_PENDING` machinery it needs is already there, so the missing
+  pieces are a request encoder, a response decoder, a `FILE_NOTIFY_INFORMATION`
+  parser and the filter constants. Polling stays the fallback regardless:
+  `STATUS_NOTIFY_ENUM_DIR` on overflow, and the watch dies with its handle.
+- **SMB poll interval default.** SMB inherited Google Drive's 2-minute default,
+  but the cost profiles differ completely: Drive's delta is one cheap API call
+  proportional to *changes*, while SMB's walks the whole tree. A larger default
+  (5–10 min) is probably more defensible; the latency cost is small next to the
+  load avoided. A product call about freshness vs load.
 - **DFS namespace support.** Untested against any implementation; our SMB
   library's referral handling is unverified. A direct server path sidesteps it.
 - **Google Drive push instead of polling.** Drive supports `changes.watch` and
@@ -155,3 +171,32 @@ including every hardening item above.
 - **SMB / Windows network drives**: a third source reached as a standard
   `io/fs.FS`, poll-only because the protocol has no usable change feed, with NTLM
   and Kerberos. Required raising the module to Go 1.25.
+
+---
+
+## Appendix: event-driven SMB — the full option space
+
+Surveyed while deciding how to escape SMB's 2-minute poll. Recorded so the
+analysis is not repeated.
+
+| Mechanism | Runs where | Verdict |
+|---|---|---|
+| **SMB2 CHANGE_NOTIFY** | client, remote | ✅ the only universal remote option — see Todo |
+| inotify on a CIFS mount | client, remote | ❌ **architecturally impossible** — the kernel cannot see another client's changes; Linux CIFS inotify support is partial and always will be |
+| **NTFS USN change journal** | on the file server | ⚠️ best feed available, but needs an agent **and administrator rights**; NTFS-only, per-volume, wraps and resets |
+| `ReadDirectoryChangesW` locally | on the file server | ⚠️ same agent cost, same overflow semantics |
+| FSRM file screens → run command | on the file server | ❌ built to block file *types*, not a change feed |
+| **NetApp FPolicy** | external listener | ✅ **no agent on the filer** — vendor-specific |
+| **Dell EMC CEE / CEPA** | external listener | ✅ **no agent on the filer** — vendor-specific |
+| Samba `full_audit` VFS | server config | ⚠️ syslog stream, needs an `smb.conf` change — Samba only |
+| Kernel netfs notifications | client | ⏳ discussed since 2022, not usable |
+
+Two things worth remembering:
+
+- **Every option still needs the full walk.** CHANGE_NOTIFY overflows, the USN
+  journal wraps, event listeners miss records while disconnected. Nothing here
+  lets the polling path be deleted — only run less often.
+- **FPolicy and CEE are the enterprise answer** and need no software on the
+  storage: the filer pushes events to a listener we run. If a customer at a scale
+  where polling hurts runs NetApp or Isilon/PowerScale, this is a first-class
+  option, and it is the integration path their storage team already expects.

@@ -56,7 +56,7 @@ Settled choices, kept so they are not silently re-litigated. Several are
 | SMB naming | source token **`smb`**, not `windows-network-drive` — the same share may be served by Windows Server, Samba or a NAS, so naming it after Windows would be wrong more often than right |
 | **SMB identity** | the **path** relative to `SMB_ROOT`, namespaced per *share* (`smb.file.path:<host>/<share>/<root>`) — SMB has no stable file id, and a path is not unique across servers while Goodmem memory ids are global. Not case-normalized (see [above](#smb-identity-and-its-consequences)). Host, share and `SMB_ROOT` are therefore all permanent; `SMB_NAMESPACE` pins them |
 | SMB auth | **NTLM and Kerberos.** NTLM needs no infrastructure and covers standalone servers, workgroups and NAS; Kerberos covers domains that have disabled NTLM, which Microsoft is progressively making the default |
-| SMB trigger | **poll only** — no change feed exists (see [above](#why-smb-polls)) |
+| SMB trigger | **poll only** — no change feed exists (see [above](#why-smb-polls-today)) |
 | SMB library | `cloudsoda/go-smb2` — maintained, NTLM + Kerberos, and the fork rclone depends on. Hand-rolling SMB2 was rejected: unlike the Graph client (750 lines of HTTPS + JSON) it would mean owning NTLMv2, SMB3 signing and encryption, and credit-based flow control |
 | State store | plain state files on a persistent volume, plus SQLite for sync history — no external datastore at single-tenant scale. Revisit only if HA / >1 machine becomes a goal |
 
@@ -115,29 +115,58 @@ Everything below the adapter is identical; these are the only real differences.
 | Memory-id namespace | `sharepoint.file.id` | `google-drive.file.id` | `smb.file.path` |
 | Default space name | `SharePoint_<org>_<site>` | `GoogleDrive_<driveId>` | `SMB_<host>_<share>` |
 
-### Why SMB polls
+### Why SMB polls today
 
-SharePoint and Drive both expose a change feed. SMB has neither a feed nor a
-usable push mechanism, and the two candidates fail for different reasons:
+SharePoint and Drive expose a change feed; SMB does not. But the framing
+"polling because nothing else exists" is too strong, and worth stating precisely.
 
-- **SMB2 CHANGE_NOTIFY** is in the protocol and does work remotely, but it cannot
-  stand alone. The server buffers change records against an open directory handle
-  and, when they overflow the client's buffer, returns `STATUS_NOTIFY_ENUM_DIR` —
-  "too many changes, re-enumerate yourself". So the protocol *requires* a rescan
-  fallback, and it gives up precisely when the share is busiest. The watch also
-  dies silently with its handle on any reconnect, support varies across Samba and
-  NAS implementations, and no Go SMB library implements it (verified against both
-  `cloudsoda/go-smb2` and `hirochachacha/go-smb2`).
-- **The NTFS change journal (USN)** is not merely unreliable over the network — it
-  is *unreachable*. It is read with `DeviceIoControl(FSCTL_READ_USN_JOURNAL)`
-  against a **volume** handle, needing local access and administrator rights. SMB
-  never exposes it. It would only be an option if we shipped an agent onto the
-  file server itself, which is a different product shape.
+**The walk is the floor, not the compromise.** Every event mechanism SMB offers
+has a failure mode that loses records, so a full walk is required as the fallback
+in *any* design. Notification reduces how often we hit that floor; it can never
+replace it.
 
-Since a full walk is needed as the fallback in every design, it is the
-foundation rather than the compromise: the walk finds modified files by
-timestamp, and the periodic full sync reconciles deletions. Notification could
-later reduce latency, but it could never replace the walk.
+**SMB2 CHANGE_NOTIFY is real and usable.** It has existed since SMB 2.0.2
+(Vista / Server 2008), unchanged through 3.1.1, so any SMB2+ server has it. We
+measured its behavior against a real Windows share (see
+[testing.md](testing.md#windows-change-notify-probe)) and it reports exactly what
+an mtime walk cannot — deletes and renames. Its limits are genuine but bounded:
+the server buffers records against an open directory handle and returns
+`STATUS_NOTIFY_ENUM_DIR` on overflow ("re-enumerate yourself"), the watch dies
+with its handle on reconnect, and behavior varies across Samba and NAS
+implementations.
+
+What actually blocks it is the **Go ecosystem**, not the protocol. Every other
+major implementation has it — Java (SMBJ), C (libsmb2), C# (SMBLibrary), Python
+(smbprotocol, impacket) — while both Go libraries leave the request/response
+sections as empty placeholders. Closing that gap is tracked in
+[roadmap.md](roadmap.md).
+
+**The NTFS change journal (USN)** is not merely unreliable over the network — it
+is *unreachable*. It is read with `DeviceIoControl(FSCTL_READ_USN_JOURNAL)`
+against a **volume** handle, needing local access and administrator rights, and
+SMB never exposes it. It would require shipping an agent onto the file server,
+which is a different product shape. It also wraps and resets, so it too needs the
+walk as a fallback.
+
+There is no Microsoft SMB client SDK in any language. The authority is the
+[MS-SMB2] open specification; on Windows the "SDK" is the OS redirector, reached
+through Win32 (`ReadDirectoryChangesW` on a UNC path issues CHANGE_NOTIFY for
+you).
+
+### What the walk actually costs
+
+Worth knowing before assuming a large share is unworkable. `go-smb2` enumerates
+with `FileIdBothDirectoryInformation`, and the returned `DirEntry.Info()` is
+**cached** — names, sizes and timestamps all arrive in the directory listing. So
+a walk costs:
+
+- **one round trip per _directory_**, not per file
+- parsing proportional to total entries
+
+The dominant term is therefore **network latency × directory count**. A
+100,000-file share in 5,000 directories is ~5,000 round trips: a few seconds on a
+LAN, but minutes over a WAN or VPN. When a poll cannot keep up, the first lever
+is *where the listener runs*, not what it runs on.
 
 ### SMB identity and its consequences
 

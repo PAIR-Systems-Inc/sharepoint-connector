@@ -137,7 +137,7 @@ step B.
 - **No write access** of any kind.
 - **No administrator rights** on the file server. (Windows' change journal would
   need them, but the connector deliberately does not use it — see
-  [tech_details.md](tech_details.md#why-smb-polls).)
+  [tech_details.md](tech_details.md#why-smb-polls-today).)
 - **No inbound firewall rule, public DNS name, or TLS certificate** — unlike the
   SharePoint connector's webhook, this source polls and needs no callback URL.
 - **No changes to the share's configuration** — no auditing, no notifications,
