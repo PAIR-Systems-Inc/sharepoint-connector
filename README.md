@@ -125,8 +125,10 @@ file's identity is its path — see [usage.md](docs/usage.md#windows-network-dri
 
 ## Documentation
 
-* **[usage.md](docs/usage.md)** — the manual: authentication for all three sources,
-  running and deploying, push vs poll, endpoints, monitoring, scope & limits, ops.
+* **[usage.md](docs/usage.md)** — the manual. Start with
+  [what each source supports](docs/usage.md#what-each-source-supports) (connection
+  and sync modes side by side), then authentication, running and deploying,
+  endpoints, monitoring, scope & limits, ops.
 * **[tech_details.md](docs/tech_details.md)** — internals: the `Source` interface,
   the sync engine, how the diff is computed and applied, safety guards.
 * **[permissions-sharepoint.md](docs/permissions-sharepoint.md)** ·

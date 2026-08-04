@@ -38,6 +38,46 @@ retries, metrics — is identical.
 ./connector sync-once --source google-drive
 ```
 
+## What each source supports
+
+### Connection
+
+| | SharePoint | Google Drive | Windows network drive (SMB) |
+|---|---|---|---|
+| **Protocol** | HTTPS → Microsoft Graph | HTTPS → Google APIs | SMB2/3 over **TCP 445** |
+| **Authentication** | Azure AD app (client credentials) | **three** paths: service-account key · GCP-attached service account · workload identity federation | **NTLM** or **Kerberos** (keytab, credential cache, or password) |
+| **What you hold** | a client secret | a key file, *nothing*, or a non-secret config file | a password, or a keytab |
+| **Where it can run** | anywhere with outbound HTTPS | anywhere with outbound HTTPS | anywhere that can reach the file server on 445 — in practice **inside the customer network** |
+| **Inbound connectivity** | only for push mode (a public HTTPS URL) | only for push mode (a **domain-verified** HTTPS URL) | **never** |
+| **Scoping** | one site's drive; `SHAREPOINT_FOLDER_PATH` for a one-time sync | one Shared Drive | one share, optionally one subtree (`SMB_ROOT`) |
+
+Reaching port 445 is the usual constraint for SMB: it is blocked at most network
+borders and by consumer ISPs, so a cloud-hosted listener generally *cannot* reach
+an on-premises file server. The other two only need outbound HTTPS.
+
+### Sync modes
+
+| | SharePoint | Google Drive | Windows network drive (SMB) |
+|---|---|---|---|
+| **One-time** (`sync-once`) | ✅ | ✅ | ✅ |
+| **Periodic poll** (`serve`) | ✅ optional | ✅ **default** (2 min) | ✅ **required floor** — cannot be 0 |
+| **Event-triggered** (`serve`) | ✅ **default** — Graph webhook | ⚠️ implemented, but Google only delivers to a **domain-verified** endpoint, so poll is the default | ✅ SMB2 **CHANGE_NOTIFY** — no webhook, no public URL |
+| **How "what changed" is found** | delta token | changes token | modification-time watermark |
+| **Deletions detected by** | the delta feed | the changes feed | a **notification**, else the periodic full sync |
+| **Periodic full reconcile** | ✅ safety net | ✅ safety net | ✅ **load-bearing** |
+
+Three things are worth reading off that table:
+
+- **SMB never needs inbound connectivity, even when event-driven.** Notifications
+  arrive on the connector's own outbound connection, unlike a webhook.
+- **SMB polling cannot be switched off.** Notifications can lose records (a
+  server-side buffer overflow, a watch dying with its connection), so the poll and
+  the periodic full sync remain the guarantee — event delivery only lowers latency.
+- **Only SMB relies on the full sync to find deletions.** SharePoint and Drive
+  report them in their change feeds; SMB's timestamp walk cannot see a deleted
+  file at all, so a deletion notification escalates to an immediate reconcile, and
+  the periodic reconcile covers whatever notifications missed.
+
 ## Authentication
 
 > Which of the paths below have actually been exercised against real
