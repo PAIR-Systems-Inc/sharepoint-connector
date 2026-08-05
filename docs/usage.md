@@ -69,6 +69,24 @@ by source — copy the groups you need into whichever files you choose.
 > Keep these files readable only by the user running the connector
 > (`chmod 600 .env*`): they hold client secrets, API keys and share passwords.
 
+> ⚠️ **`GOODMEM_SPACE_ID` must not be shared between sources.** It is the one
+> variable that cannot live in a file two sources load. A full sync reconciles
+> its space against *its own* file list and deletes everything else as orphaned,
+> so two sources pointed at one space delete and re-add each other's memories
+> forever. Either give each source its own file with its own space id, or leave
+> the variable **unset** so each source creates its own
+> (`SharePoint_<org>_<site>` / `GoogleDrive_<driveId>` / `SMB_<host>_<share>`).
+>
+> This is the trap in sharing one `.env`: everything else — Goodmem's URL and
+> key, poll interval, size caps — is safely shared, and the space id looks like
+> it belongs with them.
+
+> ⚠️ **Omitting `--env-file` loads `.env` silently.** That is convenient with one
+> source and dangerous with several: `./connector sync-once --source smb` would
+> pick up whatever `.env` happens to contain, including another source's space
+> id. With more than one source configured, prefer per-source files and name them
+> explicitly on every run — or simply do not keep a `.env`.
+
 ## Choosing the source
 
 Set **`SOURCE=sharepoint`** (default), **`SOURCE=google-drive`** or
@@ -570,6 +588,118 @@ creates the push subscription or starts polling. Internals:
 > **Google Drive on Fly:** Fly issues no workload OIDC token and `*.fly.dev` can't
 > be domain-verified — so a Drive listener on Fly means **Path 1 (a key) + poll
 > mode**. Alternatively run it on a GCP host and use Path 2.
+
+## Metadata enrichment
+
+**Optional, and off unless `ENRICH_URL` is set.** Skip this section if semantic
+search over your files is all you need.
+
+The connector copies **bytes**; applications query **fields**. A synced memory
+carries what the provider knows — path, size, modified time — so a question like
+*"how many orders per country"* has nothing to filter on, and a metadata filter
+over that space silently returns nothing rather than failing loudly.
+
+Nothing generic can fix that: only you know that a form's customer lives in cell
+B7. So the connector offers a seam — it hands each file to a service of yours and
+merges the metadata that comes back:
+
+```
+  \\fileserver\Share
+            │  SMB
+            ▼
+  ┌──────────────────────────┐        POST bytes         ┌─────────────────────┐
+  │ connector                │ ────────────────────────▶ │ your enrich service │
+  │  providers/smb           │                           │  = your extractor   │
+  │  core/syncer ─ seam ─────┤ ◀──────────────────────── │    + FastAPI        │
+  │  core/gm                 │        {metadata}         │  (no Goodmem, no    │
+  └────────────┬─────────────┘                           │   SMB, no sync)     │
+               │ CreateMemory(bytes, merged metadata)    └─────────────────────┘
+               ▼
+        ┌─────────────┐
+        │   Goodmem   │   ← ONE writer, ever
+        └─────────────┘
+```
+
+Two properties of that shape are the whole point:
+
+- **The memory is born enriched.** Goodmem memories are immutable — there is no
+  `UpdateMemory` RPC — so metadata attached *after* the fact means delete and
+  re-create: every file embedded twice, and a window in which the memory exists
+  un-enriched while filters quietly under-return.
+- **The connector stays the only writer.** Your service is a pure function: it
+  receives bytes and returns metadata, and never touches Goodmem. That is what
+  removes the two-writer failure modes (no compare-and-swap exists, so a second
+  writer risks re-ingest loops and lost updates).
+
+Your service shares no code with this repo — no Goodmem client, no source client,
+no sync logic. It is your extractor behind an HTTP handler.
+
+### The contract
+
+```
+POST $ENRICH_URL                       Content-Type: multipart/form-data
+  part "context"   application/json    {"file_id","name","path","mime","size",
+                                        "modified_datetime","sha256","metadata":{…}}
+  part "file"      <the file's mime>   the raw bytes, filename = the file's name
+
+200  {"metadata": {...}}               merged into the memory (nesting is fine)
+```
+
+`sha256` is the digest of the exact bytes in the `file` part — use it as a cache
+key so an expensive extractor (an LLM call, say) does not redo work. Any non-2xx
+reply, or a body that isn't that envelope, is an enrichment failure.
+
+A minimal service:
+
+```python
+from fastapi import FastAPI, UploadFile, Form
+import json
+
+app = FastAPI()
+
+@app.post("/enrich")
+async def enrich(context: str = Form(...), file: UploadFile = ...):
+    ctx = json.loads(context)                 # file_id, path, mime, sha256, …
+    fields = my_extractor(await file.read(), ctx["path"])
+    return {"metadata": fields}               # nested objects are fine
+```
+
+Run it next to the connector and point `ENRICH_URL` at `127.0.0.1`, so document
+bytes never leave the network they are already on.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENRICH_URL` | *(unset)* | Your service's endpoint. **Unset = enrichment off**, and files stream straight through exactly as before. |
+| `ENRICH_VERSION` | *(unset)* | Stamped on each memory as `enrich_version`, and compared by the full sync. **Bump it to re-ingest the corpus** through a changed extractor. |
+| `ENRICH_REQUIRED` | `true` | Fail (and retry) a file whose enrichment fails, instead of ingesting it with provider metadata only. |
+| `ENRICH_TIMEOUT_SECONDS` | `60` | Per-file timeout for the call. |
+
+### Four things worth knowing
+
+**Bump `ENRICH_VERSION` when the extractor changes.** The diff decides what to
+re-ingest by comparing timestamps, and improving your extractor changes no source
+file — so without a version bump, every existing memory keeps the old extractor's
+metadata forever. A mismatch (including a memory that has no `enrich_version` at
+all) forces an update on the next **full** sync; the delta path syncs only what
+the source says changed.
+
+**`ENRICH_REQUIRED=true` is the default deliberately.** A memory ingested without
+enrichment is a *silent* hole: it still retrieves semantically, so nothing looks
+broken, while every metadata filter over it misses. In best-effort mode
+(`false`) the file is ingested bare, the failure is reported, and `enrich_version`
+is deliberately **not** stamped — so the next full sync retries it rather than
+treating it as done.
+
+**Two metadata keys are engine-owned** and are dropped if your service returns
+them: `modified_datetime` (the diff reads it back to decide what changed —
+overwriting it would corrupt sync state) and `enrich_version`. Everything else
+you return is merged over the provider's metadata.
+
+**Enrichment buffers each file in memory** — it has to, since the bytes go both
+to your service and to Goodmem. Set `SHAREPOINT_MAX_FILE_MB` (default 100) to
+bound that. With no enricher configured, nothing is buffered.
 
 ## HTTP endpoints
 

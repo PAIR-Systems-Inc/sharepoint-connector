@@ -68,6 +68,17 @@ yet built.
   are the wrong shape: an internal file server generally isn't reachable from a
   cloud host on port 445, so SMB needs a documented `docker run` + systemd path
   for a host inside the customer's network.
+- **Operation deadlines, not just a dial timeout.** `dialTimeout` bounds connect
+  and session setup, but nothing bounds an operation on an *established*
+  connection. Observed twice: when the test file server went to sleep mid-walk,
+  the sync hung indefinitely instead of failing and retrying on the next cycle.
+  A listener wedged on a vanished share is worse than one that errors, because
+  the periodic loops stop running too.
+- **Drop the `go-smb2` `replace` directive** once
+  [CloudSoda/go-smb2#64](https://github.com/CloudSoda/go-smb2/pull/64) merges, and
+  pin the upstream version. Until then anyone building this repo pulls the SMB
+  library from our fork; if the PR stalls, decide whether to carry the fork
+  long-term.
 - **Load/soak testing.** Notification bursts, large drives, throttling behavior.
   SMB is the pressing case — it walks the whole tree every poll, which is
   unmeasured beyond thousands of files.

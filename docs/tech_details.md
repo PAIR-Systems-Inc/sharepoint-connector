@@ -57,7 +57,7 @@ Settled choices, kept so they are not silently re-litigated. Several are
 | **SMB identity** | the **path** relative to `SMB_ROOT`, namespaced per *share* (`smb.file.path:<host>/<share>/<root>`) — SMB has no stable file id, and a path is not unique across servers while Goodmem memory ids are global. Not case-normalized (see [above](#smb-identity-and-its-consequences)). Host, share and `SMB_ROOT` are therefore all permanent; `SMB_NAMESPACE` pins them |
 | SMB auth | **NTLM and Kerberos.** NTLM needs no infrastructure and covers standalone servers, workgroups and NAS; Kerberos covers domains that have disabled NTLM, which Microsoft is progressively making the default |
 | SMB trigger | **poll only** — no change feed exists (see [above](#why-smb-polls-today)) |
-| SMB library | `cloudsoda/go-smb2` — maintained, NTLM + Kerberos, and the fork rclone depends on. Hand-rolling SMB2 was rejected: unlike the Graph client (750 lines of HTTPS + JSON) it would mean owning NTLMv2, SMB3 signing and encryption, and credit-based flow control |
+| SMB library | `cloudsoda/go-smb2` — maintained, NTLM + Kerberos, and the library rclone depends on. Hand-rolling SMB2 was rejected: unlike the Graph client (750 lines of HTTPS + JSON) it would mean owning NTLMv2, SMB3 signing and encryption, and credit-based flow control. **`go.mod` currently carries a `replace` onto our fork** (`PAIR-Systems-Inc/go-smb2`), which adds SMB2 CHANGE_NOTIFY; the change is offered upstream as [CloudSoda/go-smb2#64](https://github.com/CloudSoda/go-smb2/pull/64) and the `replace` goes away when it merges |
 | State store | plain state files on a persistent volume, plus SQLite for sync history — no external datastore at single-tenant scale. Revisit only if HA / >1 machine becomes a goal |
 
 ## The `Source` interface
@@ -252,13 +252,19 @@ sides of a comparison use the same clock.
 ### Full sync
 
 1. **Source:** list all files → their UUIDs.
-2. **Goodmem:** list the space → the memory UUIDs it holds, plus each memory's
-   stored `modified_datetime`.
+2. **Goodmem:** list the space → the memory UUIDs it holds, plus the engine-owned
+   metadata stored on each (`StoredMeta`: `modified_datetime`, `enrich_version`).
 3. **Set math:**
    - `Add` = source − Goodmem
    - `Delete` = Goodmem − source
    - in both → compare timestamps: stored **older** ⇒ `Update`; **equal** ⇒ skip;
      stored **newer** ⇒ an anomaly, reported in `UnexpectedNewer` and skipped.
+   - in both, and enrichment is configured with an `ENRICH_VERSION` → a stored
+     `enrich_version` that differs ⇒ `Update`, **whatever the timestamps say**.
+     An extractor change is invisible to a timestamp diff (no source file
+     changed), so without this rule a corpus would keep metadata from the old
+     extractor forever. Full sync only — the delta path syncs what the source
+     reports as changed.
 
 ### Delta sync
 
@@ -299,6 +305,43 @@ ordering, which is why unordered sets are sufficient.
 **Dead-lettering.** An item that keeps failing is parked after
 `GRAPH_MAX_ITEM_ATTEMPTS` attempts instead of being retried forever; parked items
 appear in `GET /syncs?status=dead` and the `connector_pending_dead` gauge.
+
+## The enrichment seam
+
+`Options.Enrich` is a func field — like `Options.Sink`, and nil for every caller
+that has not configured `ENRICH_URL`. Nil means the ingest path is byte-for-byte
+what it was before the seam existed: the file streams from the source straight
+into `CreateMemory`, never buffered, with no extra request. The `ENRICH_URL`
+HTTP client (`syncer.HTTPEnricher`) is a thin adapter that *fills* that field;
+the engine has no idea HTTP is involved. Operator-facing detail lives in
+[usage.md](usage.md#metadata-enrichment).
+
+**Why it sits between the fetch and the create.** Goodmem memories are immutable
+— `MemoryService` has `CreateMemory`, `GetMemory`, `ListMemories`,
+`DeleteMemory`, the batch variants and `RetrieveMemory`, but **no
+`UpdateMemory`**. So metadata attached after the fact means delete-then-create:
+every file embedded twice, plus a window where the memory exists un-enriched and
+metadata filters silently under-return. Enriching before the create is the only
+placement with neither cost.
+
+**One writer.** An `Enricher` is a pure function — bytes in, metadata out — and
+must not write to Goodmem. The alternative design (a second daemon that patches
+memories afterwards) puts two uncoordinated writers on the same deterministic
+memory id with no compare-and-swap available, which is how you get re-ingest
+loops: re-create a memory without preserving `modified_datetime` and the next
+full sync re-ingests it, forever.
+
+**Metadata precedence** is provider < enrichment < engine. `reservedMetadataKeys`
+(`modified_datetime`, `enrich_version`) are dropped from an enricher's reply
+rather than merged — the diff reads both back out of Goodmem, so an extractor
+able to set them could corrupt sync state.
+
+**Failure.** `ENRICH_REQUIRED` (default true) makes a failed enrichment a
+transient failure — the file is not ingested, and is retried by the normal
+pending-retry machinery. In best-effort mode the file is ingested with provider
+metadata only, the failure is recorded in `Result.Errors`, and `enrich_version`
+is deliberately **not** stamped, so the version rule in the diff picks the file
+up again on the next full sync instead of treating a bare memory as finished.
 
 ## Safety guards
 
