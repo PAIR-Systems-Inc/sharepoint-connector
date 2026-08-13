@@ -1,7 +1,7 @@
 # Build the Go connector and ship it as a minimal static binary (no interpreter,
 # no source) — keeps the distributed listener closed and the image tiny.
 
-FROM golang:1.23-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 # The Goodmem SDK (fury.io/pairsys/goodmem) is served from Gemfury's public
 # tokenless proxy; sum.golang.org doesn't index it. Scope the checksum-DB bypass

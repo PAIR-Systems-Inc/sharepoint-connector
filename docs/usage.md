@@ -1,16 +1,17 @@
 # Usage
 
-How to sync SharePoint to Goodmem with the **`connector`** binary, deploy the
-event-triggered listener to Fly.io, and monitor sync activity.
+How to sync a content source — **SharePoint**, **Google Drive** or a **Windows
+network drive** — into Goodmem
+with the **`connector`** binary, deploy the event-triggered listener, and monitor
+it. For a five-line quickstart, see [README.md](../README.md); this is the
+detailed reference.
 
-Before you start, set up credentials as described in
-[README.md](../README.md#getting-started). Config lives in `.env` — copy it from
-[`.env.example`](../.env.example), which documents every variable.
+Config lives in `.env` — copy it from [`.env.example`](../.env.example), which
+documents every variable.
 
 ## The `connector` binary
 
-The connector is a single compiled Go binary with subcommands (it replaces the
-Python proof-of-concept). Build it from source:
+A single compiled Go binary with subcommands. Build it from source:
 
 ```bash
 go build -o connector ./cmd/connector
@@ -19,143 +20,782 @@ go build -o connector ./cmd/connector
 
 | Subcommand | What it does |
 |---|---|
-| `connector sync-once` | One-time full sync SharePoint → Goodmem. Flags: `--env-file PATH`, `--dry-run` (plan only, no changes). |
-| `connector serve` | Run the webhook listener + sync engine (this is what gets deployed). Flag: `--env-file PATH`. |
-| `connector create-subscription` | Create or renew the Graph change subscription. Flag: `--env-file PATH`. |
+| `connector sync-once` | One-time full sync into Goodmem. Flags: `--env-file PATH`, `--source NAME`, `--dry-run` (plan only, no changes). |
+| `connector serve` | Run the listener + sync engine (this is what gets deployed). Flags: `--env-file PATH`, `--source NAME`. |
+| `connector create-subscription` | Create or renew the push subscription. Flags: `--env-file PATH`, `--source NAME`. |
 | `connector watch [-n SECS] <url>` | Tail a running listener's activity log locally. |
 
 By default each command loads `.env` if present; `--env-file` overrides.
 
-## Manual / periodic sync
+## Config files
 
-Sync the whole SharePoint drive to Goodmem once:
+Config comes from the environment. `.env` is loaded automatically when present;
+`--env-file` selects another, and **may be repeated**.
+
+### One file per source
+
+Keeping each source's credentials in its own file avoids one `.env` holding
+secrets for three unrelated systems. `.gitignore` already covers `.env.*`, so
+these are never committed:
 
 ```bash
-./connector sync-once            # uses .env
-./connector sync-once --dry-run  # show the add/update/delete plan without applying
+./connector serve     --env-file .env.smb
+./connector sync-once --env-file .env.sharepoint --source sharepoint
 ```
 
-Scope a one-time sync to a single folder with `SHAREPOINT_FOLDER_PATH` (see
-`.env.example`). Run it on demand or on a schedule (cron).
+### Layering, to avoid copying shared settings
+
+Goodmem's URL and key, the poll interval, size caps and retention are the same
+whatever the source. Rather than duplicating them into every file — where they
+drift — layer a shared file underneath:
+
+```bash
+./connector serve --env-file .env.smb --env-file .env.shared
+```
+
+Precedence runs **left to right, and the real environment always wins**:
+
+```
+real environment  >  .env.smb  >  .env.shared
+```
+
+So list the **most specific file first**. A variable already set in the process
+environment (a container's environment, a Fly secret) beats every file, which is
+what keeps production secrets authoritative.
+
+[`.env.example`](../.env.example) documents every variable in one place, grouped
+by source — copy the groups you need into whichever files you choose.
+
+> Keep these files readable only by the user running the connector
+> (`chmod 600 .env*`): they hold client secrets, API keys and share passwords.
+
+> ⚠️ **`GOODMEM_SPACE_ID` must not be shared between sources.** It is the one
+> variable that cannot live in a file two sources load. A full sync reconciles
+> its space against *its own* file list and deletes everything else as orphaned,
+> so two sources pointed at one space delete and re-add each other's memories
+> forever. Either give each source its own file with its own space id, or leave
+> the variable **unset** so each source creates its own
+> (`SharePoint_<org>_<site>` / `GoogleDrive_<driveId>` / `SMB_<host>_<share>`).
+>
+> This is the trap in sharing one `.env`: everything else — Goodmem's URL and
+> key, poll interval, size caps — is safely shared, and the space id looks like
+> it belongs with them.
+
+> ⚠️ **Omitting `--env-file` loads `.env` silently.** That is convenient with one
+> source and dangerous with several: `./connector sync-once --source smb` would
+> pick up whatever `.env` happens to contain, including another source's space
+> id. With more than one source configured, prefer per-source files and name them
+> explicitly on every run — or simply do not keep a `.env`.
+
+## Choosing the source
+
+Set **`SOURCE=sharepoint`** (default), **`SOURCE=google-drive`** or
+**`SOURCE=smb`** in `.env`, or pass `--source` per run. It selects which
+credential group below is required; everything else — the sync engine, endpoints,
+retries, metrics — is identical.
+
+```bash
+./connector sync-once --source google-drive
+```
+
+## What each source supports
+
+### Connection
+
+| | SharePoint | Google Drive | Windows network drive (SMB) |
+|---|---|---|---|
+| **Protocol** | HTTPS → Microsoft Graph | HTTPS → Google APIs | SMB2/3 over **TCP 445** |
+| **Authentication** | Azure AD app (client credentials) | **three** paths: service-account key · GCP-attached service account · workload identity federation | **NTLM** or **Kerberos** (keytab, credential cache, or password) |
+| **What you hold** | a client secret | a key file, *nothing*, or a non-secret config file | a password, or a keytab |
+| **Where it can run** | anywhere with outbound HTTPS | anywhere with outbound HTTPS | anywhere that can reach the file server on 445 — in practice **inside the customer network** |
+| **Inbound connectivity** | only for push mode (a public HTTPS URL) | only for push mode (a **domain-verified** HTTPS URL) | **never** |
+| **Scoping** | one site's drive; `SHAREPOINT_FOLDER_PATH` for a one-time sync | one Shared Drive | one share, optionally one subtree (`SMB_ROOT`) |
+
+Reaching port 445 is the usual constraint for SMB: it is blocked at most network
+borders and by consumer ISPs, so a cloud-hosted listener generally *cannot* reach
+an on-premises file server. The other two only need outbound HTTPS.
+
+### Sync modes
+
+| | SharePoint | Google Drive | Windows network drive (SMB) |
+|---|---|---|---|
+| **One-time** (`sync-once`) | ✅ | ✅ | ✅ |
+| **Periodic poll** (`serve`) | ✅ optional | ✅ **default** (2 min) | ✅ **required floor** — cannot be 0 |
+| **Event-triggered** (`serve`) | ✅ **default** — Graph webhook | ⚠️ implemented, but Google only delivers to a **domain-verified** endpoint, so poll is the default | ✅ SMB2 **CHANGE_NOTIFY** — no webhook, no public URL |
+| **How "what changed" is found** | delta token | changes token | modification-time watermark |
+| **Deletions detected by** | the delta feed | the changes feed | a **notification**, else the periodic full sync |
+| **Periodic full reconcile** | ✅ safety net | ✅ safety net | ✅ **load-bearing** |
+
+Three things are worth reading off that table:
+
+- **SMB never needs inbound connectivity, even when event-driven.** Notifications
+  arrive on the connector's own outbound connection, unlike a webhook.
+- **SMB polling cannot be switched off.** Notifications can lose records (a
+  server-side buffer overflow, a watch dying with its connection), so the poll and
+  the periodic full sync remain the guarantee — event delivery only lowers latency.
+- **Only SMB relies on the full sync to find deletions.** SharePoint and Drive
+  report them in their change feeds; SMB's timestamp walk cannot see a deleted
+  file at all, so a deletion notification escalates to an immediate reconcile, and
+  the periodic reconcile covers whatever notifications missed.
+
+## Authentication
+
+> Which of the paths below have actually been exercised against real
+> infrastructure — and which are implemented but unproven — is tracked in
+> [testing.md](testing.md#support--verification-matrix).
+
+### SharePoint (Azure AD)
+
+The connector authenticates as an **Azure AD application** with Microsoft Graph
+*application* permissions (`Files.Read.All`, `Sites.Read.All`).
+
+1. **Ask IT** to register the app and grant those permissions — hand them
+   [permissions-sharepoint.md](permissions-sharepoint.md). They return a client
+   id, client secret, and tenant id.
+2. Put them in `.env`:
+
+```dotenv
+SOURCE=sharepoint
+AZURE_AD_CLIENT_ID=...
+AZURE_AD_TENANT_ID=...
+AZURE_AD_CLIENT_SECRET=...
+SHAREPOINT_SITE_URL=https://your-tenant.sharepoint.com/sites/YourSite
+```
+
+That's the whole setup — the credential is a static secret the app uses directly.
+
+### Google Drive (service account)
+
+The connector reads a Google **Shared Drive** as a **service account** (a
+read-only robot identity). There are **three deploy-and-forget options** — set up
+once, runs unattended, no human ever logs in again. Pick by one question: *where
+does the connector run, and does your org allow downloadable service-account keys?*
+
+| Path | Use when | You manage | Secret? |
+|---|---|---|---|
+| **1 — Service-account key** | Runs **anywhere** (Fly, on-prem, a VM, another cloud) and your org allows keys | one JSON file/secret | yes (1 static key) |
+| **2 — Attached service account** | Runs **on GCP compute** that can mint a Drive-scoped token (e.g. a GCE VM) | nothing | no |
+| **3 — Workload Identity Federation** | Runs **off GCP** *and* your org forbids keys | one non-secret config file | no |
+
+> **In one line:** keys allowed → **Path 1** (simplest, works everywhere). On GCP
+> → **Path 2** (no secret). Neither → **Path 3**.
+
+Ask IT for the pieces with
+[permissions-google-drive.md](permissions-google-drive.md) — it covers all three.
+
+**Common to every path: the Shared Drive must be shared with the service
+account.** Google Cloud roles do not grant Drive content access, so until the
+service-account email is added as a **Viewer** on the drive, it authenticates
+successfully but sees zero files. Copy the **Drive ID** from the drive's URL
+(`…/drive/folders/<DRIVE_ID>`).
+
+Shared `.env` base for all three paths:
+
+```dotenv
+SOURCE=google-drive
+GOOGLE_DRIVE_ID=<DRIVE_ID>
+```
+
+**Path 1 — service-account key.** IT provides a JSON key; add one of:
+
+```dotenv
+GOOGLE_DRIVE_SA_JSON_FILE=/secure/path/goodmem-connector.json   # a file, OR
+# GOOGLE_DRIVE_SA_JSON={"type":"service_account",...}            # inline (e.g. a Fly secret)
+```
+
+Keep it out of git (`.gitignore` covers `*-sa.json`, `secrets/`). Rotation is
+optional hygiene.
+
+**Path 2 — attached service account.** Set **no** credential variable; the GCP
+host supplies the identity. The workload must be able to obtain a *Drive-scoped*
+token — e.g. a GCE VM created with the `drive.readonly` access scope:
+
+```bash
+gcloud compute instances create goodmem-listener \
+  --service-account="goodmem-connector@<project>.iam.gserviceaccount.com" \
+  --scopes="https://www.googleapis.com/auth/drive.readonly"
+```
+
+> **Scope gotcha:** a `cloud-platform`-only token does **not** cover the Drive
+> API. **Cloud Run** issues exactly that and can't downscope it, so Cloud Run
+> needs Path 1 or 3.
+
+**Path 3 — workload identity federation.** IT provides a credential-configuration
+JSON (no key inside — not a secret). Point the Google SDK at it:
+
+```dotenv
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/wif-credential-config.json
+```
+
+> Requires the host platform to issue a workload OIDC token — GCP, GitHub
+> Actions, AWS, Azure and Kubernetes do; a plain **Fly.io** app does **not**
+> today. On Fly, use Path 1 or run on a GCP host.
+
+*Verified end-to-end.* Two independent runs, no key and no stored secret anywhere:
+a GitHub Actions job (a genuine off-GCP workload) exchanged its OIDC token for
+short-lived credentials and listed, paged and **downloaded** from a real Shared
+Drive; and a GCE VM using an `external_account` credential ran a complete
+`sync-once` — 4 files listed, downloaded and ingested, all reaching `COMPLETED`.
+The GitHub workflow is kept as `.github/workflows/wif-drive-test.yml.disabled`;
+rename it to `.yml` to re-run.
+
+> **Scope elevation via WIF (the Cloud Run workaround).** The VM in that test was
+> attached to a service account with **only** `cloud-platform` — a token that
+> returns **403** against the Drive API. Federating that same identity back through
+> WIF and impersonating the service account yields a token with `drive.readonly`,
+> and Drive then works. So a workload stuck with a `cloud-platform`-only metadata
+> token (Cloud Run, GKE) can reach Drive without a key: grant its identity
+> `roles/iam.workloadIdentityUser` on the target service account and point
+> `GOOGLE_APPLICATION_CREDENTIALS` at a credential config.
+
+**Local testing only — impersonation.** For hands-on runs you can impersonate the
+service account with your own Google login instead:
+
+```bash
+gcloud auth application-default login \
+  --impersonate-service-account="goodmem-connector@<project>.iam.gserviceaccount.com" \
+  --scopes=https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/cloud-platform
+```
+
+(Keep `--scopes` on **one line**.) **Not for deployment:** it stores a *user*
+refresh token that Google's reauth policy expires on a schedule, so a deployed
+listener would silently stop syncing until a human re-ran the login.
+
+*(Background on gcloud profiles and how ADC resolves credentials:
+[tech_details.md → Reference](tech_details.md#reference-gcloud-profiles--adc).)*
+
+### Windows network drive (SMB/CIFS)
+
+The connector reads an **SMB2/3 share** as a read-only account. The name is the
+protocol, not the vendor: the same setup works against **Windows Server, Samba,
+and NAS appliances**, and a large share of "Windows network drives" in the wild
+are the latter two.
+
+```dotenv
+SOURCE=smb
+SMB_HOST=fileserver.corp.example.com   # or host:port; default port 445
+SMB_SHARE=Shared                       # the "Shared" in \\fileserver\Shared
+SMB_USER=svc-goodmem
+SMB_PASSWORD=...
+SMB_DOMAIN=CORP                        # optional for standalone servers
+SMB_ROOT=Reports/2026                  # optional; "" syncs the whole share
+```
+
+**Kerberos**, where a domain has disabled NTLM (`SMB_AUTH` defaults to `ntlm`):
+
+```dotenv
+SMB_AUTH=kerberos
+SMB_HOST=fileserver.corp.example.com   # must be the FQDN — an IP has no registered SPN
+SMB_REALM=CORP.EXAMPLE.COM             # normally the AD domain, UPPER-CASED
+SMB_USER=svc-goodmem
+SMB_KEYTAB=/etc/goodmem/svc.keytab     # preferred: the connector renews its own tickets
+# SMB_CCACHE=/tmp/krb5cc_1000          # ...or an existing cache; defaults to $KRB5CCNAME
+# SMB_KRB5_CONF=/etc/krb5.conf         # default
+# SMB_SPN=cifs/other-name.corp.example.com   # override the derived cifs/<host>
+```
+
+A **keytab** is what an unattended connector wants: it can obtain and renew its own
+tickets. A credential cache works but holds a ticket that expires with nothing to
+renew it. A password also works (`SMB_PASSWORD` with `SMB_AUTH=kerberos`) and is
+fine for testing.
+
+Three Kerberos failures are common and their native errors don't suggest the fix,
+so the connector adds a hint to each: **clock skew** (client and KDC must agree
+within ~5 minutes), **an IP address in `SMB_HOST`** (Kerberos identifies the service
+by name, so use the FQDN), and **a stale keytab** (rotating the account's password
+invalidates it). The connector also needs network access to the **KDC**, not only to
+the file server.
+
+What IT needs to provide is in
+[permissions-smb.md](permissions-smb.md) — hand them that document.
+
+Three behaviors follow from the protocol rather than from this connector, and
+they are worth knowing before you deploy:
+
+- **Event-driven, with polling underneath.** The listener subscribes to SMB2
+  change notifications, so edits usually sync within seconds rather than waiting
+  for the next poll — and **deletions trigger an immediate reconcile**, which a
+  timestamp-based poll cannot detect on its own. There is still no *webhook*:
+  notifications arrive on the connector's own outbound connection, so no public
+  URL is needed. `SYNC_POLL_MINUTES` cannot be 0, because notifications can drop
+  records (server-side overflow, a dropped connection) and the poll plus the
+  periodic full sync remain the guarantee. See
+  [tech_details.md](tech_details.md#why-smb-polls-today).
+- **Poll cost scales with latency × directory count**, not file count — each poll
+  walks the tree, one round trip per directory. On a LAN that is seconds even for
+  a large share; over a WAN or VPN it can exceed the poll interval. If syncs
+  start overlapping, **move the listener closer to the file server** before
+  raising the interval, and consider scoping with `SMB_ROOT`.
+- **Deletions are found by the periodic full sync, not the poll.** A deleted file
+  is simply absent, which is indistinguishable from "unchanged" when comparing
+  modification times. The poll finds new and modified files quickly; removals wait
+  for the next full reconcile.
+- **A file's identity is its path.** SMB has no stable per-file id, so renaming or
+  moving a file reads as a delete plus an add and the content is re-embedded under
+  the new path. Because a path is not unique across servers — and Goodmem memory
+  ids are **global**, not per-space — the identity is namespaced by
+  `<host>/<share>/<root>`. So **host, share name and `SMB_ROOT` are all
+  permanent**: changing any of them re-keys every memory. If the way you address
+  the server might change (an IP today, an FQDN later), pin it with
+  `SMB_NAMESPACE=fileserver/Shared`.
+
+The connector skips machine noise that would otherwise become memories — Office
+lock files (`~$…`), `Thumbs.db`, `desktop.ini`, dotfiles, `$RECYCLE.BIN` and
+`System Volume Information`. A subdirectory the account cannot read is skipped
+with the rest of the share still syncing; only failing to read **`SMB_ROOT`
+itself** aborts the sync, since an empty listing would otherwise look like an
+empty share.
+
+### Goodmem (always required)
+
+```dotenv
+GOODMEM_BASE_URL=https://your-goodmem
+GOODMEM_API_KEY=...
+GOODMEM_SPACE_ID=...     # or leave unset to auto-create a per-source space
+```
+
+> ⚠️ **One space per source.** Never point two listeners at the **same**
+> `GOODMEM_SPACE_ID`: each full sync reconciles the space against *its own* files
+> and deletes the rest as orphans, so they would delete and re-add each other's
+> memories forever (re-embedding every cycle). Leave `GOODMEM_SPACE_ID` unset and
+> each source creates its own space (`SharePoint_<org>_<site>` /
+> `GoogleDrive_<driveId>` / `SMB_<host>_<share>`).
+>
+> `GRAPH_MAX_DELETE_RATIO` will **not** reliably catch this: the guard fires on
+> `deletes > ratio × total`, so two similarly-sized sources sail past it — 500
+> memories each means `500 > 0.5 × 1000` is false, and all 500 are deleted. It was
+> built to catch a *partial listing*, not this.
+
+## Verifying a deployment
+
+Credentials are where deployments fail, and the failure is usually silent — the
+listener starts, polls, and syncs nothing. Three checks, cheapest first:
+
+```bash
+# 1. Credentials + Drive share, without touching Goodmem.
+GDRIVE_LIVE=1 GOOGLE_DRIVE_ID=<id> go test ./internal/providers/googledrive -run TestLive -v
+
+# 2. Credentials + Goodmem + the sync plan, without changing anything.
+./connector sync-once --source google-drive --dry-run
+
+# 3. The real thing.
+./connector sync-once --source google-drive
+```
+
+Check 1 is the most useful on a fresh host: it goes through the same ADC path the
+connector uses, lists the Drive, fetches a changes cursor, **and downloads one
+file's bytes** — listing can succeed where downloading fails, so metadata access
+alone does not prove the credential works.
+
+**Prove it is the credential you think it is.** When a host has more than one
+possible identity (a GCE VM has an attached service account *and* whatever
+`GOOGLE_APPLICATION_CREDENTIALS` points at), a passing test does not tell you
+which one did the work. Check the credential type, and confirm the identity you
+expect to be inert really is:
+
+```bash
+# Which credential ADC resolved (external_account = workload identity federation)
+python3 -c "import json,os;print(json.load(open(os.environ['GOOGLE_APPLICATION_CREDENTIALS']))['type'])"
+
+# On GCE: what the attached service account alone can do
+MD=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default
+TOK=$(curl -s -H 'Metadata-Flavor: Google' $MD/token | sed -E 's/.*"access_token":"([^"]*)".*/\1/')
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" \
+  'https://www.googleapis.com/drive/v3/files?pageSize=1&supportsAllDrives=true'
+```
+
+A `401`/`403` from that last call while the sync succeeds is the proof that the
+federated credential — not the attached service account — is doing the work.
+
+## Manual / periodic sync
+
+Sync everything once:
+
+```bash
+./connector sync-once                        # uses .env
+./connector sync-once --dry-run              # show the plan without applying
+./connector sync-once --source google-drive  # override the configured source
+```
+
+The dry-run lists the files it can see and the add/update/delete plan — it is also
+the quickest way to verify credentials and (for Google Drive) the Drive share.
+Run it on demand or on a schedule (cron).
+
+SharePoint only: scope a one-time sync to a folder with `SHAREPOINT_FOLDER_PATH`.
 
 ## Event-triggered auto sync (the listener)
 
-A long-running listener (`connector serve`) receives Microsoft Graph change
-notifications and syncs the delta to Goodmem. Graph requires it to be
-**publicly reachable over HTTPS/TLS**, so it must be deployed. `./deploy_fly_io.sh`
-is the supported way to stand it up on Fly.io — it builds the Go binary into a
-distroless image (via `Dockerfile`) and ships it. Run `./deploy_fly_io.sh --help`
-for all modes; the two main ones:
+`connector serve` runs continuously and keeps Goodmem up to date. It gets its
+changes one of two ways:
 
-### Deploy the listener only (Goodmem already set up)
+| Mode | How it triggers | Default for | Needs |
+|---|---|---|---|
+| **Push** | the provider POSTs a webhook on each change | SharePoint | a public HTTPS URL (`GRAPH_NOTIFICATION_URL`) + `GRAPH_CLIENT_STATE` |
+| **Poll** | the listener pulls the delta on a timer | Google Drive | nothing public |
 
-Set the **Azure & SharePoint** and **Goodmem (A)** groups in `.env`, plus
-`FLY_CLUSTER` (optionally `FLY_ORG` / `FLY_REGION`). The deploy script generates
-`GRAPH_CLIENT_STATE` and writes `GRAPH_NOTIFICATION_URL` for you. Then:
+Set **`SYNC_POLL_MINUTES`** to choose: `>0` polls on that interval, `0` uses push.
+
+**Why the defaults differ.** Both providers support event-based push — this is a
+difference in *policy*, not capability. Microsoft Graph will POST to any public
+HTTPS URL, so push is easy and is the SharePoint default. Google Drive's
+`changes.watch` only delivers to a **domain-verified** endpoint: you must prove
+ownership of the domain (Search Console) and register it for push notifications.
+That is a high enough bar — and impossible on a throwaway host like `*.fly.dev`,
+or on a wildcard-DNS name like `nip.io` that yields a valid certificate but that
+you do not own — that Google Drive defaults to polling instead. Polling uses the
+same incremental Changes API, so it is just as efficient per sync; the only cost
+is up to one interval of latency. If you deploy behind a domain you own and have
+verified, set `SYNC_POLL_MINUTES=0` to switch Drive to push.
+
+Either way the listener also runs a periodic full reconcile as a safety net.
+
+### Where to run the listener
+
+It's a single static binary (also shipped as a distroless image), so **any host
+that can run a Linux binary or a container works**. `./deploy_fly_io.sh` is a
+convenience wrapper for *one* host, not a requirement.
+
+Requirements for any host: outbound HTTPS to the source API and to Goodmem; a
+**persistent writable directory** for durable state (delta cursor, pending-retry
+sets, sync history — `GRAPH_DELTA_TOKEN_FILE`'s directory); and, **only in push
+mode**, a public HTTPS URL.
+
+| Host | SharePoint | Google Drive |
+|---|---|---|
+| **Fly.io** via `./deploy_fly_io.sh` | ✅ push or poll | ⚠️ poll + **service-account key** only |
+| **GCP** — GCE VM (`./deploy_gcp.sh`) | ✅ | ✅ **best fit**: keyless via the attached service account |
+| **Cloud Run** | ✅ | ⚠️ key or workload identity federation (its token is `cloud-platform`-only, which doesn't cover Drive) |
+| **Any VM / on-prem / Docker / Kubernetes** | ✅ | ✅ key, or WIF where the platform issues an OIDC token |
+
+#### TLS: terminate at the edge, keep plaintext on loopback
+
+When the connector and Goodmem sit on the same host (the `--with-goodmem`
+layout), the connector reaches Goodmem over **`http://localhost:8080`**. That
+plaintext hop never leaves the machine, so Goodmem needs no certificate of its
+own — and if you put a reverse proxy in front for the *public* surface, that
+proxy holds a normal, publicly-trusted certificate.
+
+Avoid the middle option — a **self-signed** certificate on Goodmem. It shifts the
+problem to every client: each one must install your CA into its trust store, and
+those applications are generally not deployed by whatever provisions Goodmem, so
+that step gets missed. Pick one of:
+
+| Who reaches Goodmem | Do this |
+|---|---|
+| Only processes on the same host | Plain HTTP bound to **loopback** — nothing to certify |
+| Clients on other hosts | A **publicly-trusted** certificate at a reverse proxy (Caddy/nginx + ACME), proxying to Goodmem on localhost |
+
+A reverse proxy such as **Caddy** obtains and renews an ACME certificate
+automatically. If you have no domain, a wildcard-DNS hostname (`<ip>.nip.io` and
+similar) resolves to your IP and is enough for a valid certificate — though *not*
+enough for Google Drive push, which additionally requires domain **ownership
+verification**.
+
+> If you disable TLS on Goodmem, also make sure it is not published on `0.0.0.0`
+> where the network can reach it — plaintext plus a wide bind would put the API
+> key on the wire. Bind to loopback, or keep the port closed at the firewall.
+
+**Does `deploy_fly_io.sh` work for both sources?** Yes — the script is
+source-agnostic: it only requires `FLY_CLUSTER`, imports your whole `.env` as Fly
+secrets, and never inspects `SOURCE`. Two Google-Drive caveats on Fly, though:
+auth must be **Path 1 (a key)**, because Fly provides no attached service account
+and issues no OIDC token for federation; and **push mode is impossible** because
+`*.fly.dev` cannot be domain-verified — so it runs in poll mode (already the
+Drive default). If you want a keyless Drive deployment, run it on GCP instead.
+
+### Deploy to GCP with the script
+
+`./deploy_gcp.sh` automates the GCP option — the only **keyless** path for Google
+Drive. It creates a GCE VM with the service account attached and the
+`drive.readonly` access scope, ships the binary, and installs a systemd service:
+
+```bash
+./deploy_gcp.sh --project YOUR_PROJECT \
+  --service-account goodmem-connector@YOUR_PROJECT.iam.gserviceaccount.com \
+  --with-goodmem            # optional: also install Goodmem + pgvector on the VM
+```
+
+`--with-goodmem` gives a fully self-contained box: the listener reaches Goodmem
+over `localhost`, so **nothing needs a public address**. Re-run any time to
+redeploy (it is idempotent); `--no-create` skips VM creation, `--delete` tears it
+down.
+
+Three things the script exists to get right, each of which silently breaks a
+hand-rolled VM: the **`drive.readonly` access scope** (a `cloud-platform` token
+does not cover the Drive API), Docker CE **with the compose plugin** (Debian's
+`docker.io` has no `docker compose`, which the Goodmem installer needs), and
+**trusting Goodmem's self-signed localhost certificate** so the connector can
+reach it over HTTPS.
+
+#### If your VM has no external IP
+
+Many orgs block public IPs on VMs (`constraints/compute.vmExternalIpAccess`), so
+`deploy_gcp.sh` creates the VM with `--no-address`. A private VM has **no route to
+the internet and no reachable SSH port** until two network pieces exist — they are
+a property of the *topology*, not of the auth path, and a VM with a public IP needs
+neither:
+
+| Piece | Why | Without it |
+|---|---|---|
+| **Cloud NAT** (in the VM's region) | outbound access to the Drive API, Goodmem, and package/image registries | installs and syncs hang or time out |
+| **IAP firewall rule** — allow `tcp:22` from `35.235.240.0/20` | Google's IAP relays your SSH through this range | `gcloud compute ssh` hangs with no useful error |
+
+The script **pre-flights both** and refuses to create a VM it could not reach,
+printing what's missing. Add `--setup-network` to have it create them (idempotent):
+
+```bash
+./deploy_gcp.sh --project P --service-account SA --setup-network
+```
+
+Or create them once by hand:
+
+```bash
+gcloud compute routers create goodmem-nat-router --network=default --region=REGION
+gcloud compute routers nats create goodmem-nat --router=goodmem-nat-router --region=REGION \
+  --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges
+gcloud compute firewall-rules create allow-iap-ssh --network=default \
+  --allow=tcp:22 --source-ranges=35.235.240.0/20
+```
+
+Both are shared, one-per-network/region resources: create them once and every
+future private VM in that network reuses them.
+
+### Deploy to Fly.io with the script
+
+`./deploy_fly_io.sh` automates the Fly.io option; `--help` lists all modes.
+
+**Listener only (Goodmem already exists):** set your source's credentials plus
+the **Goodmem** group and `FLY_CLUSTER` (optionally `FLY_ORG` / `FLY_REGION`).
+For push mode the script generates `GRAPH_CLIENT_STATE` and writes
+`GRAPH_NOTIFICATION_URL` for you. Then:
 
 ```bash
 ./deploy_fly_io.sh
 ```
 
-The container runs `connector serve`. On startup the listener does a full sync,
-bootstraps the delta cursor, and creates the Graph subscription. Step-by-step
-internals: [tech_details.md](tech_details.md#deployment-deploy_fly_iosh).
-
-### Hands-free: deploy Goodmem + listener together
-
-`--hands-free` also provisions a fresh Goodmem server on Fly.io and creates a
-`text-embedding-3-small` embedder (so it needs `OPENAI_API_KEY`). Leave the
-**Goodmem (A)** group blank; set **Azure & SharePoint**, `FLY_CLUSTER`, and
-`OPENAI_API_KEY`. Then:
+**Hands-free (Goodmem + listener):** `--hands-free` also provisions a Goodmem
+server and a `text-embedding-3-small` embedder (needs `OPENAI_API_KEY`); leave the
+Goodmem group blank.
 
 ```bash
 ./deploy_fly_io.sh --hands-free
 ```
 
-## HTTP endpoints
+On startup the listener runs a full sync, bootstraps the delta cursor, then either
+creates the push subscription or starts polling. Internals:
+[tech_details.md](tech_details.md#deployment-deploy_fly_iosh).
 
-The listener (`connector serve`) exposes:
+> **Google Drive on Fly:** Fly issues no workload OIDC token and `*.fly.dev` can't
+> be domain-verified — so a Drive listener on Fly means **Path 1 (a key) + poll
+> mode**. Alternatively run it on a GCP host and use Path 2.
+
+## Metadata enrichment
+
+**Optional, and off unless `ENRICH_URL` is set.** Skip this section if semantic
+search over your files is all you need.
+
+The connector copies **bytes**; applications query **fields**. A synced memory
+carries what the provider knows — path, size, modified time — so a question like
+*"how many orders per country"* has nothing to filter on, and a metadata filter
+over that space silently returns nothing rather than failing loudly.
+
+Nothing generic can fix that: only you know that a form's customer lives in cell
+B7. So the connector offers a seam — it hands each file to a service of yours and
+merges the metadata that comes back:
+
+```
+  \\fileserver\Share
+            │  SMB
+            ▼
+  ┌──────────────────────────┐        POST bytes         ┌─────────────────────┐
+  │ connector                │ ────────────────────────▶ │ your enrich service │
+  │  providers/smb           │                           │  = your extractor   │
+  │  core/syncer ─ seam ─────┤ ◀──────────────────────── │    + FastAPI        │
+  │  core/gm                 │        {metadata}         │  (no Goodmem, no    │
+  └────────────┬─────────────┘                           │   SMB, no sync)     │
+               │ CreateMemory(bytes, merged metadata)    └─────────────────────┘
+               ▼
+        ┌─────────────┐
+        │   Goodmem   │   ← ONE writer, ever
+        └─────────────┘
+```
+
+Two properties of that shape are the whole point:
+
+- **The memory is born enriched.** Goodmem memories are immutable — there is no
+  `UpdateMemory` RPC — so metadata attached *after* the fact means delete and
+  re-create: every file embedded twice, and a window in which the memory exists
+  un-enriched while filters quietly under-return.
+- **The connector stays the only writer.** Your service is a pure function: it
+  receives bytes and returns metadata, and never touches Goodmem. That is what
+  removes the two-writer failure modes (no compare-and-swap exists, so a second
+  writer risks re-ingest loops and lost updates).
+
+Your service shares no code with this repo — no Goodmem client, no source client,
+no sync logic. It is your extractor behind an HTTP handler.
+
+### The contract
+
+```
+POST $ENRICH_URL                       Content-Type: multipart/form-data
+  part "context"   application/json    {"file_id","name","path","mime","size",
+                                        "modified_datetime","sha256","metadata":{…}}
+  part "file"      <the file's mime>   the raw bytes, filename = the file's name
+
+200  {"metadata": {...}}               merged into the memory (nesting is fine)
+```
+
+`sha256` is the digest of the exact bytes in the `file` part — use it as a cache
+key so an expensive extractor (an LLM call, say) does not redo work. Any non-2xx
+reply, or a body that isn't that envelope, is an enrichment failure.
+
+A minimal service:
+
+```python
+from fastapi import FastAPI, UploadFile, Form
+import json
+
+app = FastAPI()
+
+@app.post("/enrich")
+async def enrich(context: str = Form(...), file: UploadFile = ...):
+    ctx = json.loads(context)                 # file_id, path, mime, sha256, …
+    fields = my_extractor(await file.read(), ctx["path"])
+    return {"metadata": fields}               # nested objects are fine
+```
+
+Run it next to the connector and point `ENRICH_URL` at `127.0.0.1`, so document
+bytes never leave the network they are already on.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENRICH_URL` | *(unset)* | Your service's endpoint. **Unset = enrichment off**, and files stream straight through exactly as before. |
+| `ENRICH_VERSION` | *(unset)* | Stamped on each memory as `enrich_version`, and compared by the full sync. **Bump it to re-ingest the corpus** through a changed extractor. |
+| `ENRICH_REQUIRED` | `true` | Fail (and retry) a file whose enrichment fails, instead of ingesting it with provider metadata only. |
+| `ENRICH_TIMEOUT_SECONDS` | `60` | Per-file timeout for the call. |
+
+### Four things worth knowing
+
+**Bump `ENRICH_VERSION` when the extractor changes.** The diff decides what to
+re-ingest by comparing timestamps, and improving your extractor changes no source
+file — so without a version bump, every existing memory keeps the old extractor's
+metadata forever. A mismatch (including a memory that has no `enrich_version` at
+all) forces an update on the next **full** sync; the delta path syncs only what
+the source says changed.
+
+**`ENRICH_REQUIRED=true` is the default deliberately.** A memory ingested without
+enrichment is a *silent* hole: it still retrieves semantically, so nothing looks
+broken, while every metadata filter over it misses. In best-effort mode
+(`false`) the file is ingested bare, the failure is reported, and `enrich_version`
+is deliberately **not** stamped — so the next full sync retries it rather than
+treating it as done.
+
+**Two metadata keys are engine-owned** and are dropped if your service returns
+them: `modified_datetime` (the diff reads it back to decide what changed —
+overwriting it would corrupt sync state) and `enrich_version`. Everything else
+you return is merged over the provider's metadata.
+
+**Enrichment buffers each file in memory** — it has to, since the bytes go both
+to your service and to Goodmem. Set `SHAREPOINT_MAX_FILE_MB` (default 100) to
+bound that. With no enricher configured, nothing is buffered.
+
+## HTTP endpoints
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /sync/webhook` | Microsoft Graph change notifications (validation handshake + `clientState` check). |
+| `POST /sync/webhook` | Provider change notifications (push mode): validation handshake + secret check. |
 | `GET /healthz` | Liveness probe (always `200` once the server is up). |
-| `GET /readyz` | Readiness probe — `200` once the Graph subscription is ensured and the startup full sync has been **attempted**; `503` until then. A failed startup sync does **not** hold readiness — the periodic reconcile retries it, and the delta cursor isn't advanced on a failed sync so nothing is silently skipped. Point your load balancer / platform health check here so traffic isn't routed to a listener that never subscribed. |
-| `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta sync counts, Graph throttle events, subscription-renewal health, last-sync time, pending-retry queue depth, and `sharepoint_pending_dead` (items parked after exhausting retries — alert on this). Point Prometheus/Grafana here. |
-| `GET /syncs` | **Durable sync history** (SQLite): one JSON record per item — `file_id`, `file_name`, `memory_id`, `space_id`, `op`, `status`, `message`, `ts`. `status` is `success`, `failure`, `skipped`, or `dead` (parked — see below). Query params: `?limit=100&status=failure`. Great for "did file X sync, and why did it fail?". |
+| `GET /readyz` | Readiness probe — `200` once the subscription is ensured (push mode) and the startup full sync has been **attempted**; `503` until then. A failed startup sync does **not** hold readiness: the periodic reconcile retries it, and the cursor isn't advanced on failure so nothing is silently skipped. Point your load balancer here. |
+| `GET /metrics` | **Prometheus** metrics — files added/updated/deleted/skipped, sync errors, full/delta counts, throttle events, subscription-renewal health, last-sync time, pending-retry depth, and `connector_pending_dead` (parked items — alert on this). |
+| `GET /syncs` | **Durable sync history** (SQLite): one JSON record per item — `file_id`, `file_name`, `memory_id`, `space_id`, `op`, `status`, `message`, `ts`. `status` is `success`, `failure`, `skipped`, or `dead`. Query: `?limit=100&status=failure`. Answers "did file X sync, and why did it fail?". |
 | `GET /activity` | In-memory recent-events log (what `connector watch` polls). |
 
 ## Monitoring
 
-- **Metrics / dashboards:** scrape `GET /metrics` with Prometheus. This
-  supersedes the old manual watch loop.
-- **Alerting:** a recommended Prometheus rules file ships at
+- **Metrics / dashboards:** scrape `GET /metrics` with Prometheus.
+- **Alerting:** a recommended rules file ships at
   [`deploy/alerts.yml`](../deploy/alerts.yml) — load it into Prometheus
   (`rule_files:`) and point it at Alertmanager. It covers the otherwise-silent
-  failure modes: listener down, parked (dead-lettered) files, subscription-renewal
-  failures, retry backlog, sync errors, throttle storms, and a stale-sync alert
-  (tune its threshold above `GRAPH_FULL_SYNC_MINUTES`).
-- **Structured logs:** the listener emits JSON logs to stderr (Fly captures them;
-  ship them anywhere). Control with `LOG_LEVEL` (debug|info|warn|error, default
-  info) and `LOG_FORMAT` (json|text, default json). The in-memory `/activity`
-  ring buffer remains for quick local tailing.
-- **Debugging a specific file:** `curl "https://<listener>/syncs?status=failure"`
-  (or `?status=dead` for parked files).
-- **Live tail (optional):** `./connector watch https://<listener>` prints new
-  activity events as they happen. The listener syncs with or without it.
+  failure modes: listener down, parked files, subscription-renewal failures,
+  retry backlog, sync errors, throttle storms, and stale sync (tune its threshold
+  above `GRAPH_FULL_SYNC_MINUTES`).
+- **Structured logs:** JSON to stderr. `LOG_LEVEL` (debug|info|warn|error, default
+  info) and `LOG_FORMAT` (json|text, default json).
+- **Debugging one file:** `curl "https://<listener>/syncs?status=failure"` (or
+  `?status=dead` for parked files).
+- **Live tail (optional):** `./connector watch https://<listener>`.
 
 ## Scope & limits
 
-Know these before pointing the listener at a site:
-
-- **First document library only.** The listener syncs and subscribes to the
-  site's **first** drive (document library). A site with multiple libraries only
-  has its first one covered.
-- **The listener always syncs the whole drive.** `SHAREPOINT_FOLDER_PATH` scopes
-  a one-time `sync-once` to a folder, but the **listener ignores it** and syncs
-  the entire drive. It logs a warning at startup if the variable is set.
-  ⚠️ **Trap:** if you run a folder-scoped `sync-once` into a space and then start
-  the listener against that same space, the listener's startup full sync ingests
-  the *entire* drive into it. Use a dedicated space for the listener.
-- **Safety knobs** (all in [`.env.example`](../.env.example)): `SHAREPOINT_MAX_FILE_MB`
-  skips oversized files (default 100 MB); `GRAPH_MAX_DELETE_RATIO` refuses a full
-  sync that would delete an implausible share of memories (default 0.5, a guard
-  against a partial listing); `GRAPH_MAX_ITEM_ATTEMPTS` parks a permanently-failing
-  file after N tries (default 10) instead of retrying it forever;
-  `SYNC_HISTORY_RETENTION_DAYS` prunes old `/syncs` rows (default 90).
+- **SharePoint: first document library only.** The listener syncs and subscribes
+  to the site's **first** drive. A site with several libraries only has that one
+  covered.
+- **SharePoint: the listener always syncs the whole drive.**
+  `SHAREPOINT_FOLDER_PATH` scopes a one-time `sync-once` only; the listener
+  ignores it and logs a warning at startup if it is set.
+  ⚠️ **Trap:** running a folder-scoped `sync-once` into a space and then pointing
+  the listener at that same space makes the startup full sync ingest the *entire*
+  drive. Use a dedicated space for the listener.
+- **Google Drive: Shared Drives only.** Personal *My Drive* content would need
+  domain-wide delegation, which is not implemented.
+- **Google Drive: native docs are exported.** Docs/Sheets/Slides are converted to
+  `.docx`/`.xlsx`/`.pptx`. Google caps exports at 10 MB; a larger one is recorded
+  as a permanent skip (it can never succeed).
+- **Safety knobs** (all in [`.env.example`](../.env.example)):
+  `SHAREPOINT_MAX_FILE_MB` skips oversized files (default 100 MB);
+  `GRAPH_MAX_DELETE_RATIO` refuses a full sync that would delete an implausible
+  share of memories (default 0.5, guarding against a partial listing);
+  `GRAPH_MAX_ITEM_ATTEMPTS` parks a permanently-failing file after N tries
+  (default 10); `SYNC_HISTORY_RETENTION_DAYS` prunes old `/syncs` rows (default 90).
 
 ## Operations
 
-- **Durable state.** The delta cursor, pending-retry sets, and the sync-history
-  SQLite DB live under `GRAPH_DELTA_TOKEN_FILE`'s directory — on Fly that's the
-  persistent `/data` volume (created by the deploy script), so they survive
-  restarts. Locally they default to the working directory.
-- **Periodic safety full-sync.** Beyond deltas, the listener runs a full
-  reconcile every `GRAPH_FULL_SYNC_MINUTES` (default = half the subscription
-  lifetime; `0` disables) to repair anything a missed notification dropped.
-- **Parked (dead-lettered) files.** A file that keeps failing (oversized once the
-  cap is raised, corrupt, or one Goodmem always marks FAILED) is parked after
-  `GRAPH_MAX_ITEM_ATTEMPTS` tries instead of being re-downloaded every sync. It
-  shows up in `GET /syncs?status=dead` and the `sharepoint_pending_dead` gauge —
-  alert on that gauge, investigate the file, and re-uploading/editing it in
-  SharePoint queues a fresh attempt.
+- **Durable state.** The delta cursor, pending-retry sets, the Google Drive push
+  channel record, and the sync-history SQLite DB live under
+  `GRAPH_DELTA_TOKEN_FILE`'s directory — on Fly the persistent `/data` volume, so
+  they survive restarts. Locally they default to the working directory.
+- **Periodic safety full-sync.** Beyond deltas, the listener runs a full reconcile
+  every `GRAPH_FULL_SYNC_MINUTES` (default = half the subscription lifetime; `0`
+  disables) to repair anything a missed notification or poll dropped.
+- **Parked (dead-lettered) files.** A file that keeps failing (corrupt, oversized,
+  or one Goodmem always marks FAILED) is parked after `GRAPH_MAX_ITEM_ATTEMPTS`
+  tries instead of being re-downloaded every sync. It appears in
+  `GET /syncs?status=dead` and the `connector_pending_dead` gauge — alert on it,
+  investigate, and re-uploading or editing the file queues a fresh attempt.
 - **Shutdown.** On SIGTERM the listener stops accepting work and exits; an
-  in-flight Graph call may still be sleeping between retries (bounded to a couple
-  of minutes), so shutdown can briefly wait on it — process exit is the backstop.
-  This is safe: the delta cursor is saved only *after* a sync's changes are
-  applied and re-ingestion is idempotent, so a mid-sync kill is recoverable.
-- **Renew the subscription manually** (e.g. after a failed deploy):
-  `./connector create-subscription` — it renews the existing subscription
-  instead of creating a duplicate.
+  in-flight provider call may still be sleeping between retries (bounded to a
+  couple of minutes), so shutdown can briefly wait — process exit is the backstop.
+  This is safe: the cursor is saved only *after* a sync's changes are applied and
+  re-ingestion is idempotent, so a mid-sync kill is recoverable.
+- **Renew the subscription manually** (push mode; e.g. after a failed deploy):
+  `./connector create-subscription` — it renews rather than duplicating. Works for
+  either source (pass `--source`).
 - **Restart a suspended listener.** If Fly suspends the app when idle, start the
   machine (not `fly apps resume`):
   ```bash
   fly machine start $(fly machine list -a <FLY_CLUSTER>-listener 2>/dev/null | awk '/^[0-9a-f]{14}/ {print $1; exit}') -a <FLY_CLUSTER>-listener
   ```
-- **Manual deployment (alternative to the script).** Generate the Fly config
-  with `./deploy_fly_io.sh --generate-only [--org ORG] [--region R]`, then
+- **Manual deployment (alternative to the script).** Generate the Fly config with
+  `./deploy_fly_io.sh --generate-only [--org ORG] [--region R]`, then
   `fly launch --no-deploy --name YOUR_LISTENER_APP --config fly_io.toml`, set
   `GRAPH_NOTIFICATION_URL=https://YOUR_LISTENER_APP.fly.dev/sync/webhook` in
-  `.env`, `fly secrets import < .env`, and `fly deploy`. The listener stays up
-  for webhooks (`auto_stop_machines = 'off'`, `min_machines_running = 1`) and
-  mounts the `/data` volume for durable state.
+  `.env`, `fly secrets import < .env`, and `fly deploy`. The listener stays up for
+  webhooks (`auto_stop_machines = 'off'`, `min_machines_running = 1`) and mounts
+  the `/data` volume for durable state.
+
+### Running Goodmem on the same host
+
+- **Ports:** REST is on **8080** (this is the `GOODMEM_BASE_URL` port) and gRPC on
+  **9090**. Pointing the connector at 9090 yields a confusing `415`.
+- **Reinstalling is not idempotent over old data.** The installer keeps the
+  Postgres data directory, so a reinstall with a new DB password leaves the server
+  crash-looping on authentication. To start clean, remove the containers, their
+  volumes, **and** `~/.goodmem` (the data dir is root-owned — `sudo rm -rf`) before
+  re-running.
+- **Prefer `--tls-disabled` for a co-located install.** The default self-signed
+  certificate is a leaf with `CA:FALSE`, so adding it to the system trust store
+  does *not* make Go accept it (`parent certificate cannot sign this kind of
+  certificate`). Loopback plaintext avoids the problem; put a reverse proxy with a
+  real certificate in front if anything off-box needs access.

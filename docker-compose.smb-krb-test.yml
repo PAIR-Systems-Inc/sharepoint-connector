@@ -1,0 +1,51 @@
+# A real Kerberos KDC for the SMB provider's Kerberos test.
+#
+# Samba runs as a full Active Directory Domain Controller — a genuine KDC plus a
+# file server joined to the realm — so no Windows Server is needed to exercise
+# keytab/ccache/password authentication end to end.
+#
+#   docker compose -f docker-compose.smb-krb-test.yml up -d --build
+#   # wait for "[provision] done" then:
+#   SMB_LIVE=1 SMB_AUTH=kerberos \
+#     SMB_HOST=172.28.0.10 SMB_SPN=cifs/dc.corp.example.test \
+#     SMB_REALM=CORP.EXAMPLE.TEST SMB_USER=svc-goodmem \
+#     SMB_KEYTAB=./testdata/sambadc/out/svc.keytab \
+#     SMB_KRB5_CONF=./testdata/sambadc/krb5.conf \
+#     SMB_SHARE=data \
+#     go test ./internal/providers/smb -run TestLive -v
+#   docker compose -f docker-compose.smb-krb-test.yml down -v
+#
+# Two non-obvious requirements, both learned the hard way:
+#   • Debian splits the AD schema into `samba-ad-provision`; without it
+#     `samba-tool domain provision` dies on a missing ad-schema path.
+#   • Provisioning sets NT ACLs on sysvol, which needs CAP_SYS_ADMIN *and* a
+#     filesystem that supports xattrs — overlayfs does not, hence the named
+#     volume for /var/lib/samba. Samba 4.17 has no --use-xattrs escape hatch.
+#
+# A static IP is used so the KDC can be pinned in krb5.conf without DNS. Note
+# Kerberos requires a *name*: the SPN override is what lets us dial the IP.
+
+services:
+  samba-dc:
+    build: ./testdata/sambadc
+    container_name: goodmem-samba-dc
+    hostname: dc
+    cap_add:
+      - SYS_ADMIN          # set security.NTACL xattrs during provisioning
+      - DAC_READ_SEARCH
+    networks:
+      adnet:
+        ipv4_address: 172.28.0.10
+    volumes:
+      - samba-state:/var/lib/samba          # real filesystem: overlayfs lacks xattrs
+      - ./testdata/sambadc/out:/keytab      # exported keytab lands here
+      - ./testdata/smbshare:/srv/share:ro   # same fixtures as the NTLM test
+
+networks:
+  adnet:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  samba-state:
