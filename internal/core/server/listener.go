@@ -41,6 +41,10 @@ type Listener struct {
 	RetentionDays     int     // prune sync history older than this many days (<= 0 disables)
 	IgnoredFolderPath string  // set when a folder scope is configured but ignored (listener syncs whole drive)
 
+	Enrich         syncer.Enricher // metadata enrichment hook; nil = off (the default)
+	EnrichRequired bool            // fail a file whose enrichment fails, rather than ingesting it bare
+	EnrichVersion  string          // stamped as enrich_version; a mismatch re-ingests on the next full sync
+
 	delta      deltaStore
 	retry      *syncer.Retrier
 	history    *store.Store
@@ -62,6 +66,9 @@ func (l *Listener) opts() syncer.Options {
 		MaxDeleteRatio:    l.MaxDeleteRatio,
 		Retry:             l.retry,
 		Sink:              l.eventSink,
+		Enrich:            l.Enrich,
+		EnrichRequired:    l.EnrichRequired,
+		EnrichVersion:     l.EnrichVersion,
 	}
 }
 

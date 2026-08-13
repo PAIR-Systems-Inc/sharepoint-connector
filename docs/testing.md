@@ -103,6 +103,25 @@ Minimum worth running for a new source:
 5. **mutate** — modify, add and delete a file, then reconcile. For SMB this is
    the only way to exercise deletion, which the delta cannot see.
 
+### 4. Metadata enrichment — the `ENRICH_URL` seam
+
+| What | Status | How it was proven |
+|---|---|---|
+| Request/response contract | ✅ unit | `enrich_test.go` asserts the multipart parts, that `sha256` is the digest of the posted bytes, and that nested metadata survives the round trip |
+| Merged onto the memory at create time | ✅ end-to-end | real engine + fake Goodmem: the memory is *born* with the fields; provider metadata is kept |
+| Reserved keys are not overwritable | ✅ unit | an enricher returning `modified_datetime` is ignored — otherwise the diff would be corrupted |
+| `ENRICH_REQUIRED=true` refuses the file | ✅ unit | nothing is ingested, and the failure is reported |
+| Best-effort mode is self-healing | ✅ unit | ingested bare, `enrich_version` **not** stamped, so the next full sync retries it |
+| `ENRICH_VERSION` bump re-ingests | ✅ live | 20 unchanged files → `+0 ~0 -0` on the same version, `~20` after a bump |
+| Filters work on a synced space | ✅ live | Samba share of 20 forms into local Goodmem: `val('$.header.country') ILIKE 'Japan'` returned **0 chunks** without enrichment and **10, from exactly the 5 Japan documents**, with it |
+
+**Not proven, and out of scope for this seam:** extraction *accuracy*. The
+reference service used in the live run looked its answers up from known-good
+records rather than parsing the bytes, deliberately — mixing an unmeasured
+extractor into a plumbing test makes a failure ambiguous. Whatever you put behind
+`ENRICH_URL` needs its own accuracy measurement; every filter in your application
+inherits its error rate.
+
 ---
 
 ## Test environments

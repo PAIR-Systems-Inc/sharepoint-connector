@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -38,6 +39,22 @@ type Options struct {
 	MaxDeleteRatio    float64   // refuse a full sync deleting > this fraction of memories (0 = disabled)
 	Retry             *Retrier  // listener durable retry + status polling; nil = one-shot CLI (no pending sets, no polling)
 	Sink              EventSink // per-item outcome sink for durable sync history; nil = discard
+
+	// Enrich, when set, computes extra metadata from a file's content before the
+	// memory is created (see enrich.go). Nil = off, and the file is streamed to
+	// Goodmem without ever being buffered — the default for every caller that
+	// has not configured ENRICH_URL.
+	Enrich Enricher
+	// EnrichRequired fails a file whose enrichment fails (retried like any other
+	// transient failure) instead of ingesting it with provider metadata only.
+	// Ingesting bare is a SILENT hole: the memory retrieves semantically, so
+	// nothing looks broken, while every metadata filter over it misses.
+	EnrichRequired bool
+	// EnrichVersion is stamped on the memory as enrich_version when enrichment
+	// SUCCEEDS, and is compared by DiffFull: bump it and the next full sync
+	// re-ingests the corpus through the new extractor. Without it, changing an
+	// extractor changes nothing, because no source file changed.
+	EnrichVersion string
 }
 
 // emit sends a per-item sync outcome to the sink, if one is set.
@@ -61,7 +78,7 @@ func RunFull(ctx context.Context, src source.Source, gm *goodmem.Client, spaceID
 		return nil, fmt.Errorf("list Goodmem memories: %w", err)
 	}
 
-	plan := DiffFull(files, memIDs, stored, src.MemNamespace())
+	plan := DiffFull(files, memIDs, stored, src.MemNamespace(), opts.EnrichVersion)
 	res := &Result{SourceFiles: len(files), GoodmemMemories: len(memIDs), Plan: plan}
 	if opts.DryRun {
 		return res, nil
@@ -180,7 +197,42 @@ func (res *Result) ingest(ctx context.Context, src source.Source, gm *goodmem.Cl
 		return resTransient
 	}
 	defer rc.Close()
-	mem, err := createMemory(ctx, gm, spaceID, uuid, f, rc, opts.ExtractPageImages)
+
+	// Enrichment runs between the fetch and the create, so the memory is born
+	// with its fields rather than acquiring them later — Goodmem has no
+	// UpdateMemory, so "later" would mean delete-and-recreate. With no Enricher
+	// the reader is passed through untouched and nothing is buffered.
+	var (
+		body         io.Reader = rc
+		extra        map[string]any
+		stampVersion string
+	)
+	if opts.Enrich != nil {
+		buf, err := io.ReadAll(rc)
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("read %s: %v", f.Name, err))
+			emit("failure", "read: "+err.Error())
+			return resTransient
+		}
+		body = bytes.NewReader(buf)
+		md, err := opts.Enrich(ctx, f, buf)
+		switch {
+		case err != nil && opts.EnrichRequired:
+			res.Errors = append(res.Errors, fmt.Sprintf("enrich %s: %v", f.Name, err))
+			emit("failure", "enrich: "+err.Error())
+			return resTransient
+		case err != nil:
+			// Best-effort mode: ingest with provider metadata only, and record it.
+			// enrich_version is deliberately NOT stamped, so the next full sync
+			// sees the mismatch and retries this file instead of treating a bare
+			// memory as done.
+			res.Errors = append(res.Errors, fmt.Sprintf("enrich %s (ingested without enrichment): %v", f.Name, err))
+		default:
+			extra, stampVersion = md, opts.EnrichVersion
+		}
+	}
+
+	mem, err := createMemory(ctx, gm, spaceID, uuid, f, body, opts.ExtractPageImages, extra, stampVersion)
 	if err != nil {
 		res.Errors = append(res.Errors, fmt.Sprintf("ingest %s: %v", f.Name, err))
 		emit("failure", "create: "+err.Error())
@@ -222,10 +274,10 @@ func (res *Result) ingest(ctx context.Context, src source.Source, gm *goodmem.Cl
 	return resOK
 }
 
-// listGoodmemMemories returns the memory ids in a space and a map of memory id →
-// the SharePoint modified_datetime stored in its metadata (for the diff).
-func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string) (ids []string, stored map[string]string, err error) {
-	stored = make(map[string]string)
+// listGoodmemMemories returns the memory ids in a space and, per id, the engine-
+// owned metadata the diff reads back (see StoredMeta).
+func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string) (ids []string, stored map[string]StoredMeta, err error) {
+	stored = make(map[string]StoredMeta)
 	page, err := gm.Memories().List(ctx, spaceID, nil)
 	if err != nil {
 		return nil, nil, err
@@ -236,8 +288,11 @@ func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string
 		}
 		ids = append(ids, m.MemoryID)
 		if m.Metadata != nil {
-			if v, ok := m.Metadata["modified_datetime"].(string); ok {
-				stored[m.MemoryID] = v
+			sm := StoredMeta{}
+			sm.Modified, _ = m.Metadata["modified_datetime"].(string)
+			sm.EnrichVersion, _ = m.Metadata["enrich_version"].(string)
+			if sm != (StoredMeta{}) {
+				stored[m.MemoryID] = sm
 			}
 		}
 	}
@@ -248,7 +303,11 @@ func listGoodmemMemories(ctx context.Context, gm *goodmem.Client, spaceID string
 // memoryId and the provider-supplied metadata (guaranteeing modified_datetime is
 // stored, which the diff reads back). It returns the created memory so the caller
 // can inspect its processingStatus.
-func createMemory(ctx context.Context, gm *goodmem.Client, spaceID, uuid string, f source.FileInfo, content io.Reader, extractPageImages bool) (*gmodels.Memory, error) {
+// extra is an Enricher's metadata (nil when enrichment is off or failed);
+// enrichVersion is stamped only when enrichment actually ran and succeeded.
+// Precedence is provider < enrichment < engine: an Enricher cannot overwrite the
+// keys the sync engine reads back (see reservedMetadataKeys).
+func createMemory(ctx context.Context, gm *goodmem.Client, spaceID, uuid string, f source.FileInfo, content io.Reader, extractPageImages bool, extra map[string]any, enrichVersion string) (*gmodels.Memory, error) {
 	mime := f.MimeType
 	if mime == "" {
 		mime = "application/octet-stream"
@@ -261,8 +320,17 @@ func createMemory(ctx context.Context, gm *goodmem.Client, spaceID, uuid string,
 	for k, v := range f.Metadata {
 		md[k] = v
 	}
+	for k, v := range extra {
+		if reservedMetadataKeys[k] {
+			continue // engine-owned; an extractor must not be able to set these
+		}
+		md[k] = v
+	}
 	if f.ModifiedDateTime != "" {
 		md["modified_datetime"] = f.ModifiedDateTime // the diff compares against this
+	}
+	if enrichVersion != "" {
+		md["enrich_version"] = enrichVersion // the diff compares against this too
 	}
 	req := &gmodels.JSONMemoryCreationRequest{
 		SpaceID:     spaceID,

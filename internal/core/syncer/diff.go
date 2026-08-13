@@ -18,6 +18,14 @@ type Plan struct {
 	UnexpectedNewer []string // file IDs whose stored Goodmem timestamp is newer than the source (skipped; should not happen)
 }
 
+// StoredMeta is the engine-owned metadata read back off an existing memory: the
+// source timestamp it was ingested at, and the enrichment version that produced
+// its fields (empty when enrichment is not in use).
+type StoredMeta struct {
+	Modified      string
+	EnrichVersion string
+}
+
 // DiffFull computes the full-sync plan:
 //
 //   - Add    = source UUIDs not present in Goodmem.
@@ -26,14 +34,23 @@ type Plan struct {
 //     than the current source modified_datetime. A missing timestamp on either
 //     side forces an update; a stored timestamp that is *newer* than the source
 //     is an anomaly — skipped and reported in UnexpectedNewer.
+//   - Update also = UUIDs whose stored enrich_version differs from
+//     wantEnrichVersion (when that is non-empty), REGARDLESS of timestamps.
 //
-// gmStoredModified maps a memory UUID (present in both sets) to the source
-// modified_datetime stored in that memory's metadata at ingest. Timestamps are
-// compared as strings (ISO-8601 sorts chronologically).
+// gmStored maps a memory UUID (present in both sets) to what was stored on that
+// memory at ingest. Timestamps are compared as strings (ISO-8601 sorts
+// chronologically).
+//
+// The enrichment rule exists because an extractor change is invisible to a
+// timestamp diff: no source file changed, so without it every memory would keep
+// metadata from the old extractor forever. Bumping ENRICH_VERSION is the
+// re-ingest trigger. It applies to the FULL sync only — the delta path syncs
+// what the source says changed, and the periodic full sync is what rolls a new
+// extractor across the corpus.
 //
 // MIME filtering is intentionally separate (see IsMimeSupported): the returned
 // Add/Update may include unsupported types for the caller to drop at ingest.
-func DiffFull(srcFiles []source.FileInfo, gmMemoryIDs []string, gmStoredModified map[string]string, namespace string) Plan {
+func DiffFull(srcFiles []source.FileInfo, gmMemoryIDs []string, gmStored map[string]StoredMeta, namespace, wantEnrichVersion string) Plan {
 	srcByUUID := make(map[string]source.FileInfo, len(srcFiles))
 	srcUUIDs := make(map[string]struct{}, len(srcFiles))
 	for _, f := range srcFiles {
@@ -49,7 +66,14 @@ func DiffFull(srcFiles []source.FileInfo, gmMemoryIDs []string, gmStoredModified
 	var p Plan
 	for u, f := range srcByUUID {
 		if _, inGoodmem := gmUUIDs[u]; inGoodmem {
-			update, newer := classify(gmStoredModified[u], f.ModifiedDateTime)
+			stored := gmStored[u]
+			// A stale enrichment is a reason to re-ingest on its own: the file is
+			// unchanged, so the timestamp comparison below would say "skip".
+			if wantEnrichVersion != "" && stored.EnrichVersion != wantEnrichVersion {
+				p.Update = append(p.Update, f.ID)
+				continue
+			}
+			update, newer := classify(stored.Modified, f.ModifiedDateTime)
 			switch {
 			case update:
 				p.Update = append(p.Update, f.ID)

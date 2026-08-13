@@ -23,6 +23,13 @@ provider POSTs a webhook — the SharePoint default, needs a public HTTPS URL) o
 needs nothing public). It exposes `/metrics` (Prometheus) and `/syncs` (durable
 sync history) for monitoring.
 
+**Metadata enrichment (optional)** — the connector copies *bytes*, but
+applications filter on *fields*. Set `ENRICH_URL` and each file is POSTed to a
+service of yours that returns extra metadata (customer, country, whatever your
+documents contain), which is merged onto the memory **as it is created**. Off
+unless you set it. See [usage.md → Metadata
+enrichment](docs/usage.md#metadata-enrichment).
+
 Run it on **any host** — it's a single static binary. Two deploy scripts automate
 the common ones: **`./deploy_fly_io.sh`** (Fly.io) and **`./deploy_gcp.sh`** (a GCE
 VM — the only *keyless* option for Google Drive, since the VM runs as an attached
@@ -150,7 +157,7 @@ goodmem-connectors/
 ├── internal/
 │   ├── core/                 # Provider-agnostic engine (shared by every source):
 │   │   ├── source/           #   The Source interface + neutral types (the contract).
-│   │   ├── syncer/           #   Sync engine: diff, apply, pending-retry, dead-letter, processing-status polling.
+│   │   ├── syncer/           #   Sync engine: diff, apply, pending-retry, dead-letter, processing-status polling, metadata-enrichment seam (enrich.go).
 │   │   ├── server/           #   Listener: webhook + poll loops, HTTP endpoints (/sync/webhook, /healthz, /readyz, /metrics, /syncs, /activity), metrics.
 │   │   ├── store/            #   SQLite durable sync history (behind /syncs).
 │   │   ├── gm/               #   Goodmem SDK wrapper (the destination).

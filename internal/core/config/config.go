@@ -70,6 +70,12 @@ type Config struct {
 	// ExtractPageImages hints Goodmem to extract page images (e.g. PDF page
 	// screenshots for citations). From GOODMEM_EXTRACT_PAGE_IMAGES.
 	ExtractPageImages bool
+
+	// Metadata enrichment — entirely optional, and off unless EnrichURL is set.
+	// See docs/usage.md#metadata-enrichment.
+	EnrichURL      string // HTTP endpoint that turns file bytes into extra metadata
+	EnrichVersion  string // stamped as enrich_version; bump to re-ingest the corpus
+	EnrichRequired bool   // fail a file whose enrichment fails (default true)
 }
 
 // Load reads configuration from the process environment, optionally layering in
@@ -128,6 +134,12 @@ func Load(envFiles ...string) (*Config, error) {
 		SharePointStartDate:           os.Getenv("SHAREPOINT_START_DATE"),
 		OpenAIAPIKey:                  os.Getenv("OPENAI_API_KEY"),
 		ExtractPageImages:             envTruthy("GOODMEM_EXTRACT_PAGE_IMAGES"),
+		EnrichURL:                     os.Getenv("ENRICH_URL"),
+		EnrichVersion:                 os.Getenv("ENRICH_VERSION"),
+		// Defaults ON: if you configured an enricher you want the metadata, and a
+		// memory ingested without it is a silent hole — it retrieves semantically
+		// while every filter over it misses. Opt out explicitly for best-effort.
+		EnrichRequired: envTruthyDefault("ENRICH_REQUIRED", true),
 	}, nil
 }
 
@@ -192,6 +204,19 @@ func envTruthy(key string) bool {
 		return true
 	}
 	return false
+}
+
+// envTruthyDefault is envTruthy for a var whose default is not "off": an unset
+// or blank value yields def, anything else is parsed as truthy/falsy.
+func envTruthyDefault(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "":
+		return def
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // ValidateSync checks the fields required to run a source→Goodmem sync (manual

@@ -30,13 +30,13 @@ func TestDiffFull(t *testing.T) {
 		mid("D"),
 		mid("X"), // only in Goodmem -> delete
 	}
-	stored := map[string]string{
-		mid("A"): "2026-01-01T00:00:00Z", // older than SP -> update
-		mid("C"): "2026-01-01T00:00:00Z", // equal -> skip
-		mid("D"): "2026-01-02T00:00:00Z", // newer than SP -> anomaly
+	stored := map[string]StoredMeta{
+		mid("A"): {Modified: "2026-01-01T00:00:00Z"}, // older than SP -> update
+		mid("C"): {Modified: "2026-01-01T00:00:00Z"}, // equal -> skip
+		mid("D"): {Modified: "2026-01-02T00:00:00Z"}, // newer than SP -> anomaly
 	}
 
-	got := DiffFull(sp, gm, stored, nsTest)
+	got := DiffFull(sp, gm, stored, nsTest, "")
 	want := Plan{
 		Add:             []string{"B"},
 		Update:          []string{"A"},
@@ -51,9 +51,44 @@ func TestDiffFull(t *testing.T) {
 func TestDiffFull_MissingStoredTimestampForcesUpdate(t *testing.T) {
 	sp := []source.FileInfo{{ID: "E", ModifiedDateTime: "2026-01-01T00:00:00Z"}}
 	gm := []string{mid("E")}
-	got := DiffFull(sp, gm, map[string]string{}, nsTest) // no stored ts
+	got := DiffFull(sp, gm, map[string]StoredMeta{}, nsTest, "") // no stored ts
 	if len(got.Update) != 1 || got.Update[0] != "E" || len(got.Add) != 0 || len(got.Delete) != 0 {
 		t.Errorf("missing stored timestamp should force update; got %+v", got)
+	}
+}
+
+// TestDiffFull_EnrichVersion pins the rule that makes an extractor change
+// re-ingest anything at all: the files are UNCHANGED, so the timestamp diff
+// alone says "skip" and the corpus would keep the old extractor's metadata
+// forever.
+func TestDiffFull_EnrichVersion(t *testing.T) {
+	ts := "2026-01-01T00:00:00Z"
+	sp := []source.FileInfo{
+		{ID: "A", ModifiedDateTime: ts},
+		{ID: "B", ModifiedDateTime: ts},
+	}
+	gm := []string{mid("A"), mid("B")}
+	stored := map[string]StoredMeta{
+		mid("A"): {Modified: ts, EnrichVersion: "v1"}, // stale extractor -> update
+		mid("B"): {Modified: ts, EnrichVersion: "v2"}, // current        -> skip
+	}
+
+	got := DiffFull(sp, gm, stored, nsTest, "v2")
+	if len(got.Update) != 1 || got.Update[0] != "A" {
+		t.Errorf("stale enrich_version should force update of A only; got %+v", got)
+	}
+
+	// With no version configured the rule is inert — enrichment is opt-in, and a
+	// space full of memories with no enrich_version must not re-ingest itself.
+	if got := DiffFull(sp, gm, stored, nsTest, ""); len(got.Update) != 0 {
+		t.Errorf("no wanted version should leave the plan empty; got %+v", got)
+	}
+
+	// A memory that has never been enriched is as stale as a wrongly-enriched
+	// one: turning enrichment ON must re-ingest the corpus.
+	bare := map[string]StoredMeta{mid("A"): {Modified: ts}, mid("B"): {Modified: ts}}
+	if got := DiffFull(sp, gm, bare, nsTest, "v1"); len(got.Update) != 2 {
+		t.Errorf("enabling enrichment should update every memory; got %+v", got)
 	}
 }
 

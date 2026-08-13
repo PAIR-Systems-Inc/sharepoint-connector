@@ -50,6 +50,19 @@ func (f *Goodmem) Has(memoryID string) bool {
 	return ok
 }
 
+// Metadata returns the metadata stored on a memory (nil if there is none), so a
+// test can assert what the engine actually wrote rather than only that it wrote.
+func (f *Goodmem) Metadata(memoryID string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m, ok := f.mems[memoryID]
+	if !ok {
+		return nil
+	}
+	md, _ := m["metadata"].(map[string]any)
+	return md
+}
+
 // Handler returns the HTTP handler implementing the memories endpoints.
 func (f *Goodmem) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

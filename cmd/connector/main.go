@@ -113,6 +113,9 @@ func runSyncOnce(args []string) error {
 		DryRun:            *dryRun,
 		MaxFileBytes:      int64(atoiOr(os.Getenv("SHAREPOINT_MAX_FILE_MB"), 100)) * 1024 * 1024,
 		MaxDeleteRatio:    floatOr(os.Getenv("GRAPH_MAX_DELETE_RATIO"), 0.5),
+		Enrich:            buildEnricher(cfg),
+		EnrichRequired:    cfg.EnrichRequired,
+		EnrichVersion:     cfg.EnrichVersion,
 	})
 	if err != nil {
 		return err
@@ -216,6 +219,9 @@ func runServe(args []string) error {
 		MaxFileBytes:      int64(atoiOr(os.Getenv("SHAREPOINT_MAX_FILE_MB"), 100)) * 1024 * 1024,
 		RetentionDays:     atoiOr(os.Getenv("SYNC_HISTORY_RETENTION_DAYS"), 90),
 		IgnoredFolderPath: strings.TrimSpace(cfg.SharePointFolderPath),
+		Enrich:            buildEnricher(cfg),
+		EnrichRequired:    cfg.EnrichRequired,
+		EnrichVersion:     cfg.EnrichVersion,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -414,6 +420,17 @@ func buildGoodmem(cfg *config.Config) (*goodmem.Client, error) {
 		return nil, fmt.Errorf("goodmem client: %w", err)
 	}
 	return gmc, nil
+}
+
+// buildEnricher returns the metadata-enrichment hook, or nil when ENRICH_URL is
+// unset — which is the default and means the engine behaves exactly as it did
+// before the seam existed (no buffering, no extra request, no extra metadata).
+func buildEnricher(cfg *config.Config) syncer.Enricher {
+	if strings.TrimSpace(cfg.EnrichURL) == "" {
+		return nil
+	}
+	timeout := time.Duration(atoiOr(os.Getenv("ENRICH_TIMEOUT_SECONDS"), 60)) * time.Second
+	return syncer.HTTPEnricher(cfg.EnrichURL, timeout)
 }
 
 func firstNonEmpty(vals ...string) string {
